@@ -1,0 +1,18 @@
+# Build directory
+build/
+
+# IDE files
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Compiled shaders (keep source, ignore compiled)
+*.spv
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# CMake
+CMakeUserPresets.json
