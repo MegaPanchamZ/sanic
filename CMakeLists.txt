@@ -50,6 +50,7 @@ set(SOURCES
     src/engine/tiny_obj_loader_impl.cpp
     src/engine/Mesh.cpp
     src/engine/Texture.cpp
+    src/engine/Skybox.cpp
 )
 
 # --- Executable ---

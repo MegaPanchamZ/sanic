@@ -8,6 +8,7 @@
 #include <vector>
 #include <optional>
 #include "GameObject.h"
+#include "Skybox.h"
 
 class Renderer {
 public:
@@ -77,10 +78,15 @@ private:
     struct UniformBufferObject {
         alignas(16) glm::mat4 view;
         alignas(16) glm::mat4 proj;
+        alignas(16) glm::vec4 lightPos;
+        alignas(16) glm::vec4 viewPos;
+        alignas(16) glm::vec4 lightColor;
+        alignas(16) glm::mat4 lightSpaceMatrix;
     };
 
     struct PushConstantData {
         glm::mat4 model;
+        glm::mat4 normalMatrix;
     };
     
     VkBuffer uniformBuffer;
@@ -92,6 +98,29 @@ private:
     
     std::vector<GameObject> gameObjects;
     
+    // Skybox
+    std::unique_ptr<Skybox> skybox;
+    VkDescriptorSetLayout skyboxDescriptorSetLayout;
+    VkPipelineLayout skyboxPipelineLayout;
+    VkPipeline skyboxPipeline;
+
+    void createSkyboxGraphicsPipeline();
+    void createSkyboxDescriptorSetLayout();
+    
+    // Shadow Mapping
+    VkRenderPass shadowRenderPass;
+    VkPipelineLayout shadowPipelineLayout;
+    VkPipeline shadowPipeline;
+    VkImage shadowImage;
+    VkDeviceMemory shadowImageMemory;
+    VkImageView shadowImageView;
+    VkSampler shadowSampler;
+    VkFramebuffer shadowFramebuffer;
+    
+    void createShadowRenderPass();
+    void createShadowGraphicsPipeline();
+    void createShadowResources();
+    
     void createDepthResources();
     void createUniformBuffers();
     void createDescriptorSetLayout();
@@ -100,7 +129,8 @@ private:
     void updateUniformBuffer(uint32_t currentImage);
 
     void loadGameObjects();
-    
+    std::shared_ptr<Mesh> createTerrainMesh();
+
     void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory);
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags);
     VkFormat findDepthFormat();
@@ -108,9 +138,7 @@ private:
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
     void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
-    
-    Camera camera;
-    Window& window;
+
     VkInstance instance;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device;
@@ -121,4 +149,7 @@ private:
     std::vector<VkImage> swapchainImages;
     VkFormat swapchainImageFormat;
     VkExtent2D swapchainExtent;
+    
+    Camera camera;
+    Window& window;
 };
