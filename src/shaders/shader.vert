@@ -1,7 +1,6 @@
 #version 450
 
 layout(binding = 0) uniform UniformBufferObject {
-    mat4 model;
     mat4 view;
     mat4 proj;
     vec4 lightPos;
@@ -11,6 +10,7 @@ layout(binding = 0) uniform UniformBufferObject {
 } ubo;
 
 layout(push_constant) uniform PushConstants {
+    mat4 model;
     mat4 normalMatrix;
 } push;
 
@@ -26,7 +26,7 @@ layout(location = 3) out vec3 fragPos;
 layout(location = 4) out vec4 fragPosLightSpace;
 
 void main() {
-    vec4 worldPos = ubo.model * vec4(inPosition, 1.0);
+    vec4 worldPos = push.model * vec4(inPosition, 1.0);
     gl_Position = ubo.proj * ubo.view * worldPos;
     fragColor = inColor;
     fragTexCoord = inTexCoord;

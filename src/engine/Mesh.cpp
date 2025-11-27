@@ -1,6 +1,8 @@
 #include "Mesh.h"
-#include <stdexcept>
 #include <cstring>
+#include <iostream>
+#include <cstdint>
+#include <stdexcept>
 
 Mesh::Mesh(VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
     : device(device) {

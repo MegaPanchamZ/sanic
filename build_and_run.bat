@@ -1,38 +1,6 @@
-#!/usr/bin/env bash
-# build_and_run.bat - Development build script for SanicEngine
-# This script configures, builds, compiles shaders, copies assets, and runs the engine.
-
-:: Ensure we are in the project root directory
-cd /d "%~dp0"
-
-:: Set Vulkan SDK path if not already set (adjust if needed)
-if not defined VULKAN_SDK (
-    set VULKAN_SDK=C:\Users\Debashish\scoop\apps\vulkan\current
-)
-
-:: Create and enter build directory
-if not exist build (
-    mkdir build
-)
-cd build
-
-:: Run CMake configuration (Ninja generator) and build
-cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug ..
-if %errorlevel% neq 0 (
-    echo CMake configuration failed.
-    exit /b %errorlevel%
-)
-
-cmake --build . --config Debug
-if %errorlevel% neq 0 (
-    echo Build failed.
-    exit /b %errorlevel%
-)
-
-:: Compile shaders to SPIR-V using glslc (provided by Vulkan SDK)
-#!/usr/bin/env bash
-# build_and_run.bat - Development build script for SanicEngine
-# This script configures, builds, compiles shaders, copies assets, and runs the engine.
+@echo off
+:: build_and_run.bat - Development build script for SanicEngine
+:: This script configures, builds, compiles shaders, copies assets, and runs the engine.
 
 :: Ensure we are in the project root directory
 cd /d "%~dp0"
@@ -79,6 +47,8 @@ if not exist %SHADER_OUT% (
 %GLSLC% %SHADER_SRC%\shader.frag -o %SHADER_OUT%\shader.frag.spv
 %GLSLC% %SHADER_SRC%\skybox.vert -o %SHADER_OUT%\skybox.vert.spv
 %GLSLC% %SHADER_SRC%\skybox.frag -o %SHADER_OUT%\skybox.frag.spv
+%GLSLC% %SHADER_SRC%\shadow.vert -o %SHADER_OUT%\shadow.vert.spv
+%GLSLC% %SHADER_SRC%\shadow.frag -o %SHADER_OUT%\shadow.frag.spv
 
 :: Copy assets (e.g., textures) to the build output directory
 set ASSETS_SRC=..\assets

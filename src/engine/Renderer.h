@@ -130,6 +130,7 @@ private:
 
     void loadGameObjects();
     std::shared_ptr<Mesh> createTerrainMesh();
+    std::shared_ptr<Mesh> createSphereMesh(int segments, int rings);
 
     void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory);
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags);

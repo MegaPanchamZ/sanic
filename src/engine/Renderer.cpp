@@ -5,6 +5,7 @@
 #include <vector>
 #include <fstream>
 #include <chrono>
+#include <cmath>
 #include <glm/gtc/matrix_transform.hpp>
 #include "../external/stb_image.h"
 #include "../external/tiny_obj_loader.h"
@@ -26,6 +27,11 @@ Renderer::Renderer(Window& window)
     createSkyboxDescriptorSetLayout();
     createGraphicsPipeline();
     createSkyboxGraphicsPipeline();
+    
+    createShadowResources();
+    createShadowRenderPass();
+    createShadowGraphicsPipeline();
+
     createCommandPool();
     createDepthResources();
     createFramebuffers();
@@ -83,14 +89,44 @@ void Renderer::drawFrame() {
     }
 
     vkResetCommandBuffer(commandBuffer, 0);
-    
+
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
     if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
         throw std::runtime_error("failed to begin recording command buffer!");
     }
+    
+    // 1. Shadow Pass
+    {
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = shadowRenderPass;
+        renderPassInfo.framebuffer = shadowFramebuffer;
+        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.extent = {2048, 2048};
 
+        VkClearValue clearValue = {1.0f, 0};
+        renderPassInfo.clearValueCount = 1;
+        renderPassInfo.pClearValues = &clearValue;
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
+
+        for (const auto& gameObject : gameObjects) {
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout, 0, 1, &gameObject.descriptorSet, 0, nullptr);
+
+            PushConstantData push{};
+            push.model = gameObject.transform;
+            vkCmdPushConstants(commandBuffer, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstantData), &push);
+
+            gameObject.mesh->bind(commandBuffer);
+            gameObject.mesh->draw(commandBuffer);
+        }
+        vkCmdEndRenderPass(commandBuffer);
+    }
+
+    // 2. Main Pass
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     renderPassInfo.renderPass = renderPass;
@@ -361,7 +397,14 @@ void Renderer::createDescriptorSetLayout() {
     normalLayoutBinding.pImmutableSamplers = nullptr;
     normalLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    std::array<VkDescriptorSetLayoutBinding, 4> bindings = {uboLayoutBinding, diffuseLayoutBinding, specularLayoutBinding, normalLayoutBinding};
+    VkDescriptorSetLayoutBinding shadowMapLayoutBinding{};
+    shadowMapLayoutBinding.binding = 4;
+    shadowMapLayoutBinding.descriptorCount = 1;
+    shadowMapLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    shadowMapLayoutBinding.pImmutableSamplers = nullptr;
+    shadowMapLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    std::array<VkDescriptorSetLayoutBinding, 5> bindings = {uboLayoutBinding, diffuseLayoutBinding, specularLayoutBinding, normalLayoutBinding, shadowMapLayoutBinding};
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -385,9 +428,9 @@ void Renderer::createUniformBuffers() {
 void Renderer::createDescriptorPool() {
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSizes[0].descriptorCount = 100;
+    poolSizes[0].descriptorCount = static_cast<uint32_t>(100);
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = 300; // 3 textures per object * 100 objects
+    poolSizes[1].descriptorCount = static_cast<uint32_t>(400); // Increased for shadow map
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -432,7 +475,12 @@ void Renderer::createDescriptorSet(GameObject& gameObject) {
     normalInfo.imageView = gameObject.material->normal->getImageView();
     normalInfo.sampler = gameObject.material->normal->getSampler();
 
-    std::array<VkWriteDescriptorSet, 4> descriptorWrites{};
+    VkDescriptorImageInfo shadowInfo{};
+    shadowInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    shadowInfo.imageView = shadowImageView;
+    shadowInfo.sampler = shadowSampler;
+
+    std::array<VkWriteDescriptorSet, 5> descriptorWrites{};
 
     descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     descriptorWrites[0].dstSet = gameObject.descriptorSet;
@@ -463,6 +511,14 @@ void Renderer::createDescriptorSet(GameObject& gameObject) {
     descriptorWrites[3].dstBinding = 3;
     descriptorWrites[3].dstArrayElement = 0;
     descriptorWrites[3].pImageInfo = &normalInfo;
+
+    descriptorWrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrites[4].dstSet = gameObject.descriptorSet;
+    descriptorWrites[4].dstBinding = 4;
+    descriptorWrites[4].dstArrayElement = 0;
+    descriptorWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptorWrites[4].descriptorCount = 1;
+    descriptorWrites[4].pImageInfo = &shadowInfo;
 
     vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 }
@@ -496,10 +552,27 @@ void Renderer::updateUniformBuffer(uint32_t currentImage) {
     ubo.view = camera.getViewMatrix();
     ubo.proj = camera.getProjectionMatrix();
     
-    // Light Data
-    ubo.lightPos = glm::vec4(2.0f, 2.0f, 2.0f, 1.0f);
+    // Light Data - positioned to illuminate the scene from above-right
+    ubo.lightPos = glm::vec4(10.0f, 15.0f, 10.0f, 1.0f);
     ubo.viewPos = glm::vec4(camera.getPosition(), 1.0f);
     ubo.lightColor = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+
+    // Shadow Matrix - orthographic projection for directional light shadows
+    float near_plane = 0.1f, far_plane = 60.0f;
+    
+    // Create light view matrix looking at origin
+    glm::vec3 lightPos = glm::vec3(ubo.lightPos);
+    glm::vec3 lightTarget = glm::vec3(0.0f, 0.0f, 0.0f);
+    glm::vec3 lightUp = glm::vec3(0.0f, 1.0f, 0.0f);
+    glm::mat4 lightView = glm::lookAt(lightPos, lightTarget, lightUp);
+    
+    // Orthographic projection for directional light - larger bounds for better coverage
+    glm::mat4 lightProjection = glm::ortho(-30.0f, 30.0f, -30.0f, 30.0f, near_plane, far_plane);
+    
+    // For Vulkan: flip Y in the projection matrix (same as camera projection)
+    lightProjection[1][1] *= -1;
+    
+    ubo.lightSpaceMatrix = lightProjection * lightView;
 
     memcpy(uniformBufferMapped, &ubo, sizeof(ubo));
 }
@@ -973,8 +1046,8 @@ Renderer::~Renderer() {
 }
 
 void Renderer::createGraphicsPipeline() {
-    auto vertShaderCode = readFile("../src/shaders/vert.spv");
-    auto fragShaderCode = readFile("../src/shaders/frag.spv");
+    auto vertShaderCode = readFile("shaders/shader.vert.spv");
+    auto fragShaderCode = readFile("shaders/shader.frag.spv");
 
     VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
     VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -1148,9 +1221,53 @@ std::shared_ptr<Mesh> Renderer::createTerrainMesh() {
     return std::make_shared<Mesh>(physicalDevice, device, commandPool, graphicsQueue, vertices, indices);
 }
 
+std::shared_ptr<Mesh> Renderer::createSphereMesh(int segments, int rings) {
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+    
+    const float PI = 3.14159265359f;
+    
+    // Generate vertices
+    for (int ring = 0; ring <= rings; ++ring) {
+        float phi = PI * float(ring) / float(rings);
+        for (int seg = 0; seg <= segments; ++seg) {
+            float theta = 2.0f * PI * float(seg) / float(segments);
+            
+            Vertex vertex{};
+            vertex.pos.x = sin(phi) * cos(theta);
+            vertex.pos.y = cos(phi);
+            vertex.pos.z = sin(phi) * sin(theta);
+            vertex.normal = vertex.pos; // Normal points outward from center
+            vertex.color = {1.0f, 1.0f, 1.0f};
+            vertex.texCoord = {float(seg) / float(segments), float(ring) / float(rings)};
+            vertices.push_back(vertex);
+        }
+    }
+    
+    // Generate indices
+    for (int ring = 0; ring < rings; ++ring) {
+        for (int seg = 0; seg < segments; ++seg) {
+            int current = ring * (segments + 1) + seg;
+            int next = current + segments + 1;
+            
+            indices.push_back(current);
+            indices.push_back(next);
+            indices.push_back(current + 1);
+            
+            indices.push_back(current + 1);
+            indices.push_back(next);
+            indices.push_back(next + 1);
+        }
+    }
+    
+    return std::make_shared<Mesh>(physicalDevice, device, commandPool, graphicsQueue, vertices, indices);
+}
 
 
 void Renderer::loadGameObjects() {
+    std::cout << "\n=== SANIC ENGINE FEATURE TEST SCENE ===" << std::endl;
+    std::cout << "Loading test scene to verify rendering features..." << std::endl;
+    
     // Load Terrain Textures
     auto terrainDiffuse = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/ground/diffuse/ghz_ground_sk1_earth05_dif.png");
     auto terrainSpecular = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/ground/specular/ghz_ground_sk1_earth05_pow.png");
@@ -1162,7 +1279,7 @@ void Renderer::loadGameObjects() {
     terrainMaterial->normal = terrainNormal;
     terrainMaterial->shininess = 32.0f;
 
-    // Load Rock Textures
+    // Load Rock Textures (high specular for reflection testing)
     auto rockDiffuse = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/rock/diffuse/ghz_rock_sk1_wall01_dif.png");
     auto rockSpecular = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/rock/specular/ghz_rock_sk1_wall01_pow.png");
     auto rockNormal = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/rock/normal/ghz_rock_sk1_wall01_nrm.png");
@@ -1172,6 +1289,14 @@ void Renderer::loadGameObjects() {
     rockMaterial->specular = rockSpecular;
     rockMaterial->normal = rockNormal;
     rockMaterial->shininess = 64.0f;
+
+    // Load alternate ground texture for variety
+    auto terrainDiffuse2 = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/ground/diffuse/ghz_ground_sk1_earth03_dif.png");
+    auto terrainMaterial2 = std::make_shared<Material>();
+    terrainMaterial2->diffuse = terrainDiffuse2;
+    terrainMaterial2->specular = terrainSpecular;
+    terrainMaterial2->normal = terrainNormal;
+    terrainMaterial2->shininess = 16.0f;
 
     // Load Cube Mesh
     tinyobj::attrib_t attrib;
@@ -1215,7 +1340,11 @@ void Renderer::loadGameObjects() {
 
     auto cubeMesh = std::make_shared<Mesh>(physicalDevice, device, commandPool, graphicsQueue, vertices, indices);
 
-    // Create Terrain
+    // ============================================================
+    // TEST SCENE LAYOUT - Designed to verify rendering features
+    // ============================================================
+    
+    // 1. TERRAIN - Tests: Diffuse, Normal mapping, receives shadows
     auto terrainMesh = createTerrainMesh();
     GameObject terrain;
     terrain.mesh = terrainMesh;
@@ -1223,24 +1352,104 @@ void Renderer::loadGameObjects() {
     terrain.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 0.0f));
     createDescriptorSet(terrain);
     gameObjects.push_back(terrain);
+    std::cout << "[TERRAIN] Ground plane - Tests: Normal mapping, shadow receiving" << std::endl;
 
-    // Create Cube 1
-    GameObject obj1;
-    obj1.mesh = cubeMesh;
-    obj1.material = rockMaterial;
-    obj1.transform = glm::translate(glm::mat4(1.0f), glm::vec3(-1.0f, 0.5f, 0.0f));
-    createDescriptorSet(obj1);
-    gameObjects.push_back(obj1);
+    // 2. SHADOW CASTER CUBE - Elevated to cast visible shadow on ground
+    GameObject shadowCaster;
+    shadowCaster.mesh = cubeMesh;
+    shadowCaster.material = rockMaterial;
+    shadowCaster.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.0f, 0.0f));
+    createDescriptorSet(shadowCaster);
+    gameObjects.push_back(shadowCaster);
+    std::cout << "[CUBE 1] Shadow caster at (0, 2, 0) - Tests: Shadow casting" << std::endl;
 
-    // Create Cube 2
-    GameObject obj2;
-    obj2.mesh = cubeMesh;
-    obj2.material = rockMaterial;
-    obj2.transform = glm::translate(glm::mat4(1.0f), glm::vec3(1.0f, 0.5f, 0.0f));
-    createDescriptorSet(obj2);
-    gameObjects.push_back(obj2);
+    // 3. SHADOW RECEIVER CUBE - On ground, should have shadow from cube above
+    GameObject shadowReceiver;
+    shadowReceiver.mesh = cubeMesh;
+    shadowReceiver.material = terrainMaterial2;
+    shadowReceiver.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.5f, 0.0f));
+    createDescriptorSet(shadowReceiver);
+    gameObjects.push_back(shadowReceiver);
+    std::cout << "[CUBE 2] Shadow receiver at (0, 0.5, 0) - Tests: Shadow receiving" << std::endl;
 
-    std::cout << "GameObjects loaded successfully!" << std::endl;
+    // 4. SPECULAR TEST CUBES - Arranged to show specular highlights
+    for (int i = 0; i < 3; i++) {
+        GameObject specCube;
+        specCube.mesh = cubeMesh;
+        specCube.material = rockMaterial;
+        float x = -3.0f + i * 3.0f;
+        specCube.transform = glm::translate(glm::mat4(1.0f), glm::vec3(x, 0.5f, -3.0f));
+        createDescriptorSet(specCube);
+        gameObjects.push_back(specCube);
+    }
+    std::cout << "[CUBES 3-5] Specular test row at z=-3 - Tests: Specular highlights" << std::endl;
+
+    // 5. ROTATED CUBES - Test normal mapping on angled surfaces
+    GameObject rotatedCube1;
+    rotatedCube1.mesh = cubeMesh;
+    rotatedCube1.material = rockMaterial;
+    glm::mat4 rot1 = glm::translate(glm::mat4(1.0f), glm::vec3(-4.0f, 0.5f, 0.0f));
+    rot1 = glm::rotate(rot1, glm::radians(45.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    rotatedCube1.transform = rot1;
+    createDescriptorSet(rotatedCube1);
+    gameObjects.push_back(rotatedCube1);
+    std::cout << "[CUBE 6] 45-degree rotated at (-4, 0.5, 0) - Tests: Normal mapping on angles" << std::endl;
+
+    GameObject rotatedCube2;
+    rotatedCube2.mesh = cubeMesh;
+    rotatedCube2.material = rockMaterial;
+    glm::mat4 rot2 = glm::translate(glm::mat4(1.0f), glm::vec3(4.0f, 0.5f, 0.0f));
+    rot2 = glm::rotate(rot2, glm::radians(30.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    rot2 = glm::rotate(rot2, glm::radians(30.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    rotatedCube2.transform = rot2;
+    createDescriptorSet(rotatedCube2);
+    gameObjects.push_back(rotatedCube2);
+    std::cout << "[CUBE 7] Multi-axis rotated at (4, 0.5, 0) - Tests: Complex normal transforms" << std::endl;
+
+    // 6. STACKED CUBES - Test self-shadowing
+    for (int i = 0; i < 3; i++) {
+        GameObject stackCube;
+        stackCube.mesh = cubeMesh;
+        stackCube.material = (i % 2 == 0) ? rockMaterial : terrainMaterial2;
+        stackCube.transform = glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 0.5f + i * 1.0f, 3.0f));
+        createDescriptorSet(stackCube);
+        gameObjects.push_back(stackCube);
+    }
+    std::cout << "[CUBES 8-10] Stacked tower at (3, y, 3) - Tests: Self-shadowing" << std::endl;
+
+    // 7. LIGHT INDICATOR SPHERE - Shows where the light source is positioned
+    auto sphereMesh = createSphereMesh(16, 12);
+    
+    // Create a bright white "emissive" material for the light indicator
+    // We'll reuse existing textures but the sphere will appear bright due to ambient
+    auto lightMaterial = std::make_shared<Material>();
+    lightMaterial->diffuse = terrainSpecular;  // Use specular map (white-ish)
+    lightMaterial->specular = terrainSpecular;
+    lightMaterial->normal = terrainNormal;
+    lightMaterial->shininess = 1.0f;
+    
+    GameObject lightIndicator;
+    lightIndicator.mesh = sphereMesh;
+    lightIndicator.material = lightMaterial;
+    // Position matches the light position in updateUniformBuffer: (10, 15, 10)
+    lightIndicator.transform = glm::scale(
+        glm::translate(glm::mat4(1.0f), glm::vec3(10.0f, 15.0f, 10.0f)),
+        glm::vec3(0.5f)  // Scale down to 0.5 radius
+    );
+    createDescriptorSet(lightIndicator);
+    gameObjects.push_back(lightIndicator);
+    std::cout << "[SPHERE] Light indicator at (10, 15, 10) - Shows light position" << std::endl;
+
+    std::cout << "\n=== FEATURE VERIFICATION GUIDE ===" << std::endl;
+    std::cout << "SHADOWS: Look for dark areas under/beside elevated cubes" << std::endl;
+    std::cout << "NORMALS: Surface details visible on cubes/terrain" << std::endl;
+    std::cout << "SPECULAR: Bright highlights when viewing at correct angle" << std::endl;
+    std::cout << "SKYBOX: Background should show cubemap (currently placeholder)" << std::endl;
+    std::cout << "DIFFUSE: Textures visible on all surfaces" << std::endl;
+    std::cout << "\nControls: WASD=move, Mouse=look, Shift=turbo, Space/Ctrl=up/down" << std::endl;
+    std::cout << "=================================\n" << std::endl;
+
+    std::cout << "GameObjects loaded: " << gameObjects.size() << " objects" << std::endl;
 }
 
 void Renderer::createSkyboxDescriptorSetLayout() {
@@ -1385,6 +1594,229 @@ void Renderer::createSkyboxGraphicsPipeline() {
 
     if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skyboxPipeline) != VK_SUCCESS) {
         throw std::runtime_error("failed to create skybox graphics pipeline!");
+    }
+
+    vkDestroyShaderModule(device, fragShaderModule, nullptr);
+    vkDestroyShaderModule(device, vertShaderModule, nullptr);
+}
+
+void Renderer::createShadowResources() {
+    VkFormat depthFormat = findDepthFormat();
+    // Shadow map resolution
+    uint32_t shadowWidth = 2048;
+    uint32_t shadowHeight = 2048;
+
+    createImage(shadowWidth, shadowHeight, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, shadowImage, shadowImageMemory);
+    shadowImageView = createImageView(shadowImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    samplerInfo.anisotropyEnable = VK_FALSE;
+    samplerInfo.maxAnisotropy = 1.0f;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+
+    if (vkCreateSampler(device, &samplerInfo, nullptr, &shadowSampler) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create shadow sampler!");
+    }
+}
+
+void Renderer::createShadowRenderPass() {
+    VkAttachmentDescription depthAttachment{};
+    depthAttachment.format = findDepthFormat();
+    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkAttachmentReference depthAttachmentRef{};
+    depthAttachmentRef.attachment = 0;
+    depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 0;
+    subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+    // Dependencies
+    std::array<VkSubpassDependency, 2> dependencies;
+
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+    VkRenderPassCreateInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    renderPassInfo.attachmentCount = 1;
+    renderPassInfo.pAttachments = &depthAttachment;
+    renderPassInfo.subpassCount = 1;
+    renderPassInfo.pSubpasses = &subpass;
+    renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
+    renderPassInfo.pDependencies = dependencies.data();
+
+    if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &shadowRenderPass) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create shadow render pass!");
+    }
+
+    // Create Framebuffer
+    VkFramebufferCreateInfo framebufferInfo{};
+    framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebufferInfo.renderPass = shadowRenderPass;
+    framebufferInfo.attachmentCount = 1;
+    framebufferInfo.pAttachments = &shadowImageView;
+    framebufferInfo.width = 2048;
+    framebufferInfo.height = 2048;
+    framebufferInfo.layers = 1;
+
+    if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &shadowFramebuffer) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create shadow framebuffer!");
+    }
+}
+
+void Renderer::createShadowGraphicsPipeline() {
+    auto vertShaderCode = readFile("shaders/shadow.vert.spv");
+    auto fragShaderCode = readFile("shaders/shadow.frag.spv");
+
+    VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+    VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+    vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertShaderStageInfo.module = vertShaderModule;
+    vertShaderStageInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+    fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragShaderStageInfo.module = fragShaderModule;
+    fragShaderStageInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    
+    auto bindingDescription = Vertex::getBindingDescription();
+    auto attributeDescriptions = Vertex::getAttributeDescriptions();
+
+    vertexInputInfo.vertexBindingDescriptionCount = 1;
+    vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+    vertexInputInfo.vertexAttributeDescriptionCount = 1; // Position
+    vertexInputInfo.pVertexAttributeDescriptions = &attributeDescriptions[0];
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = 2048.0f;
+    viewport.height = 2048.0f;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = {2048, 2048};
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT; // Cull front faces to reduce shadow acne on edges
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_TRUE;
+    rasterizer.depthBiasConstantFactor = 1.25f;  // Balanced bias
+    rasterizer.depthBiasSlopeFactor = 1.75f;     // Balanced slope factor
+    rasterizer.depthBiasClamp = 0.01f;           // Clamp to prevent excessive bias
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.logicOpEnable = VK_FALSE;
+    colorBlending.attachmentCount = 0; // No color attachment
+
+    // Push Constants
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(PushConstantData);
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout; // Reusing main descriptor set layout for UBO access
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &shadowPipelineLayout) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create shadow pipeline layout!");
+    }
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.layout = shadowPipelineLayout;
+    pipelineInfo.renderPass = shadowRenderPass;
+    pipelineInfo.subpass = 0;
+    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &shadowPipeline) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create shadow graphics pipeline!");
     }
 
     vkDestroyShaderModule(device, fragShaderModule, nullptr);
