@@ -34,6 +34,8 @@ public:
     VkDeviceAddress getMeshletBufferAddress() const { return meshletBufferAddress; }
     VkDeviceAddress getMeshletVerticesBufferAddress() const { return meshletVerticesBufferAddress; }
     VkDeviceAddress getMeshletTrianglesBufferAddress() const { return meshletTrianglesBufferAddress; }
+    VkDeviceAddress getIndexBufferAddress() const { return indexBufferAddress; }
+    uint32_t getIndexCount() const { return indexCount; }
 
 private:
     VkDevice device;
@@ -42,6 +44,7 @@ private:
     VkDeviceAddress vertexBufferAddress;
     VkBuffer indexBuffer;
     VkDeviceMemory indexBufferMemory;
+    VkDeviceAddress indexBufferAddress;
     uint32_t indexCount;
 
     // Meshlet Resources

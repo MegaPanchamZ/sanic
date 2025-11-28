@@ -80,6 +80,22 @@ Renderer::Renderer(Window& window)
     
     loadGameObjects();
     
+    // Initialize Acceleration Structure Builder
+    asBuilder = std::make_unique<AccelerationStructureBuilder>(device, physicalDevice, commandPool, graphicsQueue);
+    buildAccelerationStructures();
+
+    // RT Pipeline initialization  
+    if (rayTracingSupported) {
+        createRTDescriptorSetLayout();
+        createRTOutputImage();
+        rtPipeline = std::make_unique<RTPipeline>(device, physicalDevice, commandPool, graphicsQueue);
+        rtPipeline->createPipeline(rtDescriptorSetLayout);
+        createRTDescriptorSet();
+        std::cout << "=== RT PIPELINE INITIALIZED ===" << std::endl;
+    }
+
+    std::cout << "=== RAY TRACING ACCELERATION STRUCTURES BUILT ===" << std::endl;
+    
     std::cout << "=== DEFERRED RENDERING ENABLED ===" << std::endl;
     std::cout << "G-Buffer: Position, Normal, Albedo, PBR" << std::endl;
     std::cout << "CSM: " << CSM_CASCADE_COUNT << " cascades at " << SHADOW_MAP_SIZE << "x" << SHADOW_MAP_SIZE << std::endl;
@@ -136,147 +152,96 @@ void Renderer::drawFrame() {
     }
     
     // ========================================================================
-    // PASS 1: Cascaded Shadow Maps (render each cascade)
+    // RAY TRACING ONLY MODE (for testing)
+    // Comment out this block and uncomment the deferred passes below to restore
     // ========================================================================
-    for (uint32_t cascade = 0; cascade < CSM_CASCADE_COUNT; cascade++) {
-        VkRenderPassBeginInfo renderPassInfo{};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassInfo.renderPass = shadowRenderPass;
-        renderPassInfo.framebuffer = shadowCascadeFramebuffers[cascade];
-        renderPassInfo.renderArea.offset = {0, 0};
-        renderPassInfo.renderArea.extent = {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE};
+    if (rtPipeline) {
+        // Transition RT output image to GENERAL layout for ray tracing
+        VkImageMemoryBarrier rtBarrier{};
+        rtBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        rtBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        rtBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        rtBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        rtBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        rtBarrier.image = rtOutputImage;
+        rtBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        rtBarrier.subresourceRange.baseMipLevel = 0;
+        rtBarrier.subresourceRange.levelCount = 1;
+        rtBarrier.subresourceRange.baseArrayLayer = 0;
+        rtBarrier.subresourceRange.layerCount = 1;
+        rtBarrier.srcAccessMask = 0;
+        rtBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 
-        VkClearValue clearValue = {1.0f, 0};
-        renderPassInfo.clearValueCount = 1;
-        renderPassInfo.pClearValues = &clearValue;
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 0, nullptr, 0, nullptr, 1, &rtBarrier);
 
-        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
+        // Dispatch ray tracing
+        dispatchRayTracing(commandBuffer);
 
-        for (const auto& gameObject : gameObjects) {
-            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout, 0, 1, &gameObject.descriptorSet, 0, nullptr);
+        // Transition RT output to TRANSFER_SRC for blitting
+        rtBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        rtBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        rtBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        rtBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
-            PushConstantData push{};
-            push.model = gameObject.transform;
-            vkCmdPushConstants(commandBuffer, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstantData), &push);
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &rtBarrier);
 
-            gameObject.mesh->bind(commandBuffer);
-            gameObject.mesh->draw(commandBuffer);
-        }
-        vkCmdEndRenderPass(commandBuffer);
-    }
-    
-    // Transition shadow array to shader read after all cascades rendered
-    VkImageMemoryBarrier shadowBarrier{};
-    shadowBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    shadowBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-    shadowBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    shadowBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    shadowBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    shadowBarrier.image = shadowArrayImage;
-    shadowBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    shadowBarrier.subresourceRange.baseMipLevel = 0;
-    shadowBarrier.subresourceRange.levelCount = 1;
-    shadowBarrier.subresourceRange.baseArrayLayer = 0;
-    shadowBarrier.subresourceRange.layerCount = CSM_CASCADE_COUNT;
-    shadowBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    shadowBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    
-    vkCmdPipelineBarrier(commandBuffer,
-        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &shadowBarrier);
+        // Transition swapchain image to TRANSFER_DST
+        VkImageMemoryBarrier swapBarrier{};
+        swapBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        swapBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // Safe: don't care about previous contents
+        swapBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        swapBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        swapBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        swapBarrier.image = swapchainImages[imageIndex];
+        swapBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        swapBarrier.subresourceRange.baseMipLevel = 0;
+        swapBarrier.subresourceRange.levelCount = 1;
+        swapBarrier.subresourceRange.baseArrayLayer = 0;
+        swapBarrier.subresourceRange.layerCount = 1;
+        swapBarrier.srcAccessMask = 0;
+        swapBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
-    // ========================================================================
-    // PASS 2: Deferred Rendering (G-Buffer + Composition)
-    // ========================================================================
-    {
-        VkRenderPassBeginInfo renderPassInfo{};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassInfo.renderPass = deferredRenderPass;
-        renderPassInfo.framebuffer = deferredFramebuffers[imageIndex];
-        renderPassInfo.renderArea.offset = {0, 0};
-        renderPassInfo.renderArea.extent = swapchainExtent;
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &swapBarrier);
 
-        // Clear values: 4 G-Buffer + Depth + Swapchain
-        std::array<VkClearValue, 6> clearValues{};
-        clearValues[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};  // Position
-        clearValues[1].color = {{0.5f, 0.5f, 1.0f, 0.0f}};  // Normal (default up)
-        clearValues[2].color = {{0.0f, 0.0f, 0.0f, 0.0f}};  // Albedo
-        clearValues[3].color = {{0.5f, 1.0f, 0.0f, 0.0f}};  // PBR (roughness=0.5, ao=1)
-        clearValues[4].depthStencil = {1.0f, 0};            // Depth
-        clearValues[5].color = {{0.0f, 0.0f, 0.0f, 1.0f}};  // Swapchain
+        // Blit RT output to swapchain
+        VkImageBlit blitRegion{};
+        blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blitRegion.srcSubresource.mipLevel = 0;
+        blitRegion.srcSubresource.baseArrayLayer = 0;
+        blitRegion.srcSubresource.layerCount = 1;
+        blitRegion.srcOffsets[0] = {0, 0, 0};
+        blitRegion.srcOffsets[1] = {static_cast<int32_t>(swapchainExtent.width), static_cast<int32_t>(swapchainExtent.height), 1};
+        blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blitRegion.dstSubresource.mipLevel = 0;
+        blitRegion.dstSubresource.baseArrayLayer = 0;
+        blitRegion.dstSubresource.layerCount = 1;
+        blitRegion.dstOffsets[0] = {0, 0, 0};
+        blitRegion.dstOffsets[1] = {static_cast<int32_t>(swapchainExtent.width), static_cast<int32_t>(swapchainExtent.height), 1};
 
-        renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
-        renderPassInfo.pClearValues = clearValues.data();
+        vkCmdBlitImage(commandBuffer,
+            rtOutputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            swapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blitRegion, VK_FILTER_NEAREST);
 
-        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        // Transition swapchain back to PRESENT_SRC
+        swapBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        swapBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        swapBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        swapBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
 
-        // ------ Subpass 0: Geometry Pass (G-Buffer) ------
-        // Switch to Mesh Pipeline
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
-
-        for (const auto& gameObject : gameObjects) {
-            PushConstantData push{};
-            push.model = gameObject.transform;
-            push.normalMatrix = glm::transpose(glm::inverse(gameObject.transform));
-            push.meshletBufferAddress = gameObject.mesh->getMeshletBufferAddress();
-            push.meshletVerticesAddress = gameObject.mesh->getMeshletVerticesBufferAddress();
-            push.meshletTrianglesAddress = gameObject.mesh->getMeshletTrianglesBufferAddress();
-            push.vertexBufferAddress = gameObject.mesh->getVertexBufferAddress();
-            push.meshletCount = gameObject.mesh->getMeshletCount();
-            
-            vkCmdPushConstants(commandBuffer, meshPipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstantData), &push);
-            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout, 0, 1, &gameObject.descriptorSet, 0, nullptr);
-            
-            // Bind mesh resources (vertex/index buffers are not used by mesh shader, but we might need them later for mixed mode)
-            // For now, we just need the meshlet count to dispatch tasks
-            
-            // Dispatch Mesh Tasks
-            // Group count X = (meshlet count + 31) / 32
-            // Group count Y = 1
-            // Group count Z = 1
-            uint32_t groupCountX = (gameObject.mesh->getMeshletCount() + 31) / 32;
-            // std::cout << "Drawing object with " << gameObject.mesh->getMeshletCount() << " meshlets. GroupCountX: " << groupCountX << std::endl;
-            vkCmdDrawMeshTasksEXT(commandBuffer, groupCountX, 1, 1);
-        }
-
-        // ------ Subpass 1: Composition Pass (Lighting) ------
-        vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipeline);
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipelineLayout, 0, 1, &compositionDescriptorSet, 0, nullptr);
-        
-        // Draw fullscreen triangle (3 vertices, no vertex buffer needed)
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-
-        vkCmdEndRenderPass(commandBuffer);
-    }
-    
-    // ========================================================================
-    // PASS 3: Skybox (rendered after deferred, uses forward render pass)
-    // ========================================================================
-    {
-        VkRenderPassBeginInfo renderPassInfo{};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassInfo.renderPass = renderPass;
-        renderPassInfo.framebuffer = swapchainFramebuffers[imageIndex];
-        renderPassInfo.renderArea.offset = {0, 0};
-        renderPassInfo.renderArea.extent = swapchainExtent;
-
-        // Don't clear - we want to preserve the deferred output
-        std::array<VkClearValue, 2> clearValues{};
-        clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-        clearValues[1].depthStencil = {1.0f, 0};
-        renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
-        renderPassInfo.pClearValues = clearValues.data();
-
-        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        
-        // Draw Skybox
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
-        skybox->draw(commandBuffer, skyboxPipelineLayout);
-
-        vkCmdEndRenderPass(commandBuffer);
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &swapBarrier);
     }
 
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
@@ -1466,19 +1431,6 @@ Renderer::~Renderer() {
 
     vkDestroyDescriptorPool(device, descriptorPool, nullptr);
     vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-
-    vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
-    vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
-    vkDestroyFence(device, inFlightFence, nullptr);
-
-    vkDestroyCommandPool(device, commandPool, nullptr);
-
-    DescriptorManager::getInstance().cleanup();
-
-    vkDestroyDevice(device, nullptr);
-
-    vkDestroySurfaceKHR(instance, surface, nullptr);
-    vkDestroyInstance(instance, nullptr);
 }
 
 void Renderer::createGraphicsPipeline() {
@@ -3228,3 +3180,133 @@ void Renderer::createCompositionDescriptorSets() {
     std::cout << "Composition Descriptor Set created" << std::endl;
 }
 
+
+void Renderer::buildAccelerationStructures() {
+    if (!rayTracingSupported) {
+        std::cout << "Ray Tracing not supported, skipping AS building." << std::endl;
+        return;
+    }
+
+    // Build BLAS per gameObject (1:1, wasteful but functional for demo)
+    std::vector<std::shared_ptr<Mesh>> allMeshes;
+    for (const auto& obj : gameObjects) {
+        allMeshes.push_back(obj.mesh);
+    }
+    
+    std::cout << "Building BLAS for " << allMeshes.size() << " meshes..." << std::endl;
+    blasList = asBuilder->buildBLAS(allMeshes);
+
+    std::cout << "Building TLAS for " << gameObjects.size() << " instances..." << std::endl;
+    tlas = asBuilder->buildTLAS(gameObjects, blasList);
+
+    std::cout << "Acceleration Structures built: " << blasList.size() << " BLAS, 1 TLAS" << std::endl;
+}
+
+
+// ============================================================================
+// RT Pipeline Integration  
+// ============================================================================
+void Renderer::createRTDescriptorSetLayout() {
+    std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
+    
+    // Binding 0: TLAS
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    
+    // Binding 1: Output Image
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    
+    // Binding 2: UBO
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
+    
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &rtDescriptorSetLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create RT descriptor set layout!");
+    }
+    std::cout << "RT Descriptor Set Layout created" << std::endl;
+}
+
+void Renderer::createRTOutputImage() {
+    createImage(swapchainExtent.width, swapchainExtent.height, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_TILING_OPTIMAL, 
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                rtOutputImage, rtOutputImageMemory);
+    
+    rtOutputImageView = createImageView(rtOutputImage, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
+    std::cout << "RT Output Image created" << std::endl;
+}
+
+void Renderer::createRTDescriptorSet() {
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = descriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &rtDescriptorSetLayout;
+    
+    if (vkAllocateDescriptorSets(device, &allocInfo, &rtDescriptorSet) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate RT descriptor set!");
+    }
+    
+    // Update descriptor set
+    std::vector<VkWriteDescriptorSet> writes(3);
+    
+    // TLAS
+    VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
+    asInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asInfo.accelerationStructureCount = 1;
+    asInfo.pAccelerationStructures = &tlas.handle;
+    
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].pNext = &asInfo;
+    writes[0].dstSet = rtDescriptorSet;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    
+    // Output Image
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageView = rtOutputImageView;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = rtDescriptorSet;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[1].pImageInfo = &imageInfo;
+    
+    // UBO
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = uniformBuffer;
+    bufferInfo.offset = 0;
+    bufferInfo.range = sizeof(UniformBufferObject);
+    
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = rtDescriptorSet;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[2].pBufferInfo = &bufferInfo;
+    
+    vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    std::cout << "RT Descriptor Set created and updated" << std::endl;
+}
+
+void Renderer::dispatchRayTracing(VkCommandBuffer commandBuffer) {
+    if (!rtPipeline) return;
+    
+    rtPipeline->trace(commandBuffer, rtDescriptorSet, swapchainExtent.width, swapchainExtent.height);
+}

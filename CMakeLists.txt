@@ -101,6 +101,8 @@ set(SOURCES
     src/engine/Skybox.cpp
     src/engine/ShaderCompiler.cpp
     src/engine/DescriptorManager.cpp
+    src/engine/AccelerationStructureBuilder.cpp
+    src/engine/RTPipeline.cpp
 )
 
 # --- Executable ---

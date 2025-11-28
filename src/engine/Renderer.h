@@ -9,6 +9,8 @@
 #include <optional>
 #include "GameObject.h"
 #include "Skybox.h"
+#include "AccelerationStructureBuilder.h"
+#include "RTPipeline.h"
 
 class Renderer {
 public:
@@ -212,6 +214,26 @@ private:
         uint32_t maxRayRecursionDepth = 0;
         uint32_t maxShaderGroupStride = 0;
     } rtProperties;
+    
+    std::unique_ptr<AccelerationStructureBuilder> asBuilder;
+    std::vector<AccelerationStructure> blasList;
+    AccelerationStructure tlas;
+    void buildAccelerationStructures();
+    
+    // RT Pipeline
+    std::unique_ptr<RTPipeline> rtPipeline;
+    VkDescriptorSetLayout rtDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSet rtDescriptorSet = VK_NULL_HANDLE;
+    
+    // RT Output Image
+    VkImage rtOutputImage = VK_NULL_HANDLE;
+    VkDeviceMemory rtOutputImageMemory = VK_NULL_HANDLE;
+    VkImageView rtOutputImageView = VK_NULL_HANDLE;
+    
+    void createRTDescriptorSetLayout();
+    void createRTOutputImage();
+    void createRTDescriptorSet();
+    void dispatchRayTracing(VkCommandBuffer commandBuffer);
     
     // Cascaded Shadow Map helpers
     void calculateCascadeSplits(float nearClip, float farClip, float lambda = 0.5f);

@@ -55,6 +55,26 @@ int main() {
         writeShader("shaders/composition.frag.spv", compositionFragSpirv);
         std::cout << "Nanite shaders compiled successfully." << std::endl;
 
+        // Compile Ray Tracing Shaders
+        std::cout << "Compiling Ray Tracing shaders..." << std::endl;
+        auto rgenSource = readShaderSource("../shaders/simple.rgen");
+        auto rmissSource = readShaderSource("../shaders/simple.rmiss");
+        auto rchitSource = readShaderSource("../shaders/simple.rchit");
+
+        auto rgenSpirv = compiler.compileShader(rgenSource, ShaderKind::RayGen, "simple.rgen");
+        auto rmissSpirv = compiler.compileShader(rmissSource, ShaderKind::Miss, "simple.rmiss");
+        auto rchitSpirv = compiler.compileShader(rchitSource, ShaderKind::ClosestHit, "simple.rchit");
+
+        if (rgenSpirv.empty() || rmissSpirv.empty() || rchitSpirv.empty()) {
+            std::cerr << "Failed to compile RT shaders" << std::endl;
+            return -1;
+        }
+
+        writeShader("shaders/simple.rgen.spv", rgenSpirv);
+        writeShader("shaders/simple.rmiss.spv", rmissSpirv);
+        writeShader("shaders/simple.rchit.spv", rchitSpirv);
+        std::cout << "Ray Tracing shaders compiled successfully." << std::endl;
+
         Window window(800, 600, "Sanic Engine");
         Renderer renderer(window);
         

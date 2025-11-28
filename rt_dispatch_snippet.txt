@@ -1,0 +1,87 @@
+// Add this code before the deferred rendering pass (around line 85 in drawFrame)
+
+    // ========================================================================
+    // RAY TRACING PASS (before deferred)
+    // ========================================================================
+    if (rtPipeline) {
+        // Transition RT output image to GENERAL layout
+        VkImageMemoryBarrier rtBarrier{};
+        rtBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        rtBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        rtBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        rtBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        rtBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        rtBarrier.image = rtOutputImage;
+        rtBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        rtBarrier.subresourceRange.baseMipLevel = 0;
+        rtBarrier.subresourceRange.levelCount = 1;
+        rtBarrier.subresourceRange.baseArrayLayer = 0;
+        rtBarrier.subresourceRange.layerCount = 1;
+        rtBarrier.srcAccessMask = 0;
+        rtBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 0, nullptr, 0, nullptr, 1, &rtBarrier);
+        
+        // Dispatch ray tracing
+        dispatchRayTracing(commandBuffer);
+        
+        // Transition RT output to transfer source for copying
+        rtBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        rtBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        rtBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        rtBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &rtBarrier);
+        
+        // Transition swapchain image to transfer destination
+        VkImageMemoryBarrier swapBarrier{};
+        swapBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        swapBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        swapBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        swapBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        swapBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        swapBarrier.image = swapchainImages[imageIndex];
+        swapBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        swapBarrier.subresourceRange.baseMipLevel = 0;
+        swapBarrier.subresourceRange.levelCount = 1;
+        swapBarrier.subresourceRange.baseArrayLayer = 0;
+        swapBarrier.subresourceRange.layerCount = 1;
+        swapBarrier.srcAccessMask = 0;
+        swapBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &swapBarrier);
+        
+        // Copy RT output to swapchain
+        VkImageCopy copyRegion{};
+        copyRegion.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copyRegion.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copyRegion.srcOffset = {0, 0, 0};
+        copyRegion.dstOffset = {0, 0, 0};
+        copyRegion.extent = {swapchainExtent.width, swapchainExtent.height, 1};
+        
+        vkCmdCopyImage(commandBuffer, 
+            rtOutputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            swapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &copyRegion);
+        
+        // Transition swapchain for presentation
+        swapBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        swapBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        swapBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        swapBarrier.dstAccessMask = 0;
+        
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &swapBarrier);
+    } else {
+        // ORIGINAL CODE: Deferred rendering when RT not available

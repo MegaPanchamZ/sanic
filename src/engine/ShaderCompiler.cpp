@@ -32,6 +32,11 @@ std::vector<uint32_t> ShaderCompiler::compileShader(const std::string& source, S
         case ShaderKind::TessEvaluation: stageFlag = "tesseval"; break;
         case ShaderKind::Task: stageFlag = "task"; break;
         case ShaderKind::Mesh: stageFlag = "mesh"; break;
+        case ShaderKind::RayGen: stageFlag = "rgen"; break;
+        case ShaderKind::Miss: stageFlag = "rmiss"; break;
+        case ShaderKind::ClosestHit: stageFlag = "rchit"; break;
+        case ShaderKind::AnyHit: stageFlag = "rahit"; break;
+        case ShaderKind::Intersection: stageFlag = "rint"; break;
     }
 
     std::string inFile = getTempFileName(".glsl");

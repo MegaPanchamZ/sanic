@@ -12,7 +12,12 @@ enum class ShaderKind {
     TessControl,
     TessEvaluation,
     Task,
-    Mesh
+    Mesh,
+    RayGen,
+    Miss,
+    ClosestHit,
+    AnyHit,
+    Intersection
 };
 
 class ShaderCompiler {
