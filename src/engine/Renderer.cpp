@@ -404,7 +404,15 @@ void Renderer::createDescriptorSetLayout() {
     shadowMapLayoutBinding.pImmutableSamplers = nullptr;
     shadowMapLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    std::array<VkDescriptorSetLayoutBinding, 5> bindings = {uboLayoutBinding, diffuseLayoutBinding, specularLayoutBinding, normalLayoutBinding, shadowMapLayoutBinding};
+    // Environment map (skybox cubemap) for IBL
+    VkDescriptorSetLayoutBinding envMapLayoutBinding{};
+    envMapLayoutBinding.binding = 5;
+    envMapLayoutBinding.descriptorCount = 1;
+    envMapLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    envMapLayoutBinding.pImmutableSamplers = nullptr;
+    envMapLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    std::array<VkDescriptorSetLayoutBinding, 6> bindings = {uboLayoutBinding, diffuseLayoutBinding, specularLayoutBinding, normalLayoutBinding, shadowMapLayoutBinding, envMapLayoutBinding};
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -430,7 +438,7 @@ void Renderer::createDescriptorPool() {
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = static_cast<uint32_t>(100);
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = static_cast<uint32_t>(400); // Increased for shadow map
+    poolSizes[1].descriptorCount = static_cast<uint32_t>(600); // Increased for env map
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -480,7 +488,13 @@ void Renderer::createDescriptorSet(GameObject& gameObject) {
     shadowInfo.imageView = shadowImageView;
     shadowInfo.sampler = shadowSampler;
 
-    std::array<VkWriteDescriptorSet, 5> descriptorWrites{};
+    // Environment map (skybox cubemap) for IBL
+    VkDescriptorImageInfo envMapInfo{};
+    envMapInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    envMapInfo.imageView = skybox->getImageView();
+    envMapInfo.sampler = skybox->getSampler();
+
+    std::array<VkWriteDescriptorSet, 6> descriptorWrites{};
 
     descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     descriptorWrites[0].dstSet = gameObject.descriptorSet;
@@ -510,6 +524,8 @@ void Renderer::createDescriptorSet(GameObject& gameObject) {
     descriptorWrites[3].dstSet = gameObject.descriptorSet;
     descriptorWrites[3].dstBinding = 3;
     descriptorWrites[3].dstArrayElement = 0;
+    descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptorWrites[3].descriptorCount = 1;
     descriptorWrites[3].pImageInfo = &normalInfo;
 
     descriptorWrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -519,6 +535,14 @@ void Renderer::createDescriptorSet(GameObject& gameObject) {
     descriptorWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     descriptorWrites[4].descriptorCount = 1;
     descriptorWrites[4].pImageInfo = &shadowInfo;
+
+    descriptorWrites[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrites[5].dstSet = gameObject.descriptorSet;
+    descriptorWrites[5].dstBinding = 5;
+    descriptorWrites[5].dstArrayElement = 0;
+    descriptorWrites[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptorWrites[5].descriptorCount = 1;
+    descriptorWrites[5].pImageInfo = &envMapInfo;
 
     vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 }
@@ -552,24 +576,28 @@ void Renderer::updateUniformBuffer(uint32_t currentImage) {
     ubo.view = camera.getViewMatrix();
     ubo.proj = camera.getProjectionMatrix();
     
-    // Light Data - positioned to illuminate the scene from above-right
-    ubo.lightPos = glm::vec4(10.0f, 15.0f, 10.0f, 1.0f);
     ubo.viewPos = glm::vec4(camera.getPosition(), 1.0f);
-    ubo.lightColor = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+    ubo.lightColor = glm::vec4(1.0f, 0.98f, 0.95f, 1.0f);  // Warm white
 
-    // Shadow Matrix - orthographic projection for directional light shadows
-    float near_plane = 0.1f, far_plane = 60.0f;
+    // Fixed directional light (sun) - position is for shadow calculation
+    // Light comes from upper-right-front direction
+    glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, 2.0f, 1.0f));
+    glm::vec3 lightPos = lightDir * 50.0f;  // Position "far away" in light direction
     
-    // Create light view matrix looking at origin
-    glm::vec3 lightPos = glm::vec3(ubo.lightPos);
-    glm::vec3 lightTarget = glm::vec3(0.0f, 0.0f, 0.0f);
-    glm::vec3 lightUp = glm::vec3(0.0f, 1.0f, 0.0f);
-    glm::mat4 lightView = glm::lookAt(lightPos, lightTarget, lightUp);
+    ubo.lightPos = glm::vec4(lightPos, 0.0f);  // w=0 indicates directional light
     
-    // Orthographic projection for directional light - larger bounds for better coverage
-    glm::mat4 lightProjection = glm::ortho(-30.0f, 30.0f, -30.0f, 30.0f, near_plane, far_plane);
+    // Shadow Matrix - orthographic projection for directional light
+    float near_plane = 0.1f, far_plane = 100.0f;
     
-    // For Vulkan: flip Y in the projection matrix (same as camera projection)
+    // Center shadow frustum on world origin for scene coverage
+    glm::vec3 shadowCenter = glm::vec3(0.0f, 0.0f, 0.0f);
+    glm::vec3 shadowLightPos = shadowCenter + lightDir * 40.0f;
+    glm::mat4 lightView = glm::lookAt(shadowLightPos, shadowCenter, glm::vec3(0.0f, 1.0f, 0.0f));
+    
+    // Orthographic projection sized for scene
+    glm::mat4 lightProjection = glm::ortho(-25.0f, 25.0f, -25.0f, 25.0f, near_plane, far_plane);
+    
+    // For Vulkan: flip Y in the projection matrix
     lightProjection[1][1] *= -1;
     
     ubo.lightSpaceMatrix = lightProjection * lightView;
@@ -1417,28 +1445,59 @@ void Renderer::loadGameObjects() {
     }
     std::cout << "[CUBES 8-10] Stacked tower at (3, y, 3) - Tests: Self-shadowing" << std::endl;
 
-    // 7. LIGHT INDICATOR SPHERE - Shows where the light source is positioned
+    // 7. LIGHT INDICATOR SPHERE - Shows where the light source direction points from
     auto sphereMesh = createSphereMesh(16, 12);
     
-    // Create a bright white "emissive" material for the light indicator
-    // We'll reuse existing textures but the sphere will appear bright due to ambient
+    // Create a bright yellow material for the light indicator
     auto lightMaterial = std::make_shared<Material>();
     lightMaterial->diffuse = terrainSpecular;  // Use specular map (white-ish)
     lightMaterial->specular = terrainSpecular;
     lightMaterial->normal = terrainNormal;
     lightMaterial->shininess = 1.0f;
     
+    // Light direction is (1, 2, 1) normalized, position at 15 units out
+    glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, 2.0f, 1.0f));
+    glm::vec3 lightIndicatorPos = lightDir * 15.0f;  // Visible in scene
+    
     GameObject lightIndicator;
     lightIndicator.mesh = sphereMesh;
     lightIndicator.material = lightMaterial;
-    // Position matches the light position in updateUniformBuffer: (10, 15, 10)
     lightIndicator.transform = glm::scale(
-        glm::translate(glm::mat4(1.0f), glm::vec3(10.0f, 15.0f, 10.0f)),
-        glm::vec3(0.5f)  // Scale down to 0.5 radius
+        glm::translate(glm::mat4(1.0f), lightIndicatorPos),
+        glm::vec3(1.0f)  // 1 unit radius
     );
     createDescriptorSet(lightIndicator);
     gameObjects.push_back(lightIndicator);
-    std::cout << "[SPHERE] Light indicator at (10, 15, 10) - Shows light position" << std::endl;
+    std::cout << "[SPHERE] Light indicator at " << lightIndicatorPos.x << ", " 
+              << lightIndicatorPos.y << ", " << lightIndicatorPos.z << " - Shows light direction" << std::endl;
+
+    // 8. MIRROR CUBE - Tests: Perfect reflections (metallic=1, roughness=0)
+    // Create a "mirror" material - we'll use a white diffuse and set shader to treat it as mirror
+    // The shader will detect this by checking for very high specular (white texture)
+    auto mirrorMaterial = std::make_shared<Material>();
+    mirrorMaterial->diffuse = terrainSpecular;   // White-ish base
+    mirrorMaterial->specular = terrainSpecular;  // High specular signals mirror
+    mirrorMaterial->normal = terrainNormal;      // Flat normal
+    mirrorMaterial->shininess = 1000.0f;         // Very high shininess = mirror flag
+    
+    // Create a flat plane for the mirror
+    std::vector<Vertex> mirrorVerts = {
+        {{-2.0f, 0.0f, -0.05f}, {1,1,1}, {0,0}, {0,0,1}},
+        {{ 2.0f, 0.0f, -0.05f}, {1,1,1}, {1,0}, {0,0,1}},
+        {{ 2.0f, 3.0f, -0.05f}, {1,1,1}, {1,1}, {0,0,1}},
+        {{-2.0f, 3.0f, -0.05f}, {1,1,1}, {0,1}, {0,0,1}},
+    };
+    std::vector<uint32_t> mirrorInds = {0, 1, 2, 2, 3, 0};
+    auto mirrorMesh = std::make_shared<Mesh>(physicalDevice, device, commandPool, graphicsQueue, mirrorVerts, mirrorInds);
+    
+    GameObject mirror;
+    mirror.mesh = mirrorMesh;
+    mirror.material = mirrorMaterial;
+    // Position mirror standing upright behind the scene
+    mirror.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -8.0f));
+    createDescriptorSet(mirror);
+    gameObjects.push_back(mirror);
+    std::cout << "[MIRROR] Reflective plane at (0, 0, -8) - Tests: IBL reflections" << std::endl;
 
     std::cout << "\n=== FEATURE VERIFICATION GUIDE ===" << std::endl;
     std::cout << "SHADOWS: Look for dark areas under/beside elevated cubes" << std::endl;
@@ -1446,6 +1505,7 @@ void Renderer::loadGameObjects() {
     std::cout << "SPECULAR: Bright highlights when viewing at correct angle" << std::endl;
     std::cout << "SKYBOX: Background should show cubemap (currently placeholder)" << std::endl;
     std::cout << "DIFFUSE: Textures visible on all surfaces" << std::endl;
+    std::cout << "MIRROR: Should reflect the skybox clearly" << std::endl;
     std::cout << "\nControls: WASD=move, Mouse=look, Shift=turbo, Space/Ctrl=up/down" << std::endl;
     std::cout << "=================================\n" << std::endl;
 
@@ -1760,9 +1820,11 @@ void Renderer::createShadowGraphicsPipeline() {
     rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT; // Cull front faces to reduce shadow acne on edges
     rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterizer.depthBiasEnable = VK_TRUE;
-    rasterizer.depthBiasConstantFactor = 1.25f;  // Balanced bias
-    rasterizer.depthBiasSlopeFactor = 1.75f;     // Balanced slope factor
-    rasterizer.depthBiasClamp = 0.01f;           // Clamp to prevent excessive bias
+    // Since we cull front faces (rendering back faces), the geometry itself acts as a bias.
+    // We only need a tiny bit to handle grazing angles.
+    rasterizer.depthBiasConstantFactor = 1.25f;
+    rasterizer.depthBiasSlopeFactor = 1.75f;
+    rasterizer.depthBiasClamp = 0.0f;
 
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;

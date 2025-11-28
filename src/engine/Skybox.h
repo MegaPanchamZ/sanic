@@ -17,6 +17,8 @@ public:
     void createDescriptorSet(VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout, VkBuffer uniformBuffer, VkDeviceSize range);
     
     VkDescriptorSet getDescriptorSet() const { return descriptorSet; }
+    VkImageView getImageView() const { return textureImageView; }
+    VkSampler getSampler() const { return textureSampler; }
 
 private:
     VkPhysicalDevice physicalDevice;
