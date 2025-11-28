@@ -22,28 +22,58 @@ Renderer::Renderer(Window& window)
     createLogicalDevice();
     createSwapchain();
     createImageViews();
-    createRenderPass();
-    createDescriptorSetLayout();
-    createSkyboxDescriptorSetLayout();
-    createGraphicsPipeline();
-    createSkyboxGraphicsPipeline();
     
+    // Forward render pass (needed for skybox after deferred)
+    createRenderPass();
+    
+    // Shadow pass setup (CSM) - render pass first, then resources that need it
     createShadowResources();
     createShadowRenderPass();
+    createCSMResources();  // Needs shadowRenderPass for framebuffers
     createShadowGraphicsPipeline();
-
+    
     createCommandPool();
     createDepthResources();
+    
+    // Forward framebuffers (for skybox pass)
     createFramebuffers();
+    
+    // G-Buffer resources (must be after depth resources)
+    createGBufferResources();
+    
+    // Deferred render pass with 2 subpasses
+    createDeferredRenderPass();
+    createDeferredFramebuffers();
+    
+    // Descriptor layouts for deferred rendering
+    createDescriptorSetLayout();      // For forward/legacy compatibility
+    createSkyboxDescriptorSetLayout();
+    createGBufferDescriptorSetLayout();
+    createCompositionDescriptorSetLayout();
+    
+    // Pipelines
+    createGraphicsPipeline();         // Keep forward pipeline for fallback
+    createSkyboxGraphicsPipeline();
+    createGBufferPipeline();
+    createCompositionPipeline();
+    
     createUniformBuffers();
     createDescriptorPool();
     createCommandBuffers();
     
     skybox = std::make_unique<Skybox>(physicalDevice, device, commandPool, graphicsQueue);
     skybox->createDescriptorSet(descriptorPool, skyboxDescriptorSetLayout, uniformBuffer, sizeof(UniformBufferObject));
+    
+    // Create composition descriptor set (needs skybox to be initialized first)
+    createCompositionDescriptorSets();
 
     createSyncObjects();
     loadGameObjects();
+    
+    std::cout << "=== DEFERRED RENDERING ENABLED ===" << std::endl;
+    std::cout << "G-Buffer: Position, Normal, Albedo, PBR" << std::endl;
+    std::cout << "CSM: " << CSM_CASCADE_COUNT << " cascades at " << SHADOW_MAP_SIZE << "x" << SHADOW_MAP_SIZE << std::endl;
+    std::cout << "==================================" << std::endl;
 }
 
 void Renderer::createSyncObjects() {
@@ -83,9 +113,7 @@ void Renderer::drawFrame() {
         lastLogTime = currentTime;
         glm::vec3 camPos = camera.getPosition();
         std::cout << "Camera Pos: " << camPos.x << ", " << camPos.y << ", " << camPos.z << std::endl;
-        std::cout << "Drawing " << gameObjects.size() << " objects." << std::endl;
-        
-        // Log Matrices - Removed due to scope issue
+        std::cout << "Drawing " << gameObjects.size() << " objects (Deferred)." << std::endl;
     }
 
     vkResetCommandBuffer(commandBuffer, 0);
@@ -97,14 +125,16 @@ void Renderer::drawFrame() {
         throw std::runtime_error("failed to begin recording command buffer!");
     }
     
-    // 1. Shadow Pass
-    {
+    // ========================================================================
+    // PASS 1: Cascaded Shadow Maps (render each cascade)
+    // ========================================================================
+    for (uint32_t cascade = 0; cascade < CSM_CASCADE_COUNT; cascade++) {
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = shadowRenderPass;
-        renderPassInfo.framebuffer = shadowFramebuffer;
+        renderPassInfo.framebuffer = shadowCascadeFramebuffers[cascade];
         renderPassInfo.renderArea.offset = {0, 0};
-        renderPassInfo.renderArea.extent = {2048, 2048};
+        renderPassInfo.renderArea.extent = {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE};
 
         VkClearValue clearValue = {1.0f, 0};
         renderPassInfo.clearValueCount = 1;
@@ -125,44 +155,105 @@ void Renderer::drawFrame() {
         }
         vkCmdEndRenderPass(commandBuffer);
     }
+    
+    // Transition shadow array to shader read after all cascades rendered
+    VkImageMemoryBarrier shadowBarrier{};
+    shadowBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    shadowBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    shadowBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    shadowBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    shadowBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    shadowBarrier.image = shadowArrayImage;
+    shadowBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    shadowBarrier.subresourceRange.baseMipLevel = 0;
+    shadowBarrier.subresourceRange.levelCount = 1;
+    shadowBarrier.subresourceRange.baseArrayLayer = 0;
+    shadowBarrier.subresourceRange.layerCount = CSM_CASCADE_COUNT;
+    shadowBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    shadowBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    
+    vkCmdPipelineBarrier(commandBuffer,
+        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &shadowBarrier);
 
-    // 2. Main Pass
-    VkRenderPassBeginInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassInfo.renderPass = renderPass;
-    renderPassInfo.framebuffer = swapchainFramebuffers[imageIndex];
-    renderPassInfo.renderArea.offset = {0, 0};
-    renderPassInfo.renderArea.extent = swapchainExtent;
+    // ========================================================================
+    // PASS 2: Deferred Rendering (G-Buffer + Composition)
+    // ========================================================================
+    {
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = deferredRenderPass;
+        renderPassInfo.framebuffer = deferredFramebuffers[imageIndex];
+        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.extent = swapchainExtent;
 
-    std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-    clearValues[1].depthStencil = {1.0f, 0};
+        // Clear values: 4 G-Buffer + Depth + Swapchain
+        std::array<VkClearValue, 6> clearValues{};
+        clearValues[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};  // Position
+        clearValues[1].color = {{0.5f, 0.5f, 1.0f, 0.0f}};  // Normal (default up)
+        clearValues[2].color = {{0.0f, 0.0f, 0.0f, 0.0f}};  // Albedo
+        clearValues[3].color = {{0.5f, 1.0f, 0.0f, 0.0f}};  // PBR (roughness=0.5, ao=1)
+        clearValues[4].depthStencil = {1.0f, 0};            // Depth
+        clearValues[5].color = {{0.0f, 0.0f, 0.0f, 1.0f}};  // Swapchain
 
-    renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
-    renderPassInfo.pClearValues = clearValues.data();
+        renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        renderPassInfo.pClearValues = clearValues.data();
 
-    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        // ------ Subpass 0: Geometry Pass (G-Buffer) ------
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gBufferPipeline);
 
-    for (const auto& gameObject : gameObjects) {
-        PushConstantData push{};
-        push.model = gameObject.transform;
-        push.normalMatrix = glm::transpose(glm::inverse(gameObject.transform));
+        for (const auto& gameObject : gameObjects) {
+            PushConstantData push{};
+            push.model = gameObject.transform;
+            push.normalMatrix = glm::transpose(glm::inverse(gameObject.transform));
+            
+            vkCmdPushConstants(commandBuffer, gBufferPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstantData), &push);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gBufferPipelineLayout, 0, 1, &gameObject.descriptorSet, 0, nullptr);
+            
+            gameObject.mesh->bind(commandBuffer);
+            gameObject.mesh->draw(commandBuffer);
+        }
+
+        // ------ Subpass 1: Composition Pass (Lighting) ------
+        vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipelineLayout, 0, 1, &compositionDescriptorSet, 0, nullptr);
         
-        vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstantData), &push);
+        // Draw fullscreen triangle (3 vertices, no vertex buffer needed)
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &gameObject.descriptorSet, 0, nullptr);
-        
-        gameObject.mesh->bind(commandBuffer);
-        gameObject.mesh->draw(commandBuffer);
+        vkCmdEndRenderPass(commandBuffer);
     }
+    
+    // ========================================================================
+    // PASS 3: Skybox (rendered after deferred, uses forward render pass)
+    // ========================================================================
+    {
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = renderPass;
+        renderPassInfo.framebuffer = swapchainFramebuffers[imageIndex];
+        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.extent = swapchainExtent;
 
-    // Draw Skybox
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
-    skybox->draw(commandBuffer, skyboxPipelineLayout);
+        // Don't clear - we want to preserve the deferred output
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+        clearValues[1].depthStencil = {1.0f, 0};
+        renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        renderPassInfo.pClearValues = clearValues.data();
 
-    vkCmdEndRenderPass(commandBuffer);
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        
+        // Draw Skybox
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
+        skybox->draw(commandBuffer, skyboxPipelineLayout);
+
+        vkCmdEndRenderPass(commandBuffer);
+    }
 
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
         throw std::runtime_error("failed to record command buffer!");
@@ -434,17 +525,19 @@ void Renderer::createUniformBuffers() {
 }
 
 void Renderer::createDescriptorPool() {
-    std::array<VkDescriptorPoolSize, 2> poolSizes{};
+    std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = static_cast<uint32_t>(100);
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = static_cast<uint32_t>(600); // Increased for env map
+    poolSizes[1].descriptorCount = static_cast<uint32_t>(600); // Increased for env map + CSM
+    poolSizes[2].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+    poolSizes[2].descriptorCount = static_cast<uint32_t>(10);  // For G-Buffer input attachments
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
-    poolInfo.maxSets = 100;
+    poolInfo.maxSets = 110; // Increased for deferred descriptor sets
 
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
         throw std::runtime_error("failed to create descriptor pool!");
@@ -873,7 +966,7 @@ void Renderer::createSwapchain() {
 }
 
 void Renderer::createRenderPass() {
-    std::cout << "Creating Render Pass..." << std::endl;
+    std::cout << "Creating Render Pass (for skybox after deferred)..." << std::endl;
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format = swapchainImageFormat;
     // ...
@@ -882,19 +975,21 @@ void Renderer::createRenderPass() {
     depthAttachment.format = findDepthFormat();
     std::cout << "Depth format found: " << depthAttachment.format << std::endl;
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    // LOAD_OP_LOAD to preserve deferred composition output
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;  // Coming from deferred
     colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    // Load depth to use for skybox depth testing
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkAttachmentReference colorAttachmentRef{};
@@ -1152,6 +1247,58 @@ VkShaderModule Renderer::createShaderModule(const std::vector<char>& code) {
 Renderer::~Renderer() {
     vkDeviceWaitIdle(device);
 
+    // Cleanup G-Buffer resources
+    vkDestroyImageView(device, gBufferPosition.view, nullptr);
+    vkDestroyImage(device, gBufferPosition.image, nullptr);
+    vkFreeMemory(device, gBufferPosition.memory, nullptr);
+    
+    vkDestroyImageView(device, gBufferNormal.view, nullptr);
+    vkDestroyImage(device, gBufferNormal.image, nullptr);
+    vkFreeMemory(device, gBufferNormal.memory, nullptr);
+    
+    vkDestroyImageView(device, gBufferAlbedo.view, nullptr);
+    vkDestroyImage(device, gBufferAlbedo.image, nullptr);
+    vkFreeMemory(device, gBufferAlbedo.memory, nullptr);
+    
+    vkDestroyImageView(device, gBufferPBR.view, nullptr);
+    vkDestroyImage(device, gBufferPBR.image, nullptr);
+    vkFreeMemory(device, gBufferPBR.memory, nullptr);
+    
+    // Cleanup deferred framebuffers
+    for (auto framebuffer : deferredFramebuffers) {
+        vkDestroyFramebuffer(device, framebuffer, nullptr);
+    }
+    
+    // Cleanup deferred pipelines
+    vkDestroyPipeline(device, gBufferPipeline, nullptr);
+    vkDestroyPipelineLayout(device, gBufferPipelineLayout, nullptr);
+    vkDestroyPipeline(device, compositionPipeline, nullptr);
+    vkDestroyPipelineLayout(device, compositionPipelineLayout, nullptr);
+    vkDestroyRenderPass(device, deferredRenderPass, nullptr);
+    
+    // Cleanup deferred descriptor layouts
+    vkDestroyDescriptorSetLayout(device, gBufferDescriptorSetLayout, nullptr);
+    vkDestroyDescriptorSetLayout(device, compositionDescriptorSetLayout, nullptr);
+    
+    // Cleanup CSM resources
+    vkDestroyImageView(device, shadowArrayImageView, nullptr);
+    for (uint32_t i = 0; i < CSM_CASCADE_COUNT; i++) {
+        vkDestroyImageView(device, shadowCascadeViews[i], nullptr);
+        vkDestroyFramebuffer(device, shadowCascadeFramebuffers[i], nullptr);
+    }
+    vkDestroyImage(device, shadowArrayImage, nullptr);
+    vkFreeMemory(device, shadowArrayImageMemory, nullptr);
+    
+    // Cleanup shadow resources
+    vkDestroyImageView(device, shadowImageView, nullptr);
+    vkDestroyImage(device, shadowImage, nullptr);
+    vkFreeMemory(device, shadowImageMemory, nullptr);
+    vkDestroySampler(device, shadowSampler, nullptr);
+    vkDestroyFramebuffer(device, shadowFramebuffer, nullptr);
+    vkDestroyPipeline(device, shadowPipeline, nullptr);
+    vkDestroyPipelineLayout(device, shadowPipelineLayout, nullptr);
+    vkDestroyRenderPass(device, shadowRenderPass, nullptr);
+
     vkDestroyImageView(device, depthImageView, nullptr);
     vkDestroyImage(device, depthImage, nullptr);
     vkFreeMemory(device, depthImageMemory, nullptr);
@@ -1163,6 +1310,12 @@ Renderer::~Renderer() {
     vkDestroyPipeline(device, graphicsPipeline, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyRenderPass(device, renderPass, nullptr);
+    
+    // Cleanup skybox
+    vkDestroyPipeline(device, skyboxPipeline, nullptr);
+    vkDestroyPipelineLayout(device, skyboxPipelineLayout, nullptr);
+    vkDestroyDescriptorSetLayout(device, skyboxDescriptorSetLayout, nullptr);
+    skybox.reset();
 
     for (auto imageView : swapchainImageViews) {
         vkDestroyImageView(device, imageView, nullptr);
