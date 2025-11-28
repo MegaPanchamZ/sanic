@@ -676,6 +676,7 @@ void Renderer::updateUniformBuffer(uint32_t currentImage) {
     // ========================================================================
     // AAA STANDARD: Directional Light Setup
     // ========================================================================
+    // lightDir points FROM the scene TOWARD the light source (sun direction)
     glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, 2.0f, 1.0f));
     ubo.lightPos = glm::vec4(lightDir, 0.0f);  // w=0 indicates directional light
     
@@ -693,6 +694,9 @@ void Renderer::updateUniformBuffer(uint32_t currentImage) {
     // Get camera matrices
     glm::mat4 camView = camera.getViewMatrix();
     glm::mat4 invCamView = glm::inverse(camView);
+    
+    // Light direction for shadow casting (FROM light TO scene = negative of lightDir)
+    glm::vec3 lightDirNorm = -lightDir;
     
     // Cascade boundaries in view space
     float cascadeEnds[5] = {
@@ -744,48 +748,50 @@ void Renderer::updateUniformBuffer(uint32_t currentImage) {
         }
         frustumCenter /= 8.0f;
         
-        // Create light view matrix looking at frustum center
+        // Calculate the radius of a sphere containing the frustum
+        float radius = 0.0f;
+        for (int j = 0; j < 8; j++) {
+            float dist = glm::length(frustumCornersWS[j] - frustumCenter);
+            radius = std::max(radius, dist);
+        }
+        radius = std::ceil(radius * 16.0f) / 16.0f;  // Round up for stability
+        
+        // Create light view matrix - light looks at frustum center from light direction
+        glm::vec3 lightPos = frustumCenter - lightDirNorm * radius;
         glm::mat4 lightView = glm::lookAt(
-            frustumCenter + lightDir * 50.0f,  // Position light far away in light direction
+            lightPos,
             frustumCenter,
             glm::vec3(0.0f, 1.0f, 0.0f)
         );
         
-        // Find bounding box in light space
-        float minX = std::numeric_limits<float>::max();
-        float maxX = std::numeric_limits<float>::lowest();
-        float minY = std::numeric_limits<float>::max();
-        float maxY = std::numeric_limits<float>::lowest();
-        float minZ = std::numeric_limits<float>::max();
-        float maxZ = std::numeric_limits<float>::lowest();
+        // Use a square ortho projection based on frustum sphere radius
+        float orthoSize = radius;
         
-        for (int j = 0; j < 8; j++) {
-            glm::vec4 cornerLS = lightView * glm::vec4(frustumCornersWS[j], 1.0f);
-            minX = std::min(minX, cornerLS.x);
-            maxX = std::max(maxX, cornerLS.x);
-            minY = std::min(minY, cornerLS.y);
-            maxY = std::max(maxY, cornerLS.y);
-            minZ = std::min(minZ, cornerLS.z);
-            maxZ = std::max(maxZ, cornerLS.z);
-        }
+        // Stabilize shadow map - snap to texel grid to reduce shimmer
+        float worldUnitsPerTexel = (orthoSize * 2.0f) / 2048.0f;
         
-        // Expand Z range to catch shadow casters behind the camera
-        float zMult = 10.0f;
-        if (minZ < 0) minZ *= zMult;
-        else minZ /= zMult;
-        if (maxZ < 0) maxZ /= zMult;
-        else maxZ *= zMult;
+        // Snap the frustum center in light space to texel boundaries
+        glm::vec4 shadowOrigin = lightView * glm::vec4(frustumCenter, 1.0f);
+        shadowOrigin.x = floor(shadowOrigin.x / worldUnitsPerTexel) * worldUnitsPerTexel;
+        shadowOrigin.y = floor(shadowOrigin.y / worldUnitsPerTexel) * worldUnitsPerTexel;
+        glm::vec4 snappedOriginWS = glm::inverse(lightView) * shadowOrigin;
+        glm::vec3 snappedCenter = glm::vec3(snappedOriginWS);
         
-        // Stabilize shadow map to reduce edge shimmer when camera moves
-        // Snap to texel grid
-        float worldUnitsPerTexel = std::max(maxX - minX, maxY - minY) / 2048.0f;
-        minX = floor(minX / worldUnitsPerTexel) * worldUnitsPerTexel;
-        maxX = floor(maxX / worldUnitsPerTexel) * worldUnitsPerTexel;
-        minY = floor(minY / worldUnitsPerTexel) * worldUnitsPerTexel;
-        maxY = floor(maxY / worldUnitsPerTexel) * worldUnitsPerTexel;
+        // Recalculate light view with snapped center
+        lightPos = snappedCenter - lightDirNorm * radius;
+        lightView = glm::lookAt(
+            lightPos,
+            snappedCenter,
+            glm::vec3(0.0f, 1.0f, 0.0f)
+        );
         
-        // Create orthographic projection for this cascade
-        glm::mat4 lightProj = glm::ortho(minX, maxX, minY, maxY, -maxZ, -minZ);
+        // Create orthographic projection
+        // Near/far extend behind and in front to catch all shadow casters
+        glm::mat4 lightProj = glm::ortho(
+            -orthoSize, orthoSize,
+            -orthoSize, orthoSize,
+            0.0f, radius * 2.0f
+        );
         lightProj[1][1] *= -1;  // Vulkan Y-flip
         
         ubo.cascadeViewProj[i] = lightProj * lightView;
