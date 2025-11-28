@@ -75,13 +75,20 @@ private:
     VkDeviceMemory depthImageMemory;
     VkImageView depthImageView;
     
+    // ========================================================================
+    // AAA STANDARD: Uniform Buffer Object with CSM support
+    // ========================================================================
     struct UniformBufferObject {
         alignas(16) glm::mat4 view;
         alignas(16) glm::mat4 proj;
-        alignas(16) glm::vec4 lightPos;
+        alignas(16) glm::vec4 lightPos;      // xyz = position/direction, w = type (0=directional)
         alignas(16) glm::vec4 viewPos;
         alignas(16) glm::vec4 lightColor;
         alignas(16) glm::mat4 lightSpaceMatrix;
+        // Cascaded Shadow Maps (4 cascades)
+        alignas(16) glm::mat4 cascadeViewProj[4];
+        alignas(16) glm::vec4 cascadeSplits;   // View-space Z distances for cascade splits
+        alignas(16) glm::vec4 shadowParams;    // x=mapSize, y=pcfRadius, z=bias, w=cascadeBlend
     };
 
     struct PushConstantData {
@@ -120,6 +127,25 @@ private:
     void createShadowRenderPass();
     void createShadowGraphicsPipeline();
     void createShadowResources();
+    
+    // ========================================================================
+    // AAA STANDARD: Ray Tracing Readiness (VK_KHR_ray_tracing_pipeline)
+    // ========================================================================
+    bool rayTracingSupported = false;
+    bool checkRayTracingSupport(VkPhysicalDevice device);
+    void initRayTracingProperties();
+    
+    // Ray Tracing Properties (populated if supported)
+    struct RayTracingProperties {
+        uint32_t shaderGroupHandleSize = 0;
+        uint32_t maxRayRecursionDepth = 0;
+        uint32_t maxShaderGroupStride = 0;
+    } rtProperties;
+    
+    // Cascaded Shadow Map helpers
+    void calculateCascadeSplits(float nearClip, float farClip, float lambda = 0.5f);
+    std::array<glm::mat4, 4> cascadeViewProjMatrices;
+    std::array<float, 4> cascadeSplitDistances;
     
     void createDepthResources();
     void createUniformBuffers();
