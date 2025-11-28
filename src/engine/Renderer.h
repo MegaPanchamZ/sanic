@@ -14,6 +14,7 @@
 #include "VulkanContext.h"
 #include "ShadowRenderer.h"
 #include "DeferredRenderer.h"
+#include "DDGISystem.h"
 
 class Renderer {
 public:
@@ -157,6 +158,12 @@ private:
     void createRTOutputImage();
     void createRTDescriptorSet();
     void dispatchRayTracing(VkCommandBuffer commandBuffer);
+    
+    // ========================================================================
+    // DDGI (Dynamic Diffuse Global Illumination)
+    // ========================================================================
+    std::unique_ptr<DDGISystem> ddgiSystem;
+    bool ddgiEnabled = true;
     
     void createDepthResources();
     void createUniformBuffers();

@@ -3,6 +3,7 @@
 // ============================================================================
 // COMPOSITION FRAGMENT SHADER - Deferred Lighting Pass
 // Reads G-Buffer via input attachments and applies full PBR lighting
+// Now with DDGI (Dynamic Diffuse Global Illumination) support!
 // ============================================================================
 
 // G-Buffer Input Attachments (from geometry subpass)
@@ -27,6 +28,25 @@ layout(binding = 4) uniform UniformBufferObject {
 layout(binding = 5) uniform sampler2DArray shadowMapArray;  // CSM cascade array
 layout(binding = 6) uniform samplerCube environmentMap;
 
+// ============================================================================
+// DDGI Resources
+// ============================================================================
+layout(binding = 7) uniform DDGIUniformBlock {
+    ivec4 probeCount;           // xyz = count, w = total probes
+    vec4 probeSpacing;          // xyz = spacing, w = 1/maxDistance
+    vec4 gridOrigin;            // xyz = origin, w = hysteresis
+    ivec4 irradianceTextureSize; // xy = texture size, zw = probe size
+    ivec4 depthTextureSize;      // xy = texture size, zw = probe size
+    vec4 rayParams;             // x = raysPerProbe, y = maxDistance, z = normalBias, w = viewBias
+    mat4 randomRotation;
+} ddgi;
+
+layout(binding = 8) uniform sampler2D ddgiIrradiance;
+layout(binding = 9) uniform sampler2D ddgiDepth;
+
+// DDGI enable flag (set via push constant or uniform)
+const bool DDGI_ENABLED = true;
+
 layout(location = 0) in vec2 fragTexCoord;
 layout(location = 0) out vec4 outColor;
 
@@ -39,6 +59,141 @@ const float INV_PI = 0.31830988618;
 const float MAX_REFLECTION_LOD = 4.0;
 const vec3 DIELECTRIC_F0 = vec3(0.04);
 const float MULTI_SCATTER_COMPENSATION = 1.0;
+
+// ============================================================================
+// DDGI SAMPLING FUNCTIONS (Octahedral Mapping)
+// ============================================================================
+
+// Convert 3D direction to octahedral UV [0,1]^2
+vec2 octEncode(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    
+    if (n.y < 0.0) {
+        vec2 wrapped = (1.0 - abs(n.zx)) * sign(n.xz);
+        n.x = wrapped.x;
+        n.z = wrapped.y;
+    }
+    
+    return n.xz * 0.5 + 0.5;
+}
+
+// Get grid-space coordinates from world position
+vec3 worldToGrid(vec3 worldPos) {
+    return (worldPos - ddgi.gridOrigin.xyz) / ddgi.probeSpacing.xyz;
+}
+
+// Clamp grid coordinates to valid probe range
+ivec3 clampProbeCoord(ivec3 coord) {
+    return clamp(coord, ivec3(0), ddgi.probeCount.xyz - 1);
+}
+
+// Get world position of a probe
+vec3 getProbeWorldPos(ivec3 coord) {
+    return ddgi.gridOrigin.xyz + vec3(coord) * ddgi.probeSpacing.xyz;
+}
+
+// Get texture coordinates for sampling a probe's irradiance
+vec2 getProbeIrradianceUV(ivec3 probeCoord, vec3 direction) {
+    int probeX = probeCoord.x + probeCoord.z * ddgi.probeCount.x;
+    int probeY = probeCoord.y;
+    
+    vec2 octUV = octEncode(direction);
+    
+    int probeSize = ddgi.irradianceTextureSize.z;
+    int innerSize = probeSize - 2;
+    
+    vec2 texelCoord = vec2(1.0) + octUV * float(innerSize);
+    vec2 probeCorner = vec2(probeX * probeSize, probeY * probeSize);
+    vec2 atlasSize = vec2(ddgi.irradianceTextureSize.xy);
+    
+    return (probeCorner + texelCoord) / atlasSize;
+}
+
+// Get texture coordinates for sampling a probe's depth
+vec2 getProbeDepthUV(ivec3 probeCoord, vec3 direction) {
+    int probeX = probeCoord.x + probeCoord.z * ddgi.probeCount.x;
+    int probeY = probeCoord.y;
+    
+    vec2 octUV = octEncode(direction);
+    
+    int probeSize = ddgi.depthTextureSize.z;
+    int innerSize = probeSize - 2;
+    
+    vec2 texelCoord = vec2(1.0) + octUV * float(innerSize);
+    vec2 probeCorner = vec2(probeX * probeSize, probeY * probeSize);
+    vec2 atlasSize = vec2(ddgi.depthTextureSize.xy);
+    
+    return (probeCorner + texelCoord) / atlasSize;
+}
+
+// Calculate visibility weight for a probe based on depth (Chebyshev)
+float getProbeVisibility(vec3 worldPos, ivec3 probeCoord) {
+    vec3 probePos = getProbeWorldPos(probeCoord);
+    vec3 toProbe = probePos - worldPos;
+    float distToProbe = length(toProbe);
+    vec3 dirToProbe = toProbe / max(distToProbe, 0.001);
+    
+    vec2 depthUV = getProbeDepthUV(probeCoord, -dirToProbe);
+    vec2 depthData = texture(ddgiDepth, depthUV).rg;
+    float meanDepth = depthData.r;
+    float variance = depthData.g;
+    
+    float chebyshev = 1.0;
+    if (distToProbe > meanDepth) {
+        float diff = distToProbe - meanDepth;
+        chebyshev = variance / (variance + diff * diff);
+        chebyshev = max(chebyshev * chebyshev * chebyshev, 0.0);
+    }
+    
+    return chebyshev;
+}
+
+// Main DDGI sampling function - trilinear interpolation over 8 probes
+vec3 sampleDDGI(vec3 worldPos, vec3 normal) {
+    float normalBias = ddgi.rayParams.z;
+    vec3 biasedPos = worldPos + normal * normalBias;
+    
+    vec3 gridPos = worldToGrid(biasedPos);
+    ivec3 baseProbe = ivec3(floor(gridPos));
+    vec3 alpha = fract(gridPos);
+    
+    vec3 irradiance = vec3(0.0);
+    float weightSum = 0.0;
+    
+    // Trilinear interpolation over 8 surrounding probes
+    for (int i = 0; i < 8; i++) {
+        ivec3 offset = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        ivec3 probeCoord = clampProbeCoord(baseProbe + offset);
+        
+        vec3 triWeight = mix(1.0 - alpha, alpha, vec3(offset));
+        float weight = triWeight.x * triWeight.y * triWeight.z;
+        
+        vec3 probePos = getProbeWorldPos(probeCoord);
+        vec3 toProbe = probePos - worldPos;
+        vec3 dirToProbe = normalize(toProbe);
+        
+        // Backface weight reduction
+        float normalWeight = max(0.0001, dot(dirToProbe, normal) * 0.5 + 0.5);
+        normalWeight = normalWeight * normalWeight;
+        
+        float visibility = getProbeVisibility(worldPos, probeCoord);
+        float combinedWeight = weight * normalWeight * visibility;
+        
+        if (combinedWeight > 0.0001) {
+            vec2 irradianceUV = getProbeIrradianceUV(probeCoord, normal);
+            vec3 probeIrradiance = texture(ddgiIrradiance, irradianceUV).rgb;
+            
+            irradiance += probeIrradiance * combinedWeight;
+            weightSum += combinedWeight;
+        }
+    }
+    
+    if (weightSum > 0.0001) {
+        irradiance /= weightSum;
+    }
+    
+    return irradiance;
+}
 
 // ============================================================================
 // PBR FUNCTIONS
@@ -295,10 +450,33 @@ void main() {
                             albedo, metallic, roughness, F0, ao);
     
     // ========================================================================
-    // IMAGE-BASED LIGHTING
+    // GLOBAL ILLUMINATION (DDGI or fallback to IBL)
     // ========================================================================
-    vec3 ambient = calculateIBL(N, V, R, albedo, metallic, roughness, F0, ao);
-    ambient *= 0.5;
+    vec3 ambient = vec3(0.0);
+    vec3 indirectDiffuse = vec3(0.0);
+    vec3 indirectSpecular = vec3(0.0);
+    
+    if (DDGI_ENABLED && ddgi.probeCount.w > 0) {
+        // Sample DDGI for indirect diffuse
+        indirectDiffuse = sampleDDGI(fragPos, N);
+        
+        // Apply diffuse BRDF (energy conservation)
+        float NdotV = max(dot(N, V), 0.0);
+        vec3 F = FresnelSchlickRoughness(NdotV, F0, roughness);
+        vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+        indirectDiffuse *= kD * albedo;
+        
+        // Still use IBL for specular reflections (DDGI is diffuse-only)
+        vec3 prefilteredColor = textureLod(environmentMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+        vec2 envBRDF = IntegrateBRDF_Approx(NdotV, roughness);
+        indirectSpecular = prefilteredColor * (F * envBRDF.x + envBRDF.y);
+        
+        ambient = (indirectDiffuse + indirectSpecular) * ao;
+    } else {
+        // Fallback to pure IBL
+        ambient = calculateIBL(N, V, R, albedo, metallic, roughness, F0, ao);
+        ambient *= 0.5;
+    }
     
     // ========================================================================
     // CASCADED SHADOW MAPPING

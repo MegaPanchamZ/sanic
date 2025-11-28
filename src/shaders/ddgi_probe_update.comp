@@ -1,0 +1,237 @@
+#version 460
+
+// ============================================================================
+// DDGI PROBE UPDATE COMPUTE SHADER
+// Blends ray-traced radiance into irradiance and depth probe textures
+// Uses octahedral mapping for spherical data storage
+// ============================================================================
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// DDGI Uniforms
+layout(set = 0, binding = 1) uniform DDGIUniforms {
+    ivec4 probeCount;           // xyz = count, w = total probes
+    vec4 probeSpacing;          // xyz = spacing, w = 1/maxDistance
+    vec4 gridOrigin;            // xyz = origin, w = hysteresis
+    ivec4 irradianceTextureSize; // xy = texture size, zw = probe size
+    ivec4 depthTextureSize;      // xy = texture size, zw = probe size
+    vec4 rayParams;             // x = raysPerProbe, y = maxDistance, z = normalBias, w = viewBias
+    mat4 randomRotation;
+} ddgi;
+
+// Input radiance buffer
+layout(set = 0, binding = 2) buffer RadianceBuffer {
+    vec4 radianceData[];
+};
+
+// Output irradiance texture
+layout(set = 0, binding = 3, rgba16f) uniform image2D irradianceImage;
+
+// Output depth texture  
+layout(set = 0, binding = 4, rg16f) uniform image2D depthImage;
+
+// Constants
+const float PI = 3.14159265359;
+const float TWO_PI = 6.28318530718;
+const float EPSILON = 1e-6;
+
+// ============================================================================
+// OCTAHEDRAL MAPPING
+// Maps 3D direction to 2D texture coordinate
+// ============================================================================
+
+// Convert octahedral UV [0,1]^2 to 3D direction
+vec3 octDecode(vec2 uv) {
+    // Map from [0,1] to [-1,1]
+    vec2 f = uv * 2.0 - 1.0;
+    
+    // Octahedron unwrapping
+    vec3 n = vec3(f.x, 1.0 - abs(f.x) - abs(f.y), f.y);
+    
+    float t = max(-n.y, 0.0);
+    n.x += (n.x >= 0.0) ? -t : t;
+    n.z += (n.z >= 0.0) ? -t : t;
+    
+    return normalize(n);
+}
+
+// Convert 3D direction to octahedral UV [0,1]^2
+vec2 octEncode(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    
+    if (n.y < 0.0) {
+        vec2 wrapped = (1.0 - abs(n.zx)) * sign(n.xz);
+        n.x = wrapped.x;
+        n.z = wrapped.y;
+    }
+    
+    return n.xz * 0.5 + 0.5;
+}
+
+// ============================================================================
+// FIBONACCI SPHERE - Must match ray tracing shader
+// ============================================================================
+vec3 fibonacciSphereDirection(int rayIndex, int totalRays) {
+    float goldenRatio = (1.0 + sqrt(5.0)) * 0.5;
+    float i = float(rayIndex) + 0.5;
+    
+    float phi = acos(1.0 - 2.0 * i / float(totalRays));
+    float theta = TWO_PI * i / goldenRatio;
+    
+    float sinPhi = sin(phi);
+    return vec3(
+        sinPhi * cos(theta),
+        sinPhi * sin(theta),
+        cos(phi)
+    );
+}
+
+// ============================================================================
+// PROBE INDEX UTILITIES
+// ============================================================================
+
+// Convert 2D workgroup ID to probe index
+int getProbeIndex(ivec2 probeCoord2D) {
+    // probeCoord2D.x = x + z * probeCount.x
+    // probeCoord2D.y = y
+    int x = probeCoord2D.x % ddgi.probeCount.x;
+    int z = probeCoord2D.x / ddgi.probeCount.x;
+    int y = probeCoord2D.y;
+    
+    return y * (ddgi.probeCount.x * ddgi.probeCount.z) + z * ddgi.probeCount.x + x;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+void main() {
+    // Each workgroup handles one probe
+    // Local invocation handles one texel within the probe's octahedral map
+    ivec2 probeCoord2D = ivec2(gl_WorkGroupID.xy);
+    ivec2 texelCoord = ivec2(gl_LocalInvocationID.xy);
+    
+    int probeIndex = getProbeIndex(probeCoord2D);
+    
+    // Bounds check
+    if (probeIndex >= ddgi.probeCount.w) {
+        return;
+    }
+    
+    int raysPerProbe = int(ddgi.rayParams.x);
+    float maxDistance = ddgi.rayParams.y;
+    float hysteresis = ddgi.gridOrigin.w;
+    
+    // Calculate texel center in [0,1] octahedral space (accounting for border)
+    int probeSize = ddgi.irradianceTextureSize.z;
+    int innerSize = probeSize - 2;  // Subtract 1-pixel border on each side
+    
+    // Skip border texels for main computation
+    bool isBorder = texelCoord.x == 0 || texelCoord.x == probeSize - 1 ||
+                    texelCoord.y == 0 || texelCoord.y == probeSize - 1;
+    
+    // Map inner texel to [0,1] UV
+    vec2 uv = (vec2(texelCoord - 1) + 0.5) / float(innerSize);
+    uv = clamp(uv, 0.0, 1.0);
+    
+    // Convert UV to direction
+    vec3 texelDirection = octDecode(uv);
+    
+    // Accumulate radiance from all rays, weighted by cosine similarity
+    vec3 irradianceSum = vec3(0.0);
+    float weightSum = 0.0;
+    float depthSum = 0.0;
+    float depthSquaredSum = 0.0;
+    
+    for (int rayIdx = 0; rayIdx < raysPerProbe; rayIdx++) {
+        // Get ray direction (must match trace shader)
+        vec3 rayDir = fibonacciSphereDirection(rayIdx, raysPerProbe);
+        rayDir = (ddgi.randomRotation * vec4(rayDir, 0.0)).xyz;
+        rayDir = normalize(rayDir);
+        
+        // Cosine weight based on alignment with texel direction
+        float weight = max(dot(texelDirection, rayDir), 0.0);
+        
+        if (weight > EPSILON) {
+            // Fetch radiance data
+            int dataIndex = probeIndex * raysPerProbe + rayIdx;
+            vec4 data = radianceData[dataIndex];
+            vec3 radiance = data.rgb;
+            float hitDistance = data.a;
+            
+            // Accumulate irradiance (cosine-weighted)
+            irradianceSum += radiance * weight;
+            weightSum += weight;
+            
+            // Accumulate depth (for visibility)
+            // Weight depth samples towards the texel's direction
+            float depthWeight = pow(weight, 2.0);  // Sharper falloff for depth
+            depthSum += hitDistance * depthWeight;
+            depthSquaredSum += hitDistance * hitDistance * depthWeight;
+        }
+    }
+    
+    // Normalize
+    vec3 newIrradiance = vec3(0.0);
+    vec2 newDepth = vec2(0.0);
+    
+    if (weightSum > EPSILON) {
+        newIrradiance = irradianceSum / weightSum;
+        
+        float meanDepth = depthSum / weightSum;
+        float meanDepthSquared = depthSquaredSum / weightSum;
+        float variance = abs(meanDepthSquared - meanDepth * meanDepth);
+        
+        newDepth = vec2(meanDepth, variance);
+    }
+    
+    // Calculate output pixel coordinates
+    ivec2 irradianceTexelPos = probeCoord2D * probeSize + texelCoord;
+    
+    if (!isBorder) {
+        // Read previous value for temporal blending
+        vec4 prevIrradiance = imageLoad(irradianceImage, irradianceTexelPos);
+        
+        // Temporal blend with hysteresis
+        vec3 blendedIrradiance = mix(newIrradiance, prevIrradiance.rgb, hysteresis);
+        
+        // Store irradiance
+        imageStore(irradianceImage, irradianceTexelPos, vec4(blendedIrradiance, 1.0));
+    }
+    
+    // Handle depth texture (different resolution)
+    int depthProbeSize = ddgi.depthTextureSize.z;
+    ivec2 depthTexelCoord = texelCoord * depthProbeSize / probeSize;
+    ivec2 depthTexelPos = probeCoord2D * depthProbeSize + depthTexelCoord;
+    
+    // Only update depth for corresponding texels
+    if (texelCoord.x < depthProbeSize && texelCoord.y < depthProbeSize) {
+        bool isDepthBorder = depthTexelCoord.x == 0 || depthTexelCoord.x == depthProbeSize - 1 ||
+                            depthTexelCoord.y == 0 || depthTexelCoord.y == depthProbeSize - 1;
+        
+        if (!isDepthBorder) {
+            vec2 prevDepth = imageLoad(depthImage, depthTexelPos).rg;
+            vec2 blendedDepth = mix(newDepth, prevDepth, hysteresis);
+            imageStore(depthImage, depthTexelPos, vec4(blendedDepth, 0.0, 0.0));
+        }
+    }
+    
+    // Fill borders by copying from adjacent texels (for bilinear filtering)
+    barrier();
+    
+    if (isBorder) {
+        // Determine which edge we're on and copy from interior
+        ivec2 srcCoord = texelCoord;
+        
+        if (texelCoord.x == 0) srcCoord.x = 1;
+        else if (texelCoord.x == probeSize - 1) srcCoord.x = probeSize - 2;
+        
+        if (texelCoord.y == 0) srcCoord.y = 1;
+        else if (texelCoord.y == probeSize - 1) srcCoord.y = probeSize - 2;
+        
+        // For octahedral mapping, borders should wrap to opposite side
+        // This is a simplified version - proper implementation mirrors across edges
+        ivec2 srcTexelPos = probeCoord2D * probeSize + srcCoord;
+        vec4 srcIrradiance = imageLoad(irradianceImage, srcTexelPos);
+        imageStore(irradianceImage, irradianceTexelPos, srcIrradiance);
+    }
+}

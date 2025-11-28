@@ -106,6 +106,7 @@ set(SOURCES
     src/engine/VulkanContext.cpp
     src/engine/ShadowRenderer.cpp
     src/engine/DeferredRenderer.cpp
+    src/engine/DDGISystem.cpp
 )
 
 # --- Executable ---

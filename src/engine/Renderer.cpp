@@ -100,6 +100,16 @@ Renderer::Renderer(Window& window)
         rtPipeline->createPipeline(rtDescriptorSetLayout);
         createRTDescriptorSet();
         std::cout << "=== RT PIPELINE INITIALIZED ===" << std::endl;
+        
+        // Initialize DDGI System (requires ray tracing)
+        ddgiSystem = std::make_unique<DDGISystem>(vulkanContext, descriptorPool);
+        DDGIConfig ddgiConfig;
+        ddgiConfig.probeCount = glm::ivec3(8, 4, 8);  // 256 probes
+        ddgiConfig.probeSpacing = glm::vec3(4.0f, 3.0f, 4.0f);
+        ddgiConfig.gridOrigin = glm::vec3(-16.0f, 0.0f, -16.0f);
+        ddgiSystem->initialize(ddgiConfig);
+        ddgiSystem->setAccelerationStructure(tlas.handle);
+        std::cout << "=== DDGI SYSTEM INITIALIZED ===" << std::endl;
     }
 
     std::cout << "=== RAY TRACING ACCELERATION STRUCTURES BUILT ===" << std::endl;
@@ -130,6 +140,9 @@ void Renderer::waitIdle() {
 }
 
 void Renderer::drawFrame() {
+    static uint32_t currentFrame = 0;
+    currentFrame++;
+    
     vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &inFlightFence);
 
@@ -147,7 +160,8 @@ void Renderer::drawFrame() {
         glm::vec3 camPos = camera.getPosition();
         std::cout << "Camera Pos: " << camPos.x << ", " << camPos.y << ", " << camPos.z << std::endl;
         std::cout << "Drawing " << gameObjects.size() << " objects (" 
-                  << ((rtPipeline && useRayTracing) ? "RAY TRACING" : "DEFERRED") << ")." << std::endl;
+                  << ((rtPipeline && useRayTracing) ? "RAY TRACING" : "DEFERRED")
+                  << (ddgiEnabled && ddgiSystem ? " + DDGI" : "") << ")." << std::endl;
     }
 
     vkResetCommandBuffer(commandBuffer, 0);
@@ -257,12 +271,17 @@ void Renderer::drawFrame() {
         // DEFERRED RENDERING PATH
         // ========================================================================
         
+        // PASS 0: Update DDGI probes (ray trace from probes, update irradiance)
+        if (ddgiSystem && ddgiEnabled) {
+            ddgiSystem->update(commandBuffer, currentFrame);
+        }
+        
         // PASS 1: Cascaded Shadow Maps (via ShadowRenderer)
         shadowRenderer->render(commandBuffer, gameObjects);
 
         // PASS 2: Deferred Rendering (G-Buffer + Composition) via DeferredRenderer
         // DeferredRenderer outputs directly to swapchain (attachment 5) with PRESENT_SRC layout
-        // No skybox pass needed - composition shader handles background
+        // Composition shader now samples DDGI for indirect diffuse lighting
         deferredRenderer->render(commandBuffer, imageIndex, gameObjects);
     }
 
@@ -660,6 +679,15 @@ void Renderer::processInput(float deltaTime) {
         std::cout << "Rendering Mode: " << (useRayTracing ? "RAY TRACING" : "DEFERRED") << std::endl;
     }
     rKeyWasPressed = rKeyPressed;
+    
+    // Toggle DDGI with G key
+    static bool gKeyWasPressed = false;
+    bool gKeyPressed = input.isKeyDown(GLFW_KEY_G);
+    if (gKeyPressed && !gKeyWasPressed) {
+        ddgiEnabled = !ddgiEnabled;
+        std::cout << "DDGI: " << (ddgiEnabled ? "ENABLED" : "DISABLED") << std::endl;
+    }
+    gKeyWasPressed = gKeyPressed;
     
     // ESC to close window
     if (input.isKeyDown(GLFW_KEY_ESCAPE)) {
@@ -1509,6 +1537,7 @@ Renderer::~Renderer() {
     
     rtPipeline.reset();
     asBuilder.reset();
+    ddgiSystem.reset();  // Cleanup DDGI before shadow/deferred renderers
     shadowRenderer.reset();
     deferredRenderer.reset();
     

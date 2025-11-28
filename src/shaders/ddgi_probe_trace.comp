@@ -1,0 +1,191 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_ray_query : require
+
+// ============================================================================
+// DDGI PROBE RAY TRACE COMPUTE SHADER
+// Traces rays from each probe position using ray queries
+// Stores radiance and hit distance in the radiance buffer
+// ============================================================================
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// TLAS for ray queries
+layout(set = 0, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+// DDGI Uniforms
+layout(set = 0, binding = 1) uniform DDGIUniforms {
+    ivec4 probeCount;           // xyz = count, w = total probes
+    vec4 probeSpacing;          // xyz = spacing, w = 1/maxDistance
+    vec4 gridOrigin;            // xyz = origin, w = hysteresis
+    ivec4 irradianceTextureSize;
+    ivec4 depthTextureSize;
+    vec4 rayParams;             // x = raysPerProbe, y = maxDistance, z = normalBias, w = viewBias
+    mat4 randomRotation;
+} ddgi;
+
+// Output radiance buffer: vec4(radiance.rgb, hitDistance) per ray
+layout(set = 0, binding = 2) buffer RadianceBuffer {
+    vec4 radianceData[];
+};
+
+// Constants
+const float PI = 3.14159265359;
+const float TWO_PI = 6.28318530718;
+
+// ============================================================================
+// FIBONACCI SPHERE - Uniform ray distribution
+// ============================================================================
+vec3 fibonacciSphereDirection(int rayIndex, int totalRays) {
+    float goldenRatio = (1.0 + sqrt(5.0)) * 0.5;
+    float i = float(rayIndex) + 0.5;
+    
+    // Latitude: arccos(1 - 2*i/n)
+    float phi = acos(1.0 - 2.0 * i / float(totalRays));
+    
+    // Longitude: 2*PI*i/goldenRatio
+    float theta = TWO_PI * i / goldenRatio;
+    
+    // Convert to Cartesian (spherical coordinates)
+    float sinPhi = sin(phi);
+    return vec3(
+        sinPhi * cos(theta),
+        sinPhi * sin(theta),
+        cos(phi)
+    );
+}
+
+// ============================================================================
+// PROBE INDEX TO WORLD POSITION
+// ============================================================================
+vec3 probeIndexToWorldPos(int probeIndex) {
+    int totalXZ = ddgi.probeCount.x * ddgi.probeCount.z;
+    int y = probeIndex / totalXZ;
+    int remainder = probeIndex % totalXZ;
+    int z = remainder / ddgi.probeCount.x;
+    int x = remainder % ddgi.probeCount.x;
+    
+    return ddgi.gridOrigin.xyz + vec3(x, y, z) * ddgi.probeSpacing.xyz;
+}
+
+// ============================================================================
+// SKY COLOR (procedural for now, should sample environment map)
+// ============================================================================
+vec3 getSkyColor(vec3 direction) {
+    // Simple gradient sky
+    float t = 0.5 * (direction.y + 1.0);
+    vec3 skyBottom = vec3(0.8, 0.9, 1.0);   // Light blue
+    vec3 skyTop = vec3(0.3, 0.5, 0.9);      // Deeper blue
+    
+    // Add sun contribution
+    vec3 sunDir = normalize(vec3(1.0, 2.0, 1.0));
+    float sunDot = max(dot(direction, sunDir), 0.0);
+    vec3 sunColor = vec3(1.0, 0.95, 0.8) * pow(sunDot, 64.0) * 2.0;
+    
+    return mix(skyBottom, skyTop, t) + sunColor;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+void main() {
+    uint globalIdx = gl_GlobalInvocationID.x;
+    
+    int totalProbes = ddgi.probeCount.w;
+    int raysPerProbe = int(ddgi.rayParams.x);
+    float maxDistance = ddgi.rayParams.y;
+    
+    // Calculate which probe and ray this thread handles
+    int probeIndex = int(globalIdx) / raysPerProbe;
+    int rayIndex = int(globalIdx) % raysPerProbe;
+    
+    // Bounds check
+    if (probeIndex >= totalProbes) {
+        return;
+    }
+    
+    // Get probe world position
+    vec3 probePos = probeIndexToWorldPos(probeIndex);
+    
+    // Get ray direction using Fibonacci sphere distribution
+    vec3 rayDir = fibonacciSphereDirection(rayIndex, raysPerProbe);
+    
+    // Apply random rotation for temporal variance
+    rayDir = (ddgi.randomRotation * vec4(rayDir, 0.0)).xyz;
+    rayDir = normalize(rayDir);
+    
+    // Initialize ray query
+    rayQueryEXT rayQuery;
+    rayQueryInitializeEXT(
+        rayQuery,
+        topLevelAS,
+        gl_RayFlagsOpaqueEXT,
+        0xFF,
+        probePos,
+        0.01,           // tMin - small offset to prevent self-intersection
+        rayDir,
+        maxDistance     // tMax
+    );
+    
+    // Traverse the acceleration structure
+    while (rayQueryProceedEXT(rayQuery)) {
+        // For now, accept first hit (opaque geometry)
+        // Could add any-hit logic here for transparency
+    }
+    
+    vec3 radiance = vec3(0.0);
+    float hitDistance = maxDistance;
+    
+    // Check if we hit anything
+    if (rayQueryGetIntersectionTypeEXT(rayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        // We hit geometry
+        hitDistance = rayQueryGetIntersectionTEXT(rayQuery, true);
+        
+        // Get hit information
+        vec3 hitNormal = vec3(0.0, 1.0, 0.0);  // Would need to fetch from geometry
+        
+        // For now, use a simple diffuse lighting model
+        // In production, you'd sample the surface cache or evaluate material
+        vec3 sunDir = normalize(vec3(1.0, 2.0, 1.0));
+        vec3 sunColor = vec3(1.0, 0.98, 0.95) * 3.0;
+        
+        // Simple lambertian with ambient
+        float NdotL = max(dot(hitNormal, sunDir), 0.0);
+        vec3 diffuse = vec3(0.5, 0.5, 0.5);  // Default albedo
+        
+        // Shadow ray to sun (simple visibility check)
+        vec3 hitPos = probePos + rayDir * hitDistance;
+        
+        rayQueryEXT shadowQuery;
+        rayQueryInitializeEXT(
+            shadowQuery,
+            topLevelAS,
+            gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+            0xFF,
+            hitPos + hitNormal * 0.01,
+            0.001,
+            sunDir,
+            1000.0
+        );
+        
+        while (rayQueryProceedEXT(shadowQuery)) {}
+        
+        float shadow = 1.0;
+        if (rayQueryGetIntersectionTypeEXT(shadowQuery, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+            shadow = 0.2;  // In shadow, still some ambient
+        }
+        
+        // Compute radiance
+        radiance = diffuse * sunColor * NdotL * shadow;
+        radiance += diffuse * vec3(0.1, 0.15, 0.2);  // Ambient
+        
+    } else {
+        // Hit sky - sample environment
+        radiance = getSkyColor(rayDir);
+        hitDistance = maxDistance;  // Encode as max distance for depth
+    }
+    
+    // Store result
+    int outputIndex = probeIndex * raysPerProbe + rayIndex;
+    radianceData[outputIndex] = vec4(radiance, hitDistance);
+}
