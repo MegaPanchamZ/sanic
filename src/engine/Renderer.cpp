@@ -237,7 +237,7 @@ void Renderer::drawFrame() {
             // Group count Y = 1
             // Group count Z = 1
             uint32_t groupCountX = (gameObject.mesh->getMeshletCount() + 31) / 32;
-            std::cout << "Drawing object with " << gameObject.mesh->getMeshletCount() << " meshlets. GroupCountX: " << groupCountX << std::endl;
+            // std::cout << "Drawing object with " << gameObject.mesh->getMeshletCount() << " meshlets. GroupCountX: " << groupCountX << std::endl;
             vkCmdDrawMeshTasksEXT(commandBuffer, groupCountX, 1, 1);
         }
 
