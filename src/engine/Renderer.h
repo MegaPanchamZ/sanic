@@ -94,6 +94,11 @@ private:
     struct PushConstantData {
         glm::mat4 model;
         glm::mat4 normalMatrix;
+        uint64_t meshletBufferAddress;
+        uint64_t meshletVerticesAddress;
+        uint64_t meshletTrianglesAddress;
+        uint64_t vertexBufferAddress;
+        uint32_t meshletCount;
     };
     
     VkBuffer uniformBuffer;
@@ -137,6 +142,16 @@ private:
     void createShadowGraphicsPipeline();
     void createShadowResources();
     void createCSMResources();
+
+    // ========================================================================
+    // AAA STANDARD: Nanite (Mesh Shaders)
+    // ========================================================================
+    VkPipelineLayout meshPipelineLayout;
+    VkPipeline meshPipeline;
+    PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT;
+
+    void createMeshPipeline();
+    void loadMeshShaderFunctions();
     
     // ========================================================================
     // AAA STANDARD: Deferred Rendering (G-Buffer)

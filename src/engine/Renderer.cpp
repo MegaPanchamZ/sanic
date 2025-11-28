@@ -12,6 +12,7 @@
 #include "../external/tiny_obj_loader.h"
 #include <unordered_map>
 #include <set>
+#include "DescriptorManager.h"
 
 Renderer::Renderer(Window& window) 
     : window(window)
@@ -44,20 +45,24 @@ Renderer::Renderer(Window& window)
     
     // Forward framebuffers (for skybox pass)
     createFramebuffers();
-    
+
     // G-Buffer resources (must be after depth resources)
     createGBufferResources();
-    
+
     // Deferred render pass with 2 subpasses
     createDeferredRenderPass();
     createDeferredFramebuffers();
-    
+
     // Pipelines
     createGraphicsPipeline();
+    
+    loadMeshShaderFunctions();
+    createMeshPipeline();
+    
     createSkyboxGraphicsPipeline();
     createGBufferPipeline();
     createCompositionPipeline();
-    
+
     createUniformBuffers();
     createDescriptorPool();
     createCommandBuffers();
@@ -69,6 +74,10 @@ Renderer::Renderer(Window& window)
     createCompositionDescriptorSets();
 
     createSyncObjects();
+    
+    // Initialize Global Descriptor Manager
+    DescriptorManager::getInstance().init(device, physicalDevice);
+    
     loadGameObjects();
     
     std::cout << "=== DEFERRED RENDERING ENABLED ===" << std::endl;
@@ -204,18 +213,32 @@ void Renderer::drawFrame() {
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
         // ------ Subpass 0: Geometry Pass (G-Buffer) ------
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gBufferPipeline);
+        // Switch to Mesh Pipeline
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
 
         for (const auto& gameObject : gameObjects) {
             PushConstantData push{};
             push.model = gameObject.transform;
             push.normalMatrix = glm::transpose(glm::inverse(gameObject.transform));
+            push.meshletBufferAddress = gameObject.mesh->getMeshletBufferAddress();
+            push.meshletVerticesAddress = gameObject.mesh->getMeshletVerticesBufferAddress();
+            push.meshletTrianglesAddress = gameObject.mesh->getMeshletTrianglesBufferAddress();
+            push.vertexBufferAddress = gameObject.mesh->getVertexBufferAddress();
+            push.meshletCount = gameObject.mesh->getMeshletCount();
             
-            vkCmdPushConstants(commandBuffer, gBufferPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstantData), &push);
-            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gBufferPipelineLayout, 0, 1, &gameObject.descriptorSet, 0, nullptr);
+            vkCmdPushConstants(commandBuffer, meshPipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstantData), &push);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout, 0, 1, &gameObject.descriptorSet, 0, nullptr);
             
-            gameObject.mesh->bind(commandBuffer);
-            gameObject.mesh->draw(commandBuffer);
+            // Bind mesh resources (vertex/index buffers are not used by mesh shader, but we might need them later for mixed mode)
+            // For now, we just need the meshlet count to dispatch tasks
+            
+            // Dispatch Mesh Tasks
+            // Group count X = (meshlet count + 31) / 32
+            // Group count Y = 1
+            // Group count Z = 1
+            uint32_t groupCountX = (gameObject.mesh->getMeshletCount() + 31) / 32;
+            std::cout << "Drawing object with " << gameObject.mesh->getMeshletCount() << " meshlets. GroupCountX: " << groupCountX << std::endl;
+            vkCmdDrawMeshTasksEXT(commandBuffer, groupCountX, 1, 1);
         }
 
         // ------ Subpass 1: Composition Pass (Lighting) ------
@@ -465,7 +488,7 @@ void Renderer::createDescriptorSetLayout() {
     uboLayoutBinding.binding = 0;
     uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     uboLayoutBinding.descriptorCount = 1;
-    uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
     uboLayoutBinding.pImmutableSamplers = nullptr;
 
     VkDescriptorSetLayoutBinding diffuseLayoutBinding{};
@@ -882,39 +905,75 @@ void Renderer::createLogicalDevice() {
         queueCreateInfos.push_back(queueCreateInfo);
     }
 
+    // --- Features Chain ---
     VkPhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.samplerAnisotropy = VK_TRUE;
+    // Enable standard features if needed (e.g. geometryShader, etc.)
 
+    // Vulkan 1.2 Features (Descriptor Indexing, Buffer Device Address)
+    VkPhysicalDeviceVulkan12Features vulkan12Features{};
+    vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vulkan12Features.bufferDeviceAddress = VK_TRUE;
+    vulkan12Features.descriptorBindingPartiallyBound = VK_TRUE;
+    vulkan12Features.descriptorBindingVariableDescriptorCount = VK_TRUE;
+    vulkan12Features.runtimeDescriptorArray = VK_TRUE;
+    vulkan12Features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    vulkan12Features.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE; // For bindless buffers
+
+    // Mesh Shader Features
+    VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{};
+    meshShaderFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+    meshShaderFeatures.meshShader = VK_TRUE;
+    meshShaderFeatures.taskShader = VK_TRUE;
+
+    // Ray Tracing Features
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{};
+    asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    asFeatures.accelerationStructure = VK_TRUE;
+
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures{};
+    rtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+    rtPipelineFeatures.rayTracingPipeline = VK_TRUE;
+
+    // Chain them together
+    void* pNextChain = &vulkan12Features;
+    vulkan12Features.pNext = &meshShaderFeatures;
+    meshShaderFeatures.pNext = &asFeatures;
+    asFeatures.pNext = &rtPipelineFeatures;
+    rtPipelineFeatures.pNext = nullptr;
+
+    // --- Device Creation ---
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    createInfo.pNext = pNextChain; // Attach the feature chain
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
     createInfo.pEnabledFeatures = &deviceFeatures;
 
     // ========================================================================
-    // AAA STANDARD: Device Extensions with Ray Tracing Readiness
+    // AAA STANDARD: Device Extensions
     // ========================================================================
     std::vector<const char*> deviceExtensions = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_MAINTENANCE3_EXTENSION_NAME, // Required for descriptor indexing (pre-1.2)
+        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, // Required if not 1.2, but good to have
+        
+        // Bindless / RT / Mesh
+        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+        VK_EXT_MESH_SHADER_EXTENSION_NAME,
+        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+        VK_KHR_SPIRV_1_4_EXTENSION_NAME,
+        VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME
     };
     
-    // Check for ray tracing support
+    // Check for ray tracing support (optional logic, but we enforce it now)
     rayTracingSupported = checkRayTracingSupport(physicalDevice);
     if (rayTracingSupported) {
-        std::cout << "=== RAY TRACING SUPPORT DETECTED ===" << std::endl;
-        std::cout << "The following extensions are available for future RT implementation:" << std::endl;
-        std::cout << "  - VK_KHR_acceleration_structure" << std::endl;
-        std::cout << "  - VK_KHR_ray_tracing_pipeline" << std::endl;
-        std::cout << "  - VK_KHR_buffer_device_address" << std::endl;
-        std::cout << "  - VK_KHR_deferred_host_operations" << std::endl;
-        std::cout << "RT extensions NOT enabled yet - requires buffer refactoring" << std::endl;
-        std::cout << "======================================" << std::endl;
-        
-        // NOTE: To fully enable RT, uncomment these and add required features:
-        // deviceExtensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
-        // deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
-        // deviceExtensions.push_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
-        // deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        std::cout << "=== RAY TRACING SUPPORT CONFIRMED ===" << std::endl;
+    } else {
+        std::cerr << "WARNING: Ray Tracing extensions missing! Engine might crash if features are used." << std::endl;
     }
 
     createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
@@ -927,7 +986,7 @@ void Renderer::createLogicalDevice() {
 
     vkGetDeviceQueue(device, indices.graphicsFamily, 0, &graphicsQueue);
     vkGetDeviceQueue(device, indices.presentFamily, 0, &presentQueue);
-    std::cout << "Logical Device created successfully!" << std::endl;
+    std::cout << "Logical Device created successfully with AAA extensions!" << std::endl;
 }
 
 // ============================================================================
@@ -1386,6 +1445,10 @@ Renderer::~Renderer() {
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyRenderPass(device, renderPass, nullptr);
     
+    // Cleanup Mesh Pipeline
+    vkDestroyPipeline(device, meshPipeline, nullptr);
+    vkDestroyPipelineLayout(device, meshPipelineLayout, nullptr);
+
     // Cleanup skybox
     vkDestroyPipeline(device, skyboxPipeline, nullptr);
     vkDestroyPipelineLayout(device, skyboxPipelineLayout, nullptr);
@@ -1409,6 +1472,8 @@ Renderer::~Renderer() {
     vkDestroyFence(device, inFlightFence, nullptr);
 
     vkDestroyCommandPool(device, commandPool, nullptr);
+
+    DescriptorManager::getInstance().cleanup();
 
     vkDestroyDevice(device, nullptr);
 
@@ -1549,6 +1614,149 @@ void Renderer::createGraphicsPipeline() {
 
     vkDestroyShaderModule(device, fragShaderModule, nullptr);
     vkDestroyShaderModule(device, vertShaderModule, nullptr);
+}
+
+void Renderer::loadMeshShaderFunctions() {
+    vkCmdDrawMeshTasksEXT = (PFN_vkCmdDrawMeshTasksEXT)vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT");
+    if (!vkCmdDrawMeshTasksEXT) {
+        throw std::runtime_error("Could not load vkCmdDrawMeshTasksEXT function pointer!");
+    }
+}
+
+void Renderer::createMeshPipeline() {
+    auto taskShaderCode = readFile("shaders/nanite.task.spv");
+    auto meshShaderCode = readFile("shaders/nanite.mesh.spv");
+    auto fragShaderCode = readFile("shaders/gbuffer.frag.spv"); // Use G-Buffer frag shader
+
+    VkShaderModule taskShaderModule = createShaderModule(taskShaderCode);
+    VkShaderModule meshShaderModule = createShaderModule(meshShaderCode);
+    VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+    VkPipelineShaderStageCreateInfo taskShaderStageInfo{};
+    taskShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    taskShaderStageInfo.stage = VK_SHADER_STAGE_TASK_BIT_EXT;
+    taskShaderStageInfo.module = taskShaderModule;
+    taskShaderStageInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo meshShaderStageInfo{};
+    meshShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    meshShaderStageInfo.stage = VK_SHADER_STAGE_MESH_BIT_EXT;
+    meshShaderStageInfo.module = meshShaderModule;
+    meshShaderStageInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+    fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragShaderStageInfo.module = fragShaderModule;
+    fragShaderStageInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = {taskShaderStageInfo, meshShaderStageInfo, fragShaderStageInfo};
+
+    // Vertex Input State is ignored for mesh shaders, but must be valid
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)swapchainExtent.width;
+    viewport.height = (float)swapchainExtent.height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = swapchainExtent;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_FALSE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    // MRT: 4 color attachments for G-Buffer
+    std::array<VkPipelineColorBlendAttachmentState, 4> colorBlendAttachments{};
+    for (auto& attachment : colorBlendAttachments) {
+        attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | 
+                                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        attachment.blendEnable = VK_FALSE;
+    }
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.logicOpEnable = VK_FALSE;
+    colorBlending.logicOp = VK_LOGIC_OP_COPY;
+    colorBlending.attachmentCount = static_cast<uint32_t>(colorBlendAttachments.size());
+    colorBlending.pAttachments = colorBlendAttachments.data();
+
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(PushConstantData);
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &meshPipelineLayout) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create mesh pipeline layout!");
+    }
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 3;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.layout = meshPipelineLayout;
+    pipelineInfo.renderPass = deferredRenderPass; // Use Deferred Render Pass
+    pipelineInfo.subpass = 0;
+
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &meshPipeline) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create mesh pipeline!");
+    }
+    std::cout << "Mesh Pipeline created successfully!" << std::endl;
+
+    vkDestroyShaderModule(device, fragShaderModule, nullptr);
+    vkDestroyShaderModule(device, meshShaderModule, nullptr);
+    vkDestroyShaderModule(device, taskShaderModule, nullptr);
 }
 
 std::shared_ptr<Mesh> Renderer::createTerrainMesh() {
@@ -2410,7 +2618,7 @@ void Renderer::createDeferredRenderPass() {
     attachments[0].format = VK_FORMAT_R16G16B16A16_SFLOAT;
     attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; // Only used within render pass
+    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; // Store for composition
     attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2420,7 +2628,7 @@ void Renderer::createDeferredRenderPass() {
     attachments[1].format = VK_FORMAT_R16G16B16A16_SFLOAT;
     attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2430,7 +2638,7 @@ void Renderer::createDeferredRenderPass() {
     attachments[2].format = VK_FORMAT_R8G8B8A8_UNORM;
     attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2440,7 +2648,7 @@ void Renderer::createDeferredRenderPass() {
     attachments[3].format = VK_FORMAT_R8G8B8A8_UNORM;
     attachments[3].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[3].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[3].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[3].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[3].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[3].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[3].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;

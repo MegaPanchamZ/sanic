@@ -1,12 +1,15 @@
 #include "Texture.h"
 #include <stdexcept>
 #include "../external/stb_image.h"
+#include "DescriptorManager.h"
 
 Texture::Texture(VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, const std::string& path)
     : device(device) {
     createTextureImage(physicalDevice, commandPool, graphicsQueue, path);
     createTextureImageView();
     createTextureSampler(physicalDevice);
+    
+    textureIndex = DescriptorManager::getInstance().registerTexture(textureImageView, textureSampler);
 }
 
 Texture::~Texture() {

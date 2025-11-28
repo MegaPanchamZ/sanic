@@ -323,4 +323,7 @@ void main() {
     color = pow(color, vec3(1.0 / 2.2));
     
     outColor = vec4(color, 1.0);
+    
+    // Debug: Output raw albedo
+    // outColor = vec4(albedo, 1.0);
 }

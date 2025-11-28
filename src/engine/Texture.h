@@ -9,6 +9,7 @@ public:
 
     VkImageView getImageView() const { return textureImageView; }
     VkSampler getSampler() const { return textureSampler; }
+    uint32_t getDescriptorIndex() const { return textureIndex; }
 
 private:
     VkDevice device;
@@ -16,6 +17,7 @@ private:
     VkDeviceMemory textureImageMemory;
     VkImageView textureImageView;
     VkSampler textureSampler;
+    uint32_t textureIndex = 0;
 
     void createTextureImage(VkPhysicalDevice physicalDevice, VkCommandPool commandPool, VkQueue graphicsQueue, const std::string& path);
     void createTextureImageView();

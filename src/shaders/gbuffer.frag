@@ -61,6 +61,8 @@ vec3 perturbNormal(vec3 N, vec3 V, vec2 texcoord) {
 void main() {
     // Sample albedo with gamma correction (sRGB to linear)
     vec3 albedo = pow(texture(albedoMap, fragTexCoord).rgb, vec3(2.2));
+    // vec3 albedo = fragColor;
+    // vec3 albedo = vec3(1.0, 0.0, 0.0); // Hardcoded RED
     
     // Sample metallic-roughness map (glTF: R=AO, G=Roughness, B=Metallic)
     vec4 mrSample = texture(metallicRoughnessMap, fragTexCoord);
