@@ -124,9 +124,65 @@ private:
     VkSampler shadowSampler;
     VkFramebuffer shadowFramebuffer;
     
+    // CSM: Shadow map array for 4 cascades
+    static const uint32_t CSM_CASCADE_COUNT = 4;
+    static const uint32_t SHADOW_MAP_SIZE = 2048;
+    VkImage shadowArrayImage;
+    VkDeviceMemory shadowArrayImageMemory;
+    VkImageView shadowArrayImageView;
+    std::array<VkImageView, CSM_CASCADE_COUNT> shadowCascadeViews;
+    std::array<VkFramebuffer, CSM_CASCADE_COUNT> shadowCascadeFramebuffers;
+    
     void createShadowRenderPass();
     void createShadowGraphicsPipeline();
     void createShadowResources();
+    void createCSMResources();
+    
+    // ========================================================================
+    // AAA STANDARD: Deferred Rendering (G-Buffer)
+    // ========================================================================
+    
+    // G-Buffer attachments
+    struct GBufferAttachment {
+        VkImage image;
+        VkDeviceMemory memory;
+        VkImageView view;
+        VkFormat format;
+    };
+    
+    GBufferAttachment gBufferPosition;   // RGB: World Pos, A: View Depth
+    GBufferAttachment gBufferNormal;     // RGB: Normal
+    GBufferAttachment gBufferAlbedo;     // RGB: Albedo, A: Metallic
+    GBufferAttachment gBufferPBR;        // R: Roughness, G: AO
+    
+    // Deferred render pass with 2 subpasses
+    VkRenderPass deferredRenderPass;
+    std::vector<VkFramebuffer> deferredFramebuffers;
+    
+    // G-Buffer geometry pass pipeline
+    VkPipelineLayout gBufferPipelineLayout;
+    VkPipeline gBufferPipeline;
+    VkDescriptorSetLayout gBufferDescriptorSetLayout;
+    
+    // Composition pass pipeline
+    VkPipelineLayout compositionPipelineLayout;
+    VkPipeline compositionPipeline;
+    VkDescriptorSetLayout compositionDescriptorSetLayout;
+    VkDescriptorSet compositionDescriptorSet;
+    
+    // Deferred rendering functions
+    void createDeferredRenderPass();
+    void createGBufferResources();
+    void createGBufferDescriptorSetLayout();
+    void createGBufferPipeline();
+    void createCompositionDescriptorSetLayout();
+    void createCompositionPipeline();
+    void createCompositionDescriptorSets();
+    void createDeferredFramebuffers();
+    
+    // Helper for creating G-Buffer attachments
+    void createGBufferAttachment(GBufferAttachment& attachment, VkFormat format, VkImageUsageFlags usage);
+    void destroyGBufferAttachment(GBufferAttachment& attachment);
     
     // ========================================================================
     // AAA STANDARD: Ray Tracing Readiness (VK_KHR_ray_tracing_pipeline)
@@ -159,7 +215,9 @@ private:
     std::shared_ptr<Mesh> createSphereMesh(int segments, int rings);
 
     void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory);
+    void createImageWithLayers(uint32_t width, uint32_t height, uint32_t layers, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory);
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags);
+    VkImageView createImageViewWithLayers(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t baseLayer, uint32_t layerCount, VkImageViewType viewType);
     VkFormat findDepthFormat();
     VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);

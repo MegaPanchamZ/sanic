@@ -20,6 +20,10 @@ public:
     VkImageView getImageView() const { return textureImageView; }
     VkSampler getSampler() const { return textureSampler; }
     uint32_t getMipLevels() const { return mipLevels; }
+    
+    // Accessors for deferred rendering composition pass (IBL)
+    VkImageView getCubemapImageView() const { return textureImageView; }
+    VkSampler getCubemapSampler() const { return textureSampler; }
 
 private:
     VkPhysicalDevice physicalDevice;
