@@ -26,11 +26,17 @@ Renderer::Renderer(Window& window)
     // Forward render pass (needed for skybox after deferred)
     createRenderPass();
     
-    // Shadow pass setup (CSM) - render pass first, then resources that need it
+    // Descriptor layouts must be created before pipelines that use them
+    createDescriptorSetLayout();
+    createSkyboxDescriptorSetLayout();
+    createGBufferDescriptorSetLayout();
+    createCompositionDescriptorSetLayout();
+    
+    // Shadow pass setup (CSM)
     createShadowResources();
     createShadowRenderPass();
     createCSMResources();  // Needs shadowRenderPass for framebuffers
-    createShadowGraphicsPipeline();
+    createShadowGraphicsPipeline();  // Needs descriptorSetLayout
     
     createCommandPool();
     createDepthResources();
@@ -45,14 +51,8 @@ Renderer::Renderer(Window& window)
     createDeferredRenderPass();
     createDeferredFramebuffers();
     
-    // Descriptor layouts for deferred rendering
-    createDescriptorSetLayout();      // For forward/legacy compatibility
-    createSkyboxDescriptorSetLayout();
-    createGBufferDescriptorSetLayout();
-    createCompositionDescriptorSetLayout();
-    
     // Pipelines
-    createGraphicsPipeline();         // Keep forward pipeline for fallback
+    createGraphicsPipeline();
     createSkyboxGraphicsPipeline();
     createGBufferPipeline();
     createCompositionPipeline();
