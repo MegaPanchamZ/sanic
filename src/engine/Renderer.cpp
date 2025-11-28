@@ -151,11 +151,154 @@ void Renderer::drawFrame() {
         throw std::runtime_error("failed to begin recording command buffer!");
     }
     
+        // ========================================================================
+    // PASS 1: Cascaded Shadow Maps (render each cascade)
     // ========================================================================
-    // RAY TRACING ONLY MODE (for testing)
-    // Comment out this block and uncomment the deferred passes below to restore
+    for (uint32_t cascade = 0; cascade < CSM_CASCADE_COUNT; cascade++) {
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = shadowRenderPass;
+        renderPassInfo.framebuffer = shadowCascadeFramebuffers[cascade];
+        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.extent = {SHADOW_MAP_SIZE, SHADOW_MAP_SIZE};
+
+        VkClearValue clearValue = {1.0f, 0};
+        renderPassInfo.clearValueCount = 1;
+        renderPassInfo.pClearValues = &clearValue;
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
+
+        for (const auto& gameObject : gameObjects) {
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout, 0, 1, &gameObject.descriptorSet, 0, nullptr);
+
+            PushConstantData push{};
+            push.model = gameObject.transform;
+            vkCmdPushConstants(commandBuffer, shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstantData), &push);
+
+            gameObject.mesh->bind(commandBuffer);
+            gameObject.mesh->draw(commandBuffer);
+        }
+        vkCmdEndRenderPass(commandBuffer);
+    }
+    
+    // Transition shadow array to shader read after all cascades rendered
+    VkImageMemoryBarrier shadowBarrier{};
+    shadowBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    shadowBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    shadowBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    shadowBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    shadowBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    shadowBarrier.image = shadowArrayImage;
+    shadowBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    shadowBarrier.subresourceRange.baseMipLevel = 0;
+    shadowBarrier.subresourceRange.levelCount = 1;
+    shadowBarrier.subresourceRange.baseArrayLayer = 0;
+    shadowBarrier.subresourceRange.layerCount = CSM_CASCADE_COUNT;
+    shadowBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    shadowBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    
+    vkCmdPipelineBarrier(commandBuffer,
+        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &shadowBarrier);
+
     // ========================================================================
-    if (rtPipeline) {
+    // PASS 2: Deferred Rendering (G-Buffer + Composition)
+    // ========================================================================
+    {
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = deferredRenderPass;
+        renderPassInfo.framebuffer = deferredFramebuffers[imageIndex];
+        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.extent = swapchainExtent;
+
+        // Clear values: 4 G-Buffer + Depth + Swapchain
+        std::array<VkClearValue, 6> clearValues{};
+        clearValues[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};  // Position
+        clearValues[1].color = {{0.5f, 0.5f, 1.0f, 0.0f}};  // Normal (default up)
+        clearValues[2].color = {{0.0f, 0.0f, 0.0f, 0.0f}};  // Albedo
+        clearValues[3].color = {{0.5f, 1.0f, 0.0f, 0.0f}};  // PBR (roughness=0.5, ao=1)
+        clearValues[4].depthStencil = {1.0f, 0};            // Depth
+        clearValues[5].color = {{0.0f, 0.0f, 0.0f, 1.0f}};  // Swapchain
+
+        renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        renderPassInfo.pClearValues = clearValues.data();
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+        // ------ Subpass 0: Geometry Pass (G-Buffer) ------
+        // Switch to Mesh Pipeline
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
+
+        for (const auto& gameObject : gameObjects) {
+            PushConstantData push{};
+            push.model = gameObject.transform;
+            push.normalMatrix = glm::transpose(glm::inverse(gameObject.transform));
+            push.meshletBufferAddress = gameObject.mesh->getMeshletBufferAddress();
+            push.meshletVerticesAddress = gameObject.mesh->getMeshletVerticesBufferAddress();
+            push.meshletTrianglesAddress = gameObject.mesh->getMeshletTrianglesBufferAddress();
+            push.vertexBufferAddress = gameObject.mesh->getVertexBufferAddress();
+            push.meshletCount = gameObject.mesh->getMeshletCount();
+            
+            vkCmdPushConstants(commandBuffer, meshPipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstantData), &push);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout, 0, 1, &gameObject.descriptorSet, 0, nullptr);
+            
+            // Bind mesh resources (vertex/index buffers are not used by mesh shader, but we might need them later for mixed mode)
+            // For now, we just need the meshlet count to dispatch tasks
+            
+            // Dispatch Mesh Tasks
+            // Group count X = (meshlet count + 31) / 32
+            // Group count Y = 1
+            // Group count Z = 1
+            uint32_t groupCountX = (gameObject.mesh->getMeshletCount() + 31) / 32;
+            // std::cout << "Drawing object with " << gameObject.mesh->getMeshletCount() << " meshlets. GroupCountX: " << groupCountX << std::endl;
+            vkCmdDrawMeshTasksEXT(commandBuffer, groupCountX, 1, 1);
+        }
+
+        // ------ Subpass 1: Composition Pass (Lighting) ------
+        vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipelineLayout, 0, 1, &compositionDescriptorSet, 0, nullptr);
+        
+        // Draw fullscreen triangle (3 vertices, no vertex buffer needed)
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+        vkCmdEndRenderPass(commandBuffer);
+    }
+    
+    // ========================================================================
+    // PASS 3: Skybox (rendered after deferred, uses forward render pass)
+    // ========================================================================
+    {
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = renderPass;
+        renderPassInfo.framebuffer = swapchainFramebuffers[imageIndex];
+        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.extent = swapchainExtent;
+
+        // Don't clear - we want to preserve the deferred output
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+        clearValues[1].depthStencil = {1.0f, 0};
+        renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        renderPassInfo.pClearValues = clearValues.data();
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        
+        // Draw Skybox
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
+        skybox->draw(commandBuffer, skyboxPipelineLayout);
+
+        vkCmdEndRenderPass(commandBuffer);
+    }
+
+    // ========================================================================
+    // PASS 4: Ray Tracing (toggle with R key - replaces deferred output)
+    // ========================================================================
+    if (rtPipeline && useRayTracing) {
         // Transition RT output image to GENERAL layout for ray tracing
         VkImageMemoryBarrier rtBarrier{};
         rtBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -651,6 +794,15 @@ void Renderer::processInput(float deltaTime) {
     if (glm::length(mouseDelta) > 0.0f) {
         camera.processMouseMovement(mouseDelta.x, mouseDelta.y);
     }
+    
+    // Toggle RT rendering with R key
+    static bool rKeyWasPressed = false;
+    bool rKeyPressed = input.isKeyDown(GLFW_KEY_R);
+    if (rKeyPressed && !rKeyWasPressed) {
+        useRayTracing = !useRayTracing;
+        std::cout << "Rendering Mode: " << (useRayTracing ? "RAY TRACING" : "DEFERRED") << std::endl;
+    }
+    rKeyWasPressed = rKeyPressed;
 }
 
 void Renderer::updateUniformBuffer(uint32_t currentImage) {

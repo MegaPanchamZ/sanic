@@ -230,6 +230,9 @@ private:
     VkDeviceMemory rtOutputImageMemory = VK_NULL_HANDLE;
     VkImageView rtOutputImageView = VK_NULL_HANDLE;
     
+    // RT Rendering Toggle (press R to switch)
+    bool useRayTracing = true;
+    
     void createRTDescriptorSetLayout();
     void createRTOutputImage();
     void createRTDescriptorSet();
