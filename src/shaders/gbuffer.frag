@@ -5,10 +5,10 @@
 // Outputs surface properties to Multiple Render Targets (MRT)
 // ============================================================================
 
-// Material textures
-layout(binding = 1) uniform sampler2D albedoMap;
-layout(binding = 2) uniform sampler2D metallicRoughnessMap;
-layout(binding = 3) uniform sampler2D normalMap;
+// Material textures (matching main descriptor layout)
+layout(binding = 1) uniform sampler2D albedoMap;        // diffuse texture
+layout(binding = 2) uniform sampler2D metallicRoughnessMap;  // specular texture (R=AO, G=Roughness, B=Metallic)
+layout(binding = 3) uniform sampler2D normalMap;        // normal map
 
 // Inputs from vertex shader
 layout(location = 0) in vec3 fragColor;

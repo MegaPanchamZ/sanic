@@ -6,6 +6,7 @@
 #include <fstream>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <glm/gtc/matrix_transform.hpp>
 #include "../external/stb_image.h"
 #include "../external/tiny_obj_loader.h"
@@ -675,56 +676,124 @@ void Renderer::updateUniformBuffer(uint32_t currentImage) {
     // ========================================================================
     // AAA STANDARD: Directional Light Setup
     // ========================================================================
-    // Fixed directional light (sun) - direction vector for parallel rays
     glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, 2.0f, 1.0f));
-    glm::vec3 lightPos = lightDir * 50.0f;  // Position "far away" in light direction
-    
-    ubo.lightPos = glm::vec4(lightPos, 0.0f);  // w=0 indicates directional light
+    ubo.lightPos = glm::vec4(lightDir, 0.0f);  // w=0 indicates directional light
     
     // ========================================================================
-    // AAA STANDARD: Shadow Matrix Calculation
+    // AAA STANDARD: Cascaded Shadow Maps with Proper Frustum Fitting
     // ========================================================================
-    float near_plane = 0.1f, far_plane = 100.0f;
+    float nearClip = 0.1f;
+    float farClip = 100.0f;
+    float aspectRatio = static_cast<float>(swapchainExtent.width) / static_cast<float>(swapchainExtent.height);
+    float fov = glm::radians(45.0f);  // Should match camera's FOV
     
-    // Center shadow frustum on world origin for scene coverage
-    glm::vec3 shadowCenter = glm::vec3(0.0f, 0.0f, 0.0f);
-    glm::vec3 shadowLightPos = shadowCenter + lightDir * 40.0f;
-    glm::mat4 lightView = glm::lookAt(shadowLightPos, shadowCenter, glm::vec3(0.0f, 1.0f, 0.0f));
+    // Calculate cascade splits
+    calculateCascadeSplits(nearClip, farClip, 0.5f);
     
-    // Orthographic projection sized for scene
-    glm::mat4 lightProjection = glm::ortho(-25.0f, 25.0f, -25.0f, 25.0f, near_plane, far_plane);
+    // Get camera matrices
+    glm::mat4 camView = camera.getViewMatrix();
+    glm::mat4 invCamView = glm::inverse(camView);
     
-    // Vulkan clip space correction (flip Y)
-    lightProjection[1][1] *= -1;
+    // Cascade boundaries in view space
+    float cascadeEnds[5] = {
+        nearClip,
+        cascadeSplitDistances[0] * farClip,
+        cascadeSplitDistances[1] * farClip,
+        cascadeSplitDistances[2] * farClip,
+        cascadeSplitDistances[3] * farClip
+    };
     
-    ubo.lightSpaceMatrix = lightProjection * lightView;
-
-    // ========================================================================
-    // AAA STANDARD: Cascaded Shadow Map Data
-    // ========================================================================
-    // Calculate cascade splits using practical split scheme
-    calculateCascadeSplits(0.1f, 100.0f, 0.5f);
-    
-    // Pack cascade split distances into vec4 (view-space Z values)
+    // Pack cascade split distances (view-space Z values for shader)
     ubo.cascadeSplits = glm::vec4(
-        cascadeSplitDistances[0] * far_plane,
-        cascadeSplitDistances[1] * far_plane,
-        cascadeSplitDistances[2] * far_plane,
-        cascadeSplitDistances[3] * far_plane
+        cascadeEnds[1], cascadeEnds[2], cascadeEnds[3], cascadeEnds[4]
     );
     
-    // Calculate view-projection matrices for each cascade
-    // For now, use the same matrix for all cascades (proper CSM requires per-cascade frustum fitting)
+    // Calculate view-projection matrix for each cascade
     for (int i = 0; i < 4; i++) {
-        // Scale orthographic size based on cascade distance
-        float cascadeScale = 1.0f + i * 0.5f;  // Increase coverage for distant cascades
-        glm::mat4 cascadeProj = glm::ortho(
-            -25.0f * cascadeScale, 25.0f * cascadeScale,
-            -25.0f * cascadeScale, 25.0f * cascadeScale,
-            near_plane, far_plane
+        float cascadeNear = cascadeEnds[i];
+        float cascadeFar = cascadeEnds[i + 1];
+        
+        // Calculate frustum corners in view space
+        float tanHalfFov = tan(fov * 0.5f);
+        float nearHeight = cascadeNear * tanHalfFov;
+        float nearWidth = nearHeight * aspectRatio;
+        float farHeight = cascadeFar * tanHalfFov;
+        float farWidth = farHeight * aspectRatio;
+        
+        // 8 corners of the cascade frustum (in view space, looking down -Z)
+        glm::vec3 frustumCornersVS[8] = {
+            // Near plane
+            glm::vec3(-nearWidth, -nearHeight, -cascadeNear),
+            glm::vec3( nearWidth, -nearHeight, -cascadeNear),
+            glm::vec3( nearWidth,  nearHeight, -cascadeNear),
+            glm::vec3(-nearWidth,  nearHeight, -cascadeNear),
+            // Far plane
+            glm::vec3(-farWidth, -farHeight, -cascadeFar),
+            glm::vec3( farWidth, -farHeight, -cascadeFar),
+            glm::vec3( farWidth,  farHeight, -cascadeFar),
+            glm::vec3(-farWidth,  farHeight, -cascadeFar)
+        };
+        
+        // Transform frustum corners to world space
+        glm::vec3 frustumCornersWS[8];
+        glm::vec3 frustumCenter(0.0f);
+        for (int j = 0; j < 8; j++) {
+            glm::vec4 cornerWS = invCamView * glm::vec4(frustumCornersVS[j], 1.0f);
+            frustumCornersWS[j] = glm::vec3(cornerWS);
+            frustumCenter += frustumCornersWS[j];
+        }
+        frustumCenter /= 8.0f;
+        
+        // Create light view matrix looking at frustum center
+        glm::mat4 lightView = glm::lookAt(
+            frustumCenter + lightDir * 50.0f,  // Position light far away in light direction
+            frustumCenter,
+            glm::vec3(0.0f, 1.0f, 0.0f)
         );
-        cascadeProj[1][1] *= -1;
-        ubo.cascadeViewProj[i] = cascadeProj * lightView;
+        
+        // Find bounding box in light space
+        float minX = std::numeric_limits<float>::max();
+        float maxX = std::numeric_limits<float>::lowest();
+        float minY = std::numeric_limits<float>::max();
+        float maxY = std::numeric_limits<float>::lowest();
+        float minZ = std::numeric_limits<float>::max();
+        float maxZ = std::numeric_limits<float>::lowest();
+        
+        for (int j = 0; j < 8; j++) {
+            glm::vec4 cornerLS = lightView * glm::vec4(frustumCornersWS[j], 1.0f);
+            minX = std::min(minX, cornerLS.x);
+            maxX = std::max(maxX, cornerLS.x);
+            minY = std::min(minY, cornerLS.y);
+            maxY = std::max(maxY, cornerLS.y);
+            minZ = std::min(minZ, cornerLS.z);
+            maxZ = std::max(maxZ, cornerLS.z);
+        }
+        
+        // Expand Z range to catch shadow casters behind the camera
+        float zMult = 10.0f;
+        if (minZ < 0) minZ *= zMult;
+        else minZ /= zMult;
+        if (maxZ < 0) maxZ /= zMult;
+        else maxZ *= zMult;
+        
+        // Stabilize shadow map to reduce edge shimmer when camera moves
+        // Snap to texel grid
+        float worldUnitsPerTexel = std::max(maxX - minX, maxY - minY) / 2048.0f;
+        minX = floor(minX / worldUnitsPerTexel) * worldUnitsPerTexel;
+        maxX = floor(maxX / worldUnitsPerTexel) * worldUnitsPerTexel;
+        minY = floor(minY / worldUnitsPerTexel) * worldUnitsPerTexel;
+        maxY = floor(maxY / worldUnitsPerTexel) * worldUnitsPerTexel;
+        
+        // Create orthographic projection for this cascade
+        glm::mat4 lightProj = glm::ortho(minX, maxX, minY, maxY, -maxZ, -minZ);
+        lightProj[1][1] *= -1;  // Vulkan Y-flip
+        
+        ubo.cascadeViewProj[i] = lightProj * lightView;
+        
+        // Store first cascade matrix as the main light space matrix
+        if (i == 0) {
+            ubo.lightSpaceMatrix = ubo.cascadeViewProj[0];
+        }
     }
     
     // Shadow parameters: x=mapSize, y=pcfRadius, z=bias, w=cascadeBlendRange
@@ -2695,7 +2764,7 @@ void Renderer::createGBufferPipeline() {
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &gBufferDescriptorSetLayout;
+    pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;  // Use main layout for compatibility with game objects
     pipelineLayoutInfo.pushConstantRangeCount = 1;
     pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
     
