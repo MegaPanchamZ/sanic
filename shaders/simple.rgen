@@ -21,17 +21,23 @@ void main() {
     const vec2 pixelCenter = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
     const vec2 inUV = pixelCenter / vec2(gl_LaunchSizeEXT.xy);
     
-    // NDC coordinates
+    // NDC coordinates - projection matrix already has Y flipped for Vulkan
     vec2 d = inUV * 2.0 - 1.0;
+    // Don't flip Y here - projection matrix handles the Vulkan coordinate system
     
     // Compute ray direction from camera
     mat4 invProj = inverse(ubo.proj);
     mat4 invView = inverse(ubo.view);
     
-    vec4 target = invProj * vec4(d.x, d.y, 1, 1);
-    vec4 direction = invView * vec4(normalize(target.xyz), 0);
+    // Unproject to view space
+    vec4 target = invProj * vec4(d.x, d.y, 1.0, 1.0);
+    target /= target.w;
     
-    vec3 origin = ubo.viewPos.xyz;
+    // Transform to world space
+    vec4 direction = invView * vec4(normalize(target.xyz), 0.0);
+    
+    // Camera position from inverse view matrix
+    vec3 origin = (invView * vec4(0, 0, 0, 1)).xyz;
     vec3 rayDir = normalize(direction.xyz);
     
     float tMin = 0.001;

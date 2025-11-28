@@ -40,13 +40,16 @@ void RTPipeline::createPipeline(VkDescriptorSetLayout descriptorSetLayout) {
     // Load shaders
     auto raygenCode = readFile("shaders/simple.rgen.spv");
     auto missCode = readFile("shaders/simple.rmiss.spv");
+    auto shadowMissCode = readFile("shaders/shadow.rmiss.spv");
     auto chitCode = readFile("shaders/simple.rchit.spv");
 
     VkShaderModule raygenModule = createShaderModule(raygenCode);
     VkShaderModule missModule = createShaderModule(missCode);
+    VkShaderModule shadowMissModule = createShaderModule(shadowMissCode);
     VkShaderModule chitModule = createShaderModule(chitCode);
 
     // Shader stages
+    // Index 0: raygen, 1: miss (primary), 2: miss (shadow), 3: closest hit
     std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
 
     VkPipelineShaderStageCreateInfo raygenStage{};
@@ -63,6 +66,13 @@ void RTPipeline::createPipeline(VkDescriptorSetLayout descriptorSetLayout) {
     missStage.pName = "main";
     shaderStages.push_back(missStage);
 
+    VkPipelineShaderStageCreateInfo shadowMissStage{};
+    shadowMissStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shadowMissStage.stage = VK_SHADER_STAGE_MISS_BIT_KHR;
+    shadowMissStage.module = shadowMissModule;
+    shadowMissStage.pName = "main";
+    shaderStages.push_back(shadowMissStage);
+
     VkPipelineShaderStageCreateInfo chitStage{};
     chitStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     chitStage.stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
@@ -70,9 +80,10 @@ void RTPipeline::createPipeline(VkDescriptorSetLayout descriptorSetLayout) {
     chitStage.pName = "main";
     shaderStages.push_back(chitStage);
 
-    // Shader groups
+    // Shader groups (order: raygen, miss0, miss1, hit)
     std::vector<VkRayTracingShaderGroupCreateInfoKHR> shaderGroups;
 
+    // Group 0: Raygen
     VkRayTracingShaderGroupCreateInfoKHR raygenGroup{};
     raygenGroup.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
     raygenGroup.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
@@ -82,6 +93,7 @@ void RTPipeline::createPipeline(VkDescriptorSetLayout descriptorSetLayout) {
     raygenGroup.intersectionShader = VK_SHADER_UNUSED_KHR;
     shaderGroups.push_back(raygenGroup);
 
+    // Group 1: Primary miss (sky)
     VkRayTracingShaderGroupCreateInfoKHR missGroup{};
     missGroup.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
     missGroup.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
@@ -91,11 +103,22 @@ void RTPipeline::createPipeline(VkDescriptorSetLayout descriptorSetLayout) {
     missGroup.intersectionShader = VK_SHADER_UNUSED_KHR;
     shaderGroups.push_back(missGroup);
 
+    // Group 2: Shadow miss
+    VkRayTracingShaderGroupCreateInfoKHR shadowMissGroup{};
+    shadowMissGroup.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+    shadowMissGroup.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+    shadowMissGroup.generalShader = 2; // shadowMissStage index
+    shadowMissGroup.closestHitShader = VK_SHADER_UNUSED_KHR;
+    shadowMissGroup.anyHitShader = VK_SHADER_UNUSED_KHR;
+    shadowMissGroup.intersectionShader = VK_SHADER_UNUSED_KHR;
+    shaderGroups.push_back(shadowMissGroup);
+
+    // Group 3: Closest hit
     VkRayTracingShaderGroupCreateInfoKHR hitGroup{};
     hitGroup.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
     hitGroup.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
     hitGroup.generalShader = VK_SHADER_UNUSED_KHR;
-    hitGroup.closestHitShader = 2; // chitStage index
+    hitGroup.closestHitShader = 3; // chitStage index
     hitGroup.anyHitShader = VK_SHADER_UNUSED_KHR;
     hitGroup.intersectionShader = VK_SHADER_UNUSED_KHR;
     shaderGroups.push_back(hitGroup);
@@ -110,14 +133,14 @@ void RTPipeline::createPipeline(VkDescriptorSetLayout descriptorSetLayout) {
         throw std::runtime_error("Failed to create RT pipeline layout!");
     }
 
-    // Ray tracing pipeline
+    // Ray tracing pipeline - depth 2 for shadow rays from closest hit
     VkRayTracingPipelineCreateInfoKHR pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
     pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
     pipelineInfo.pStages = shaderStages.data();
     pipelineInfo.groupCount = static_cast<uint32_t>(shaderGroups.size());
     pipelineInfo.pGroups = shaderGroups.data();
-    pipelineInfo.maxPipelineRayRecursionDepth = 1;
+    pipelineInfo.maxPipelineRayRecursionDepth = 2;  // Primary + shadow rays
     pipelineInfo.layout = rtPipelineLayout;
 
     if (vkCreateRayTracingPipelinesKHR(device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &rtPipeline) != VK_SUCCESS) {
@@ -127,6 +150,7 @@ void RTPipeline::createPipeline(VkDescriptorSetLayout descriptorSetLayout) {
     // Cleanup shader modules
     vkDestroyShaderModule(device, raygenModule, nullptr);
     vkDestroyShaderModule(device, missModule, nullptr);
+    vkDestroyShaderModule(device, shadowMissModule, nullptr);
     vkDestroyShaderModule(device, chitModule, nullptr);
 
     // Create SBT
@@ -153,7 +177,8 @@ void RTPipeline::createShaderBindingTable() {
     uint32_t handleSizeAligned = (handleSize + (handleAlignment - 1)) & ~(handleAlignment - 1);
 
     // Get shader group handles
-    uint32_t groupCount = 3; // raygen, miss, hit
+    // Groups: 0=raygen, 1=primary miss, 2=shadow miss, 3=hit
+    uint32_t groupCount = 4;
     uint32_t sbtSize = groupCount * handleSizeAligned;
     
     std::vector<uint8_t> handleData(sbtSize);
@@ -177,15 +202,18 @@ void RTPipeline::createShaderBindingTable() {
     VkDeviceAddress sbtAddress = getBufferDeviceAddress(sbtBuffer);
 
     // Setup regions
+    // Raygen: 1 shader at offset 0
     raygenRegion.deviceAddress = sbtAddress;
     raygenRegion.stride = handleSizeAligned;
     raygenRegion.size = handleSizeAligned;
 
+    // Miss: 2 shaders (primary + shadow) starting at offset 1
     missRegion.deviceAddress = sbtAddress + handleSizeAligned;
     missRegion.stride = handleSizeAligned;
-    missRegion.size = handleSizeAligned;
+    missRegion.size = 2 * handleSizeAligned;  // 2 miss shaders
 
-    hitRegion.deviceAddress = sbtAddress + 2 * handleSizeAligned;
+    // Hit: 1 shader at offset 3
+    hitRegion.deviceAddress = sbtAddress + 3 * handleSizeAligned;
     hitRegion.stride = handleSizeAligned;
     hitRegion.size = handleSizeAligned;
 

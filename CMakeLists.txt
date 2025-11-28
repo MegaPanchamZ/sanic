@@ -103,6 +103,9 @@ set(SOURCES
     src/engine/DescriptorManager.cpp
     src/engine/AccelerationStructureBuilder.cpp
     src/engine/RTPipeline.cpp
+    src/engine/VulkanContext.cpp
+    src/engine/ShadowRenderer.cpp
+    src/engine/DeferredRenderer.cpp
 )
 
 # --- Executable ---

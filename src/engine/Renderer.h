@@ -11,6 +11,9 @@
 #include "Skybox.h"
 #include "AccelerationStructureBuilder.h"
 #include "RTPipeline.h"
+#include "VulkanContext.h"
+#include "ShadowRenderer.h"
+#include "DeferredRenderer.h"
 
 class Renderer {
 public:
@@ -22,32 +25,27 @@ public:
     void processInput(float deltaTime);
 
 private:
-    void createInstance();
+    VulkanContext vulkanContext;
+    std::unique_ptr<ShadowRenderer> shadowRenderer;
+    std::unique_ptr<DeferredRenderer> deferredRenderer;
+    
+    // Cached handles from VulkanContext for convenience
+    VkInstance instance;
+    VkPhysicalDevice physicalDevice;
+    VkDevice device;
+    VkQueue graphicsQueue;
+    VkQueue presentQueue;
+    VkSurfaceKHR surface;
 
-    struct QueueFamilyIndices {
-        uint32_t graphicsFamily = -1;
-        uint32_t presentFamily = -1;
-        bool isComplete() { return graphicsFamily != -1 && presentFamily != -1; }
-    };
-
-    struct SwapChainSupportDetails {
-        VkSurfaceCapabilitiesKHR capabilities;
-        std::vector<VkSurfaceFormatKHR> formats;
-        std::vector<VkPresentModeKHR> presentModes;
-    };
-
-    void pickPhysicalDevice();
-    bool isDeviceSuitable(VkPhysicalDevice device);
-    bool checkDeviceExtensionSupport(VkPhysicalDevice device);
-    QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device);
-    SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device);
-
+    VkSwapchainKHR swapchain;
+    std::vector<VkImage> swapchainImages;
+    VkFormat swapchainImageFormat;
+    VkExtent2D swapchainExtent;
+    
     VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);
     VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes);
     VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities);
 
-    void createLogicalDevice();
-    void createSurface();
     void createSwapchain();
     void createImageViews();
     void createRenderPass();
@@ -93,15 +91,7 @@ private:
         alignas(16) glm::vec4 shadowParams;    // x=mapSize, y=pcfRadius, z=bias, w=cascadeBlend
     };
 
-    struct PushConstantData {
-        glm::mat4 model;
-        glm::mat4 normalMatrix;
-        uint64_t meshletBufferAddress;
-        uint64_t meshletVerticesAddress;
-        uint64_t meshletTrianglesAddress;
-        uint64_t vertexBufferAddress;
-        uint32_t meshletCount;
-    };
+    // PushConstantData now managed in DeferredRenderer/ShadowRenderer as needed
     
     VkBuffer uniformBuffer;
     VkDeviceMemory uniformBufferMemory;
@@ -121,91 +111,10 @@ private:
     void createSkyboxGraphicsPipeline();
     void createSkyboxDescriptorSetLayout();
     
-    // Shadow Mapping
-    VkRenderPass shadowRenderPass;
-    VkPipelineLayout shadowPipelineLayout;
-    VkPipeline shadowPipeline;
-    VkImage shadowImage;
-    VkDeviceMemory shadowImageMemory;
-    VkImageView shadowImageView;
-    VkSampler shadowSampler;
-    VkFramebuffer shadowFramebuffer;
-    
-    // CSM: Shadow map array for 4 cascades
-    static const uint32_t CSM_CASCADE_COUNT = 4;
-    static const uint32_t SHADOW_MAP_SIZE = 2048;
-    VkImage shadowArrayImage;
-    VkDeviceMemory shadowArrayImageMemory;
-    VkImageView shadowArrayImageView;
-    std::array<VkImageView, CSM_CASCADE_COUNT> shadowCascadeViews;
-    std::array<VkFramebuffer, CSM_CASCADE_COUNT> shadowCascadeFramebuffers;
-    
-    void createShadowRenderPass();
-    void createShadowGraphicsPipeline();
-    void createShadowResources();
-    void createCSMResources();
-
-    // ========================================================================
-    // AAA STANDARD: Nanite (Mesh Shaders)
-    // ========================================================================
-    VkPipelineLayout meshPipelineLayout;
-    VkPipeline meshPipeline;
-    PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT;
-
-    void createMeshPipeline();
-    void loadMeshShaderFunctions();
-    
-    // ========================================================================
-    // AAA STANDARD: Deferred Rendering (G-Buffer)
-    // ========================================================================
-    
-    // G-Buffer attachments
-    struct GBufferAttachment {
-        VkImage image;
-        VkDeviceMemory memory;
-        VkImageView view;
-        VkFormat format;
-    };
-    
-    GBufferAttachment gBufferPosition;   // RGB: World Pos, A: View Depth
-    GBufferAttachment gBufferNormal;     // RGB: Normal
-    GBufferAttachment gBufferAlbedo;     // RGB: Albedo, A: Metallic
-    GBufferAttachment gBufferPBR;        // R: Roughness, G: AO
-    
-    // Deferred render pass with 2 subpasses
-    VkRenderPass deferredRenderPass;
-    std::vector<VkFramebuffer> deferredFramebuffers;
-    
-    // G-Buffer geometry pass pipeline
-    VkPipelineLayout gBufferPipelineLayout;
-    VkPipeline gBufferPipeline;
-    VkDescriptorSetLayout gBufferDescriptorSetLayout;
-    
-    // Composition pass pipeline
-    VkPipelineLayout compositionPipelineLayout;
-    VkPipeline compositionPipeline;
-    VkDescriptorSetLayout compositionDescriptorSetLayout;
-    VkDescriptorSet compositionDescriptorSet;
-    
-    // Deferred rendering functions
-    void createDeferredRenderPass();
-    void createGBufferResources();
-    void createGBufferDescriptorSetLayout();
-    void createGBufferPipeline();
-    void createCompositionDescriptorSetLayout();
-    void createCompositionPipeline();
-    void createCompositionDescriptorSets();
-    void createDeferredFramebuffers();
-    
-    // Helper for creating G-Buffer attachments
-    void createGBufferAttachment(GBufferAttachment& attachment, VkFormat format, VkImageUsageFlags usage);
-    void destroyGBufferAttachment(GBufferAttachment& attachment);
-    
     // ========================================================================
     // AAA STANDARD: Ray Tracing Readiness (VK_KHR_ray_tracing_pipeline)
     // ========================================================================
     bool rayTracingSupported = false;
-    bool checkRayTracingSupport(VkPhysicalDevice device);
     void initRayTracingProperties();
     
     // Ray Tracing Properties (populated if supported)
@@ -230,6 +139,17 @@ private:
     VkDeviceMemory rtOutputImageMemory = VK_NULL_HANDLE;
     VkImageView rtOutputImageView = VK_NULL_HANDLE;
     
+    // RT Geometry Info Buffer (for textured ray tracing)
+    struct RTGeometryInfo {
+        uint64_t vertexBufferAddress;
+        uint64_t indexBufferAddress;
+        uint32_t textureIndex;
+        uint32_t padding;
+    };
+    VkBuffer rtGeometryInfoBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory rtGeometryInfoBufferMemory = VK_NULL_HANDLE;
+    static const uint32_t RT_MAX_TEXTURES = 16;
+    
     // RT Rendering Toggle (press R to switch)
     bool useRayTracing = true;
     
@@ -237,11 +157,6 @@ private:
     void createRTOutputImage();
     void createRTDescriptorSet();
     void dispatchRayTracing(VkCommandBuffer commandBuffer);
-    
-    // Cascaded Shadow Map helpers
-    void calculateCascadeSplits(float nearClip, float farClip, float lambda = 0.5f);
-    std::array<glm::mat4, 4> cascadeViewProjMatrices;
-    std::array<float, 4> cascadeSplitDistances;
     
     void createDepthResources();
     void createUniformBuffers();
@@ -258,23 +173,13 @@ private:
     void createImageWithLayers(uint32_t width, uint32_t height, uint32_t layers, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory);
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags);
     VkImageView createImageViewWithLayers(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t baseLayer, uint32_t layerCount, VkImageViewType viewType);
-    VkFormat findDepthFormat();
-    VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
+    
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
     void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
 
-    VkInstance instance;
-    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-    VkDevice device;
-    VkQueue graphicsQueue;
-    VkQueue presentQueue;
-    VkSurfaceKHR surface;
-    VkSwapchainKHR swapchain;
-    std::vector<VkImage> swapchainImages;
-    VkFormat swapchainImageFormat;
-    VkExtent2D swapchainExtent;
-    
     Camera camera;
     Window& window;
+    
+    VkFormat findDepthFormat(); 
 };

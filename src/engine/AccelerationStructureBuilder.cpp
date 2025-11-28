@@ -16,9 +16,11 @@ AccelerationStructureBuilder::AccelerationStructureBuilder(VkDevice device, VkPh
     vkDestroyAccelerationStructureKHR = (PFN_vkDestroyAccelerationStructureKHR)vkGetDeviceProcAddr(device, "vkDestroyAccelerationStructureKHR");
     vkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR");
     vkGetBufferDeviceAddressKHR = (PFN_vkGetBufferDeviceAddressKHR)vkGetDeviceProcAddr(device, "vkGetBufferDeviceAddress");
+    vkGetAccelerationStructureDeviceAddressKHR = (PFN_vkGetAccelerationStructureDeviceAddressKHR)vkGetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR");
     
     if (!vkGetAccelerationStructureBuildSizesKHR || !vkCreateAccelerationStructureKHR || 
-        !vkDestroyAccelerationStructureKHR || !vkCmdBuildAccelerationStructuresKHR || !vkGetBufferDeviceAddressKHR) {
+        !vkDestroyAccelerationStructureKHR || !vkCmdBuildAccelerationStructuresKHR || 
+        !vkGetBufferDeviceAddressKHR || !vkGetAccelerationStructureDeviceAddressKHR) {
         throw std::runtime_error("Failed to load Ray Tracing function pointers!");
     }
 }
@@ -80,7 +82,7 @@ std::vector<AccelerationStructure> AccelerationStructureBuilder::buildBLAS(const
         createBuffer(buildSizesInfo.accelerationStructureSize, 
                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, blas.buffer, blas.memory);
-        blas.deviceAddress = getBufferDeviceAddress(blas.buffer);
+        // deviceAddress will be set after creating the AS handle
 
         VkAccelerationStructureCreateInfoKHR createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
@@ -88,6 +90,12 @@ std::vector<AccelerationStructure> AccelerationStructureBuilder::buildBLAS(const
         createInfo.size = buildSizesInfo.accelerationStructureSize;
         createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
         vkCreateAccelerationStructureKHR(device, &createInfo, nullptr, &blas.handle);
+        
+        // Get the acceleration structure device address (for TLAS instance references)
+        VkAccelerationStructureDeviceAddressInfoKHR addressInfo{};
+        addressInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+        addressInfo.accelerationStructure = blas.handle;
+        blas.deviceAddress = vkGetAccelerationStructureDeviceAddressKHR(device, &addressInfo);
 
         // 4. Build BLAS
         // Scratch buffer

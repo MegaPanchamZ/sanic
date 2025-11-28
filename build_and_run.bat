@@ -50,6 +50,13 @@ if not exist %SHADER_OUT% (
 %GLSLC% %SHADER_SRC%\shadow.vert -o %SHADER_OUT%\shadow.vert.spv
 %GLSLC% %SHADER_SRC%\shadow.frag -o %SHADER_OUT%\shadow.frag.spv
 
+:: Compile ray tracing shaders
+set RT_SHADER_SRC=..\shaders
+%GLSLC% --target-env=vulkan1.2 %RT_SHADER_SRC%\simple.rgen -o %SHADER_OUT%\simple.rgen.spv
+%GLSLC% --target-env=vulkan1.2 %RT_SHADER_SRC%\simple.rmiss -o %SHADER_OUT%\simple.rmiss.spv
+%GLSLC% --target-env=vulkan1.2 %RT_SHADER_SRC%\shadow.rmiss -o %SHADER_OUT%\shadow.rmiss.spv
+%GLSLC% --target-env=vulkan1.2 %RT_SHADER_SRC%\simple.rchit -o %SHADER_OUT%\simple.rchit.spv
+
 :: Copy assets (e.g., textures) to the build output directory
 set ASSETS_SRC=..\assets
 set ASSETS_DST=assets
