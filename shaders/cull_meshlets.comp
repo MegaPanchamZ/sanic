@@ -1,0 +1,48 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+struct DrawMeshTasksIndirectCommandEXT {
+    uint groupCountX;
+    uint groupCountY;
+    uint groupCountZ;
+};
+
+struct DispatchIndirectCommand {
+    uint x;
+    uint y;
+    uint z;
+};
+
+layout(std430, set = 0, binding = 0) buffer IndirectDrawBuffer {
+    DrawMeshTasksIndirectCommandEXT drawCommands[];
+};
+
+layout(std430, set = 0, binding = 1) buffer IndirectDispatchBuffer {
+    DispatchIndirectCommand dispatchCommands[];
+};
+
+// Push constants and UBOs...
+// For now, simplified.
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    
+    // Logic to check bounds and screen size
+    // ...
+    
+    // If visible:
+    // Check screen size
+    bool small = false; // Calculate based on projected radius
+    
+    if (small) {
+        // Append to Indirect Dispatch Buffer (Software Rasterizer)
+        // atomicAdd count...
+    } else {
+        // Append to Indirect Draw Buffer (Hardware Rasterizer)
+        // atomicAdd count...
+    }
+}

@@ -25,7 +25,7 @@ void VulkanContext::createInstance() {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "No Engine";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_0;
+    appInfo.apiVersion = VK_API_VERSION_1_3;  // Required for mesh shaders and modern SPIR-V
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -97,15 +97,23 @@ void VulkanContext::createLogicalDevice() {
     deviceFeatures.samplerAnisotropy = VK_TRUE;
     // Enable standard features if needed (e.g. geometryShader, etc.)
 
+    // Vulkan 1.3 Features (maintenance4 for LocalSizeId)
+    VkPhysicalDeviceVulkan13Features vulkan13Features{};
+    vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    vulkan13Features.maintenance4 = VK_TRUE;
+
     // Vulkan 1.2 Features (Descriptor Indexing, Buffer Device Address)
     VkPhysicalDeviceVulkan12Features vulkan12Features{};
     vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     vulkan12Features.bufferDeviceAddress = VK_TRUE;
+    vulkan12Features.descriptorIndexing = VK_TRUE;  // Required for VK_EXT_descriptor_indexing
     vulkan12Features.descriptorBindingPartiallyBound = VK_TRUE;
     vulkan12Features.descriptorBindingVariableDescriptorCount = VK_TRUE;
     vulkan12Features.runtimeDescriptorArray = VK_TRUE;
     vulkan12Features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
     vulkan12Features.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE; // For bindless buffers
+    vulkan12Features.shaderInt8 = VK_TRUE;  // For GL_EXT_shader_explicit_arithmetic_types_int8
+    vulkan12Features.storageBuffer8BitAccess = VK_TRUE;  // For GL_EXT_shader_8bit_storage
 
     // Mesh Shader Features
     VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{};
@@ -123,7 +131,8 @@ void VulkanContext::createLogicalDevice() {
     rtPipelineFeatures.rayTracingPipeline = VK_TRUE;
 
     // Chain them together
-    void* pNextChain = &vulkan12Features;
+    void* pNextChain = &vulkan13Features;
+    vulkan13Features.pNext = &vulkan12Features;
     vulkan12Features.pNext = &meshShaderFeatures;
     meshShaderFeatures.pNext = &asFeatures;
     asFeatures.pNext = &rtPipelineFeatures;
@@ -142,17 +151,14 @@ void VulkanContext::createLogicalDevice() {
     // ========================================================================
     std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_MAINTENANCE3_EXTENSION_NAME, // Required for descriptor indexing (pre-1.2)
-        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, // Required if not 1.2, but good to have
         
-        // Bindless / RT / Mesh
-        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+        // Mesh Shaders
         VK_EXT_MESH_SHADER_EXTENSION_NAME,
+        
+        // Ray Tracing
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
         VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-        VK_KHR_SPIRV_1_4_EXTENSION_NAME,
-        VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME
+        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME
     };
     
     // Check for ray tracing support

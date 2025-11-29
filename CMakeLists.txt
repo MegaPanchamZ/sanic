@@ -110,6 +110,10 @@ set(SOURCES
     src/engine/SSRSystem.cpp
     src/engine/HiZBuffer.cpp
     src/engine/SSRDenoiser.cpp
+    src/engine/VisBufferRenderer.cpp
+    src/engine/MeshletStreamer.cpp
+    src/engine/SurfaceCacheManager.cpp
+    src/engine/PhysicsSystem.cpp
 )
 
 # --- Executable ---

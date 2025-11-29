@@ -1,0 +1,80 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+struct Meshlet {
+    float center[3];
+    float radius;
+    int8_t cone_axis[3];
+    int8_t cone_cutoff;
+    uint vertex_offset;
+    uint triangle_offset;
+    uint8_t vertex_count;
+    uint8_t triangle_count;
+    uint8_t padding[2];
+};
+
+struct Vertex {
+    float pos[3];
+    float color[3];
+    float texCoord[2];
+    float normal[3];
+};
+
+layout(buffer_reference, scalar) buffer Meshlets { Meshlet meshlets[]; };
+layout(buffer_reference, scalar) buffer MeshletVertices { uint vertices[]; };
+layout(buffer_reference, scalar) buffer MeshletTriangles { uint8_t indices[]; };
+layout(buffer_reference, scalar) buffer Vertices { Vertex vertices[]; };
+
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    mat4 normalMatrix;
+    Meshlets meshletBuffer;
+    MeshletVertices meshletVertices;
+    MeshletTriangles meshletTriangles;
+    Vertices vertexBuffer;
+    uint meshletCount;
+    uint instanceID;
+} push;
+
+layout(set = 0, binding = 0) uniform UniformBufferObject {
+    mat4 view;
+    mat4 proj;
+} ubo;
+
+// Payload to pass to mesh shader
+struct TaskPayload {
+    uint meshletIndices[32];
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+void main() {
+    uint threadId = gl_LocalInvocationID.x;
+    uint meshletIndex = gl_GlobalInvocationID.x;
+
+    bool visible = false;
+    if (meshletIndex < push.meshletCount) {
+        visible = true;
+    }
+
+    // Vote
+    uvec4 vote = subgroupBallot(visible);
+    uint count = subgroupBallotBitCount(vote);
+    uint index = subgroupBallotExclusiveBitCount(vote);
+
+    if (visible) {
+        payload.meshletIndices[index] = meshletIndex;
+    }
+
+    if (threadId == 0) {
+        EmitMeshTasksEXT(count, 1, 1);
+    }
+}

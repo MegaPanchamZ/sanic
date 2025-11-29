@@ -14,9 +14,12 @@
 #include <unordered_map>
 #include <set>
 #include "DescriptorManager.h"
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/BoxShape.h>
 
-Renderer::Renderer(Window& window)
+Renderer::Renderer(Window& window, PhysicsSystem& physicsSystem)
     : window(window)
+    , physicsSystem(physicsSystem)
     , camera(static_cast<float>(window.getWidth()) / static_cast<float>(window.getHeight()))
     , vulkanContext(window)
 {
@@ -54,6 +57,18 @@ Renderer::Renderer(Window& window)
         descriptorPool
     );
     deferredRenderer->createFramebuffers(swapchainImageViews, depthImageView);
+
+    visBufferRenderer = std::make_unique<VisBufferRenderer>(
+        vulkanContext,
+        swapchainExtent.width, swapchainExtent.height,
+        swapchainImageFormat,
+        descriptorSetLayout,
+        descriptorPool
+    );
+    visBufferRenderer->createFramebuffers(swapchainImageViews, depthImageView);
+
+    meshletStreamer = std::make_unique<MeshletStreamer>(vulkanContext);
+    surfaceCacheManager = std::make_unique<SurfaceCacheManager>(vulkanContext);
 
     // Shadow pass setup (CSM) - managed by ShadowRenderer now
     // CSM resources managed by ShadowRenderer
@@ -156,10 +171,14 @@ void Renderer::waitIdle() {
     vkDeviceWaitIdle(device);
 }
 
+void Renderer::update(float deltaTime) {
+    physicsSystem.updateGameObjects(gameObjects);
+}
+
 void Renderer::drawFrame() {
     static uint32_t currentFrame = 0;
     currentFrame++;
-    
+
     vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &inFlightFence);
 
@@ -316,7 +335,19 @@ void Renderer::drawFrame() {
         // PASS 2: Deferred Rendering (G-Buffer + Composition) via DeferredRenderer
         // DeferredRenderer outputs directly to swapchain (attachment 5) with PRESENT_SRC layout
         // Composition shader now samples DDGI for indirect diffuse lighting
-        deferredRenderer->render(commandBuffer, imageIndex, gameObjects);
+        // deferredRenderer->render(commandBuffer, imageIndex, gameObjects);
+        
+        // VISIBILITY BUFFER RENDERER (Replaces DeferredRenderer)
+        
+        // Update Meshlet Streamer (Culling / LOD)
+        meshletStreamer->update(commandBuffer, gameObjects);
+        
+        // Render using VisBufferRenderer
+        // For now, we still use the direct render method which iterates objects.
+        // To use the indirect buffers from MeshletStreamer, we need to add a new method to VisBufferRenderer.
+        // visBufferRenderer->renderIndirect(commandBuffer, meshletStreamer->getIndirectDrawBuffer(), ...);
+        
+        visBufferRenderer->render(commandBuffer, imageIndex, gameObjects);
     }
 
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
@@ -1082,6 +1113,15 @@ void Renderer::loadGameObjects() {
     terrain.material = terrainMaterial;
     terrain.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 0.0f));
     createDescriptorSet(terrain);
+    
+    // Physics Body for Terrain (Static)
+    {
+        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
+        JPH::BoxShapeSettings floorShapeSettings(JPH::Vec3(100.0f, 1.0f, 100.0f));
+        JPH::BodyCreationSettings floorSettings(&floorShapeSettings, JPH::RVec3(0.0f, -1.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
+        terrain.bodyID = bodyInterface.CreateAndAddBody(floorSettings, JPH::EActivation::DontActivate);
+    }
+    
     gameObjects.push_back(terrain);
     std::cout << "[TERRAIN] Ground plane - Tests: Normal mapping, shadow receiving" << std::endl;
 
@@ -1091,6 +1131,15 @@ void Renderer::loadGameObjects() {
     shadowCaster.material = rockMaterial;
     shadowCaster.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.0f, 0.0f));
     createDescriptorSet(shadowCaster);
+    
+    // Physics Body for Shadow Caster (Dynamic)
+    {
+        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
+        JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f)); // Half extents
+        JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(0.0f, 2.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
+        shadowCaster.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+    }
+    
     gameObjects.push_back(shadowCaster);
     std::cout << "[CUBE 1] Shadow caster at (0, 2, 0) - Tests: Shadow casting" << std::endl;
 
@@ -1100,6 +1149,15 @@ void Renderer::loadGameObjects() {
     shadowReceiver.material = terrainMaterial2;
     shadowReceiver.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.5f, 0.0f));
     createDescriptorSet(shadowReceiver);
+    
+    // Physics Body for Shadow Receiver (Dynamic)
+    {
+        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
+        JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
+        JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(0.0f, 0.5f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
+        shadowReceiver.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+    }
+    
     gameObjects.push_back(shadowReceiver);
     std::cout << "[CUBE 2] Shadow receiver at (0, 0.5, 0) - Tests: Shadow receiving" << std::endl;
 
@@ -1111,6 +1169,15 @@ void Renderer::loadGameObjects() {
         float x = -3.0f + i * 3.0f;
         specCube.transform = glm::translate(glm::mat4(1.0f), glm::vec3(x, 0.5f, -3.0f));
         createDescriptorSet(specCube);
+        
+        // Physics Body
+        {
+            JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
+            JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
+            JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(x, 0.5f, -3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
+            specCube.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+        }
+        
         gameObjects.push_back(specCube);
     }
     std::cout << "[CUBES 3-5] Specular test row at z=-3 - Tests: Specular highlights" << std::endl;
@@ -1123,6 +1190,17 @@ void Renderer::loadGameObjects() {
     rot1 = glm::rotate(rot1, glm::radians(45.0f), glm::vec3(0.0f, 1.0f, 0.0f));
     rotatedCube1.transform = rot1;
     createDescriptorSet(rotatedCube1);
+    
+    // Physics Body (Rotated)
+    {
+        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
+        JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
+        // Reconstruct rotation for Jolt
+        JPH::Quat rotation = JPH::Quat::sRotation(JPH::Vec3(0, 1, 0), glm::radians(45.0f));
+        JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(-4.0f, 0.5f, 0.0f), rotation, JPH::EMotionType::Dynamic, Layers::MOVING);
+        rotatedCube1.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+    }
+
     gameObjects.push_back(rotatedCube1);
     std::cout << "[CUBE 6] 45-degree rotated at (-4, 0.5, 0) - Tests: Normal mapping on angles" << std::endl;
 
@@ -1134,6 +1212,18 @@ void Renderer::loadGameObjects() {
     rot2 = glm::rotate(rot2, glm::radians(30.0f), glm::vec3(0.0f, 1.0f, 0.0f));
     rotatedCube2.transform = rot2;
     createDescriptorSet(rotatedCube2);
+    
+    // Physics Body (Multi-axis Rotated)
+    {
+        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
+        JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
+        // Reconstruct rotation
+        JPH::Quat rotX = JPH::Quat::sRotation(JPH::Vec3(1, 0, 0), glm::radians(30.0f));
+        JPH::Quat rotY = JPH::Quat::sRotation(JPH::Vec3(0, 1, 0), glm::radians(30.0f));
+        JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(4.0f, 0.5f, 0.0f), rotY * rotX, JPH::EMotionType::Dynamic, Layers::MOVING);
+        rotatedCube2.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+    }
+
     gameObjects.push_back(rotatedCube2);
     std::cout << "[CUBE 7] Multi-axis rotated at (4, 0.5, 0) - Tests: Complex normal transforms" << std::endl;
 
@@ -1144,6 +1234,15 @@ void Renderer::loadGameObjects() {
         stackCube.material = (i % 2 == 0) ? rockMaterial : terrainMaterial2;
         stackCube.transform = glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 0.5f + i * 1.0f, 3.0f));
         createDescriptorSet(stackCube);
+        
+        // Physics Body
+        {
+            JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
+            JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
+            JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(3.0f, 0.5f + i * 1.0f, 3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
+            stackCube.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+        }
+        
         gameObjects.push_back(stackCube);
     }
     std::cout << "[CUBES 8-10] Stacked tower at (3, y, 3) - Tests: Self-shadowing" << std::endl;
@@ -1170,6 +1269,15 @@ void Renderer::loadGameObjects() {
         glm::vec3(1.0f)  // 1 unit radius
     );
     createDescriptorSet(lightIndicator);
+    
+    // Physics Body (Sphere, Static or Dynamic?) Let's make it static so it stays as indicator
+    {
+        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
+        JPH::SphereShapeSettings sphereShapeSettings(1.0f);
+        JPH::BodyCreationSettings sphereSettings(&sphereShapeSettings, JPH::RVec3(lightIndicatorPos.x, lightIndicatorPos.y, lightIndicatorPos.z), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
+        lightIndicator.bodyID = bodyInterface.CreateAndAddBody(sphereSettings, JPH::EActivation::DontActivate);
+    }
+    
     gameObjects.push_back(lightIndicator);
     std::cout << "[SPHERE] Light indicator at " << lightIndicatorPos.x << ", " 
               << lightIndicatorPos.y << ", " << lightIndicatorPos.z << " - Shows light direction" << std::endl;

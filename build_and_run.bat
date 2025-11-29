@@ -57,6 +57,14 @@ set RT_SHADER_SRC=..\shaders
 %GLSLC% --target-env=vulkan1.2 %RT_SHADER_SRC%\shadow.rmiss -o %SHADER_OUT%\shadow.rmiss.spv
 %GLSLC% --target-env=vulkan1.2 %RT_SHADER_SRC%\simple.rchit -o %SHADER_OUT%\simple.rchit.spv
 
+:: Compile Nanite/VisBuffer shaders
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\nanite.task -o %SHADER_OUT%\nanite.task.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\nanite.mesh -o %SHADER_OUT%\nanite.mesh.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\visbuffer.frag -o %SHADER_OUT%\visbuffer.frag.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\visbuffer.comp -o %SHADER_OUT%\visbuffer.comp.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\material_classify.comp -o %SHADER_OUT%\material_classify.comp.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\cull_meshlets.comp -o %SHADER_OUT%\cull_meshlets.comp.spv
+
 :: Copy assets (e.g., textures) to the build output directory
 set ASSETS_SRC=..\assets
 set ASSETS_DST=assets

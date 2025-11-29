@@ -14,14 +14,19 @@
 #include "VulkanContext.h"
 #include "ShadowRenderer.h"
 #include "DeferredRenderer.h"
+#include "VisBufferRenderer.h"
+#include "MeshletStreamer.h"
+#include "SurfaceCacheManager.h"
 #include "DDGISystem.h"
 #include "SSRSystem.h"
+#include "PhysicsSystem.h"
 
 class Renderer {
 public:
-    Renderer(Window& window);
+    Renderer(Window& window, PhysicsSystem& physicsSystem);
     ~Renderer();
     
+    void update(float deltaTime);
     void drawFrame();
     void waitIdle();
     void processInput(float deltaTime);
@@ -30,6 +35,9 @@ private:
     VulkanContext vulkanContext;
     std::unique_ptr<ShadowRenderer> shadowRenderer;
     std::unique_ptr<DeferredRenderer> deferredRenderer;
+    std::unique_ptr<VisBufferRenderer> visBufferRenderer;
+    std::unique_ptr<MeshletStreamer> meshletStreamer;
+    std::unique_ptr<SurfaceCacheManager> surfaceCacheManager;
     
     // Cached handles from VulkanContext for convenience
     VkInstance instance;
@@ -194,6 +202,7 @@ private:
 
     Camera camera;
     Window& window;
+    PhysicsSystem& physicsSystem;
     
     VkFormat findDepthFormat(); 
 };

@@ -1,0 +1,38 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_image_int64 : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, r64ui) uniform u64image2D visBuffer;
+layout(set = 0, binding = 1, rgba8) uniform image2D debugImage;
+
+void main() {
+    ivec2 pixelPos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(visBuffer);
+    
+    if (pixelPos.x >= size.x || pixelPos.y >= size.y) return;
+    
+    uint64_t payload = imageLoad(visBuffer, pixelPos).x;
+    
+    // Unpack
+    // Depth (15) | Instance (20) | Cluster (22) | Triangle (7)
+    // Packed as: (depth << 49) | (instanceID << 29) | (clusterID << 7) | triangleID
+    
+    if (payload == 0xFFFFFFFFFFFFFFFFUL) { // Clear value
+        imageStore(debugImage, pixelPos, vec4(0.1, 0.1, 0.1, 1)); // Dark gray background
+        return;
+    }
+    
+    uint instanceID = uint((payload >> 29) & 0xFFFFF);
+    uint clusterID = uint((payload >> 7) & 0x3FFFFF);
+    uint triangleID = uint(payload & 0x7F);
+    float depth = float((payload >> 49) & 0x7FFF) / 32767.0;
+    
+    // Visualize Instance ID with some hashing for colors
+    float r = float(instanceID * 37 & 0xFF) / 255.0;
+    float g = float(instanceID * 113 & 0xFF) / 255.0;
+    float b = float(instanceID * 201 & 0xFF) / 255.0;
+    
+    imageStore(debugImage, pixelPos, vec4(r, g, b, 1.0));
+}

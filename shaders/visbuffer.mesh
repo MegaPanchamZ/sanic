@@ -41,6 +41,7 @@ layout(push_constant) uniform PushConstants {
     MeshletTriangles meshletTriangles;
     Vertices vertexBuffer;
     uint meshletCount;
+    uint instanceID;
 } push;
 
 layout(set = 0, binding = 0) uniform UniformBufferObject {
@@ -61,13 +62,9 @@ struct TaskPayload {
 
 taskPayloadSharedEXT TaskPayload payload;
 
-// Output to match gbuffer.frag inputs
-layout(location = 0) out vec3 fragColor[];
-layout(location = 1) out vec2 fragTexCoord[];
-layout(location = 2) out vec3 fragNormal[];
-layout(location = 3) out vec3 fragPos[];
-layout(location = 4) out vec4 fragPosLightSpace[];
-layout(location = 5) out float fragViewDepth[];
+// Output for visibility buffer
+layout(location = 0) out flat uint meshletID[];
+layout(location = 2) out flat uint instanceID[];
 
 void main() {
     uint threadId = gl_LocalInvocationID.x;
@@ -87,19 +84,11 @@ void main() {
         
         Vertex v = push.vertexBuffer.vertices[globalVertexIndex];
         
-        vec3 localPos = vec3(v.pos[0], v.pos[1], v.pos[2]);
-        vec4 worldPos = push.model * vec4(localPos, 1.0);
-        vec4 viewPos = ubo.view * worldPos;
+        vec4 worldPos = push.model * vec4(v.pos[0], v.pos[1], v.pos[2], 1.0);
+        gl_MeshVerticesEXT[i].gl_Position = ubo.proj * ubo.view * worldPos;
         
-        gl_MeshVerticesEXT[i].gl_Position = ubo.proj * viewPos;
-        
-        // Pass vertex data to fragment shader
-        fragColor[i] = vec3(v.color[0], v.color[1], v.color[2]);
-        fragTexCoord[i] = vec2(v.texCoord[0], v.texCoord[1]);
-        fragNormal[i] = mat3(push.normalMatrix) * vec3(v.normal[0], v.normal[1], v.normal[2]);
-        fragPos[i] = worldPos.xyz;
-        fragPosLightSpace[i] = ubo.lightSpaceMatrix * worldPos;
-        fragViewDepth[i] = -viewPos.z;  // Negative because view space Z is negative forward
+        meshletID[i] = meshletIndex;
+        instanceID[i] = push.instanceID;
     }
 
     // Process triangles

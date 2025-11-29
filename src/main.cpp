@@ -1,7 +1,9 @@
 #include <iostream>
 #include "engine/Window.h"
 #include "engine/Renderer.h"
+#include "engine/Renderer.h"
 #include "engine/Input.h"
+#include "engine/PhysicsSystem.h"
 #include <chrono>
 
 #include "engine/ShaderCompiler.h"
@@ -76,7 +78,8 @@ int main() {
         std::cout << "Ray Tracing shaders compiled successfully." << std::endl;
 
         Window window(800, 600, "Sanic Engine");
-        Renderer renderer(window);
+        PhysicsSystem physicsSystem;
+        Renderer renderer(window, physicsSystem);
         
         Input& input = Input::getInstance();
         input.init(window.getHandle());
@@ -90,6 +93,9 @@ int main() {
             
             input.update();
             window.pollEvents();
+            
+            physicsSystem.update(deltaTime);
+            renderer.update(deltaTime); // Syncs physics transforms to game objects
             
             renderer.processInput(deltaTime);
             renderer.drawFrame();
