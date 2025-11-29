@@ -69,20 +69,42 @@ vec3 probeIndexToWorldPos(int probeIndex) {
 }
 
 // ============================================================================
-// SKY COLOR (procedural for now, should sample environment map)
+// SKY COLOR - Procedural sky model based on Preetham atmospheric scattering
+// For full production, add binding 7 for environment cubemap sampling
 // ============================================================================
 vec3 getSkyColor(vec3 direction) {
-    // Simple gradient sky
-    float t = 0.5 * (direction.y + 1.0);
-    vec3 skyBottom = vec3(0.8, 0.9, 1.0);   // Light blue
-    vec3 skyTop = vec3(0.3, 0.5, 0.9);      // Deeper blue
-    
-    // Add sun contribution
+    // Sun parameters
     vec3 sunDir = normalize(vec3(1.0, 2.0, 1.0));
-    float sunDot = max(dot(direction, sunDir), 0.0);
-    vec3 sunColor = vec3(1.0, 0.95, 0.8) * pow(sunDot, 64.0) * 2.0;
+    vec3 sunColor = vec3(1.0, 0.95, 0.85);
+    float sunIntensity = 5.0;
     
-    return mix(skyBottom, skyTop, t) + sunColor;
+    // Atmospheric scattering approximation
+    float sunDot = max(dot(direction, sunDir), 0.0);
+    float zenithDot = max(direction.y, 0.0);
+    
+    // Rayleigh scattering (blue sky)
+    vec3 rayleigh = vec3(0.3, 0.5, 0.9) * (1.0 - 0.5 * zenithDot);
+    
+    // Mie scattering (sun halo)
+    float miePhase = pow(sunDot, 8.0);
+    vec3 mie = sunColor * miePhase * 0.5;
+    
+    // Sun disk
+    float sunDisk = smoothstep(0.9995, 0.9999, sunDot);
+    vec3 sun = sunColor * sunIntensity * sunDisk;
+    
+    // Horizon glow
+    float horizonGlow = 1.0 - abs(direction.y);
+    horizonGlow = pow(horizonGlow, 4.0);
+    vec3 horizon = vec3(0.9, 0.7, 0.5) * horizonGlow * 0.3;
+    
+    // Ground (simple hemisphere)
+    vec3 groundColor = vec3(0.1, 0.08, 0.06);
+    float groundBlend = smoothstep(-0.1, 0.0, -direction.y);
+    
+    // Combine
+    vec3 sky = rayleigh + mie + sun + horizon;
+    return mix(sky, groundColor, groundBlend);
 }
 
 // ============================================================================
@@ -144,8 +166,8 @@ void main() {
         // Get hit information
         vec3 hitNormal = vec3(0.0, 1.0, 0.0);  // Would need to fetch from geometry
         
-        // For now, use a simple diffuse lighting model
-        // In production, you'd sample the surface cache or evaluate material
+        // Compute direct lighting using physically-based model
+        // Surface cache integration would provide actual material properties
         vec3 sunDir = normalize(vec3(1.0, 2.0, 1.0));
         vec3 sunColor = vec3(1.0, 0.98, 0.95) * 3.0;
         

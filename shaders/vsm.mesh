@@ -1,0 +1,134 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout(triangles, max_vertices = 64, max_primitives = 124) out;
+
+struct Meshlet {
+    float center[3];
+    float radius;
+    int8_t cone_axis[3];
+    int8_t cone_cutoff;
+    uint vertex_offset;
+    uint triangle_offset;
+    uint8_t vertex_count;
+    uint8_t triangle_count;
+    uint8_t padding[2];
+};
+
+struct Vertex {
+    float pos[3];
+    float color[3];
+    float texCoord[2];
+    float normal[3];
+};
+
+layout(buffer_reference, scalar) buffer Meshlets { Meshlet meshlets[]; };
+layout(buffer_reference, scalar) buffer MeshletVertices { uint vertices[]; };
+layout(buffer_reference, scalar) buffer MeshletTriangles { uint8_t indices[]; };
+layout(buffer_reference, scalar) buffer Vertices { Vertex vertices[]; };
+
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    mat4 lightViewProj;
+    vec4 pageTableParams; // x: virtualSize, y: pageSize, z: physicalSize
+    uint64_t meshletBufferAddress;
+    uint64_t meshletVerticesAddress;
+    uint64_t meshletTrianglesAddress;
+    uint64_t vertexBufferAddress;
+    uint meshletCount;
+} push;
+
+struct TaskData {
+    uint meshletIndex;
+    uint physicalPageID;
+};
+
+struct TaskPayload {
+    TaskData tasks[32]; 
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+void main() {
+    uint threadId = gl_LocalInvocationID.x;
+    
+    // Get task data from payload
+    // gl_WorkGroupID.x corresponds to the emitted task index
+    TaskData task = payload.tasks[gl_WorkGroupID.x];
+    uint meshletIndex = task.meshletIndex;
+    uint physicalPageID = task.physicalPageID;
+    
+    Meshlets meshletBuffer = Meshlets(push.meshletBufferAddress);
+    Meshlet m = meshletBuffer.meshlets[meshletIndex];
+    
+    uint vertexCount = uint(m.vertex_count);
+    uint triangleCount = uint(m.triangle_count);
+    
+    SetMeshOutputsEXT(vertexCount, triangleCount);
+    
+    MeshletVertices meshletVertices = MeshletVertices(push.meshletVerticesAddress);
+    Vertices vertexBuffer = Vertices(push.vertexBufferAddress);
+    
+    // Calculate Physical Page Offset
+    uint physicalPagesPerRow = uint(push.pageTableParams.z / push.pageTableParams.y);
+    uint physPageX = physicalPageID % physicalPagesPerRow;
+    uint physPageY = physicalPageID / physicalPagesPerRow;
+    
+    vec2 pageSizeUV = vec2(push.pageTableParams.y) / vec2(push.pageTableParams.z); // 128 / 4096
+    vec2 pageOffsetUV = vec2(physPageX, physPageY) * pageSizeUV;
+    
+    // Process vertices
+    for (uint i = threadId; i < vertexCount; i += 32) {
+        uint vertexIndex = m.vertex_offset + i;
+        uint globalVertexIndex = meshletVertices.vertices[vertexIndex];
+        Vertex v = vertexBuffer.vertices[globalVertexIndex];
+        
+        vec3 localPos = vec3(v.pos[0], v.pos[1], v.pos[2]);
+        vec4 worldPos = push.model * vec4(localPos, 1.0);
+        vec4 lightPos = push.lightViewProj * worldPos;
+        
+        // Virtual UV
+        vec2 virtualUV = lightPos.xy * 0.5 + 0.5; // [0, 1] in Virtual Space
+        
+        // We need to map Virtual UV to Physical UV
+        // But Virtual UV is global. We need UV relative to the Page.
+        // Which page? The one we are rendering to (physicalPageID).
+        // We need to know the Virtual Page ID of this physical page to compute the offset.
+        // Wait, the Task Shader knows the Virtual Page ID (it sampled it).
+        // But it only passed Physical Page ID.
+        // We need to pass Virtual Page Origin too?
+        // Or we can compute it:
+        // virtualUV = (VirtualPageXY + OffsetInPage) * VirtualPageSize
+        // We want OffsetInPage.
+        // OffsetInPage = fract(virtualUV * PagesPerRow)
+        
+        uint virtualPagesPerRow = uint(push.pageTableParams.x / push.pageTableParams.y);
+        vec2 virtualPageCoord = virtualUV * float(virtualPagesPerRow);
+        vec2 offsetInPage = fract(virtualPageCoord);
+        
+        // Physical UV
+        vec2 physicalUV = pageOffsetUV + offsetInPage * pageSizeUV;
+        
+        // Physical NDC
+        vec2 physicalNDC = physicalUV * 2.0 - 1.0;
+        
+        gl_MeshVerticesEXT[i].gl_Position = vec4(physicalNDC, lightPos.z, 1.0); // Use lightPos.z (depth)
+    }
+    
+    MeshletTriangles meshletTriangles = MeshletTriangles(push.meshletTrianglesAddress);
+    
+    for (uint i = threadId; i < triangleCount; i += 32) {
+        uint triangleIndex = m.triangle_offset + i * 3;
+        uint8_t idx0 = meshletTriangles.indices[triangleIndex + 0];
+        uint8_t idx1 = meshletTriangles.indices[triangleIndex + 1];
+        uint8_t idx2 = meshletTriangles.indices[triangleIndex + 2];
+        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(idx0, idx1, idx2);
+    }
+}

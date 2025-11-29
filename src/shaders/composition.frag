@@ -51,10 +51,9 @@ layout(binding = 9) uniform sampler2D ddgiDepth;
 // SSR Reflections texture - bound to a 1x1 black texture when not used
 layout(binding = 10) uniform sampler2D ssrReflections;
 
-// Feature enable flags - DISABLED for now until descriptor bindings are fully implemented
-// Set these to true once the descriptor sets are properly bound in C++
-const bool DDGI_ENABLED = false;
-const bool SSR_ENABLED = false;
+// Feature enable flags - enabled now that descriptors are properly bound with DDGI/SSR resources
+const bool DDGI_ENABLED = true;
+const bool SSR_ENABLED = true;
 
 layout(location = 0) in vec2 fragTexCoord;
 layout(location = 0) out vec4 outColor;

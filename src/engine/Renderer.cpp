@@ -69,6 +69,7 @@ Renderer::Renderer(Window& window, PhysicsSystem& physicsSystem)
 
     meshletStreamer = std::make_unique<MeshletStreamer>(vulkanContext);
     surfaceCacheManager = std::make_unique<SurfaceCacheManager>(vulkanContext);
+    virtualShadowMap = std::make_unique<VirtualShadowMap>(vulkanContext);
 
     // Shadow pass setup (CSM) - managed by ShadowRenderer now
     // CSM resources managed by ShadowRenderer
@@ -143,6 +144,19 @@ Renderer::Renderer(Window& window, PhysicsSystem& physicsSystem)
         ssrConfig.rtFallbackEnabled = true;
         ssrSystem->setConfig(ssrConfig);
         std::cout << "=== SSR SYSTEM INITIALIZED ===" << std::endl;
+        
+        // Update composition descriptor set with DDGI and SSR resources now that they're ready
+        // This replaces the placeholder bindings with actual probe textures and SSR reflections
+        deferredRenderer->updateCompositionDescriptorSet(
+            uniformBuffer, sizeof(UniformBufferObject),
+            shadowRenderer->getShadowImageView(), shadowRenderer->getShadowSampler(),
+            skybox->getCubemapImageView(), skybox->getCubemapSampler(),
+            ddgiSystem->getUniformBuffer(), ddgiSystem->getUniformBufferSize(),
+            ddgiSystem->getIrradianceImageView(), ddgiSystem->getProbeSampler(),
+            ddgiSystem->getDepthImageView(),
+            ssrSystem->getReflectionImageView(), ddgiSystem->getProbeSampler()
+        );
+        std::cout << "=== COMPOSITION DESCRIPTORS UPDATED WITH DDGI/SSR ===" << std::endl;
     }
 
     std::cout << "=== RAY TRACING ACCELERATION STRUCTURES BUILT ===" << std::endl;
@@ -314,6 +328,18 @@ void Renderer::drawFrame() {
             ddgiSystem->update(commandBuffer, currentFrame);
         }
         
+        // PASS 0.5: Virtual Shadow Map Update
+        {
+            glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, 2.0f, 1.0f));
+            // Use a large ortho projection for the light for now, or just the camera view for testing
+            // In reality, VSM needs a stable projection
+            glm::mat4 lightViewProj = glm::mat4(1.0f); 
+            virtualShadowMap->update(commandBuffer, lightViewProj, lightDir, depthImageView, uniformBuffer);
+            
+            // Render Nanite Shadows
+            virtualShadowMap->renderNaniteShadows(commandBuffer, gameObjects);
+        }
+
         // PASS 1: Cascaded Shadow Maps (via ShadowRenderer)
         shadowRenderer->render(commandBuffer, gameObjects);
         
@@ -789,6 +815,8 @@ void Renderer::updateUniformBuffer(uint32_t currentImage) {
     for(int i = 0; i < 4; i++) {
         ubo.cascadeViewProj[i] = shadowData.cascadeViewProj[i];
     }
+    
+    ubo.invViewProj = glm::inverse(ubo.proj * ubo.view);
 
     memcpy(uniformBufferMapped, &ubo, sizeof(ubo));
 }

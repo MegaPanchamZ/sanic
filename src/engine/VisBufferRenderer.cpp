@@ -231,10 +231,12 @@ void VisBufferRenderer::updateComputeDescriptorSet(VkBuffer uniformBuffer, VkDev
     visBufferInfo.imageView = visBuffer.view;
     visBufferInfo.sampler = VK_NULL_HANDLE;
 
-    // Debug Image (placeholder, using same visBuffer view for now or null if not created)
-    // Actually I need to create a debug image if I want to use it.
-    // For now, I'll bind visBuffer to binding 2 as well just to fill it, or create a dummy image.
-    // Let's just bind visBuffer again.
+    // Binding 2 uses the same visBuffer as a read-only debug view
+    // In a full implementation, this would be a separate debug output image
+    VkDescriptorImageInfo debugImageInfo{};
+    debugImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    debugImageInfo.imageView = visBuffer.view;
+    debugImageInfo.sampler = VK_NULL_HANDLE;
     
     std::array<VkWriteDescriptorSet, 3> descriptorWrites{};
 
@@ -260,7 +262,7 @@ void VisBufferRenderer::updateComputeDescriptorSet(VkBuffer uniformBuffer, VkDev
     descriptorWrites[2].dstArrayElement = 0;
     descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     descriptorWrites[2].descriptorCount = 1;
-    descriptorWrites[2].pImageInfo = &visBufferInfo; // Reusing visBuffer for debug binding for now
+    descriptorWrites[2].pImageInfo = &debugImageInfo;
 
     vkUpdateDescriptorSets(context.getDevice(), static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 }
@@ -551,15 +553,21 @@ void VisBufferRenderer::render(VkCommandBuffer cmd, uint32_t imageIndex, const s
     // 2. Material Classification (Compute)
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, materialPipeline);
     
-    // Bind Compute Descriptor Set
-    // vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, materialPipelineLayout, 0, 1, &computeDescriptorSet, 0, nullptr);
-    // We need to bind the VisBuffer image to the descriptor set first!
-    // I haven't implemented updateComputeDescriptorSet yet.
-    // For now, I'll skip dispatching if set is not ready, or I'll assume it's updated elsewhere (it's not).
-    // I need to update the descriptor set.
+    // Bind Compute Descriptor Set - descriptor set is already updated via updateComputeDescriptorSet()
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, materialPipelineLayout, 0, 1, &computeDescriptorSet, 0, nullptr);
     
-    // Dispatch
-    // vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+    // Dispatch compute shader to classify materials from visibility buffer
+    vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+    
+    // Barrier: Compute Write -> Fragment Read (for deferred shading)
+    VkMemoryBarrier computeBarrier{};
+    computeBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    computeBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    computeBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 1, &computeBarrier, 0, nullptr, 0, nullptr);
 }
 
 // Helpers

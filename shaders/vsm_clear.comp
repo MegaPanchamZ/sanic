@@ -1,0 +1,13 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform writeonly image2D physicalAtlas;
+
+void main() {
+    ivec2 pixelPos = ivec2(gl_GlobalInvocationID.xy);
+    
+    // Simple clear for now
+    if (pixelPos.x < imageSize(physicalAtlas).x && pixelPos.y < imageSize(physicalAtlas).y) {
+        imageStore(physicalAtlas, pixelPos, vec4(1.0, 0.0, 0.0, 0.0)); // Clear depth to 1.0
+    }
+}

@@ -20,6 +20,7 @@
 #include "DDGISystem.h"
 #include "SSRSystem.h"
 #include "PhysicsSystem.h"
+#include "VirtualShadowMap.h"
 
 class Renderer {
 public:
@@ -38,6 +39,7 @@ private:
     std::unique_ptr<VisBufferRenderer> visBufferRenderer;
     std::unique_ptr<MeshletStreamer> meshletStreamer;
     std::unique_ptr<SurfaceCacheManager> surfaceCacheManager;
+    std::unique_ptr<VirtualShadowMap> virtualShadowMap;
     
     // Cached handles from VulkanContext for convenience
     VkInstance instance;
@@ -99,6 +101,7 @@ private:
         alignas(16) glm::mat4 cascadeViewProj[4];
         alignas(16) glm::vec4 cascadeSplits;   // View-space Z distances for cascade splits
         alignas(16) glm::vec4 shadowParams;    // x=mapSize, y=pcfRadius, z=bias, w=cascadeBlend
+        alignas(16) glm::mat4 invViewProj;     // For world position reconstruction
     };
 
     // PushConstantData now managed in DeferredRenderer/ShadowRenderer as needed

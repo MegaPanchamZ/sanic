@@ -66,6 +66,11 @@ set RT_SHADER_SRC=..\shaders
 %GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\visbuffer.comp -o %SHADER_OUT%\visbuffer.comp.spv
 %GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\material_classify.comp -o %SHADER_OUT%\material_classify.comp.spv
 %GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\cull_meshlets.comp -o %SHADER_OUT%\cull_meshlets.comp.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\vsm_marking.comp -o %SHADER_OUT%\vsm_marking.comp.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\vsm_clear.comp -o %SHADER_OUT%\vsm_clear.comp.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\vsm.task -o %SHADER_OUT%\vsm.task.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\vsm.mesh -o %SHADER_OUT%\vsm.mesh.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\vsm.frag -o %SHADER_OUT%\vsm.frag.spv
 
 :: Copy assets (e.g., textures) to the build output directory
 set ASSETS_SRC=..\assets

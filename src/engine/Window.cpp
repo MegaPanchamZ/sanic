@@ -1,12 +1,12 @@
 #include "Window.h"
 #include <iostream>
+#include <stdexcept>
 
 Window::Window(int width, int height, const std::string& title) 
     : width(width), height(height), title(title) {
     
     if (!glfwInit()) {
-        std::cerr << "Failed to initialize GLFW!" << std::endl;
-        // In a real engine, we'd throw or handle this better
+        throw std::runtime_error("Failed to initialize GLFW!");
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -14,8 +14,8 @@ Window::Window(int width, int height, const std::string& title)
 
     window = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
     if (!window) {
-        std::cerr << "Failed to create window!" << std::endl;
         glfwTerminate();
+        throw std::runtime_error("Failed to create GLFW window!");
     }
 }
 

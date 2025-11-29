@@ -1,0 +1,64 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform CameraUBO {
+    mat4 view;
+    mat4 proj;
+    vec4 lightPos;
+    vec4 viewPos;
+    vec4 lightColor;
+    mat4 lightSpaceMatrix;
+    mat4 cascadeViewProj[4];
+    vec4 cascadeSplits;
+    vec4 shadowParams;
+    mat4 invViewProj;
+} ubo;
+
+layout(set = 0, binding = 1) uniform sampler2D sceneDepth;
+
+layout(set = 0, binding = 2) buffer PageRequests {
+    uint requests[]; // Bitmask: 1 bit per page
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 lightViewProj;
+    vec4 pageTableParams; // x: virtualSize, y: pageSize, z: physicalSize
+} push;
+
+void main() {
+    ivec2 pixelPos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = textureSize(sceneDepth, 0);
+    
+    if (pixelPos.x >= screenSize.x || pixelPos.y >= screenSize.y) return;
+    
+    vec2 uv = (vec2(pixelPos) + 0.5) / vec2(screenSize);
+    float depth = texture(sceneDepth, uv).r;
+    
+    // Skip skybox/far plane
+    if (depth >= 1.0) return;
+    
+    // Reconstruct world position
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = ubo.invViewProj * clipPos;
+    worldPos /= worldPos.w;
+    
+    // Transform to Light Space (Virtual UV)
+    vec4 lightPos = push.lightViewProj * worldPos;
+    vec2 virtualUV = lightPos.xy * 0.5 + 0.5;
+    
+    // Check if inside virtual shadow map
+    if (virtualUV.x < 0.0 || virtualUV.x > 1.0 || virtualUV.y < 0.0 || virtualUV.y > 1.0) return;
+    
+    // Calculate Virtual Page ID
+    uint pagesPerRow = uint(push.pageTableParams.x / push.pageTableParams.y);
+    uint pageX = uint(virtualUV.x * float(pagesPerRow));
+    uint pageY = uint(virtualUV.y * float(pagesPerRow));
+    uint pageID = pageY * pagesPerRow + pageX;
+    
+    // Mark page (using atomic OR on a bitmask)
+    // requests is an array of uints. Each uint holds 32 bits.
+    uint uintIndex = pageID / 32;
+    uint bitIndex = pageID % 32;
+    
+    atomicOr(requests[uintIndex], 1 << bitIndex);
+}

@@ -83,10 +83,6 @@ if (NOT GLSLC_EXECUTABLE)
     message(FATAL_ERROR "glslc not found! Please ensure VULKAN_SDK is set correctly.")
 endif()
 
-# Escape backslashes for C++ string literal
-string(REPLACE "\\" "\\\\" GLSLC_PATH_ESCAPED "${GLSLC_EXECUTABLE}")
-add_compile_definitions(GLSLC_PATH="${GLSLC_PATH_ESCAPED}")
-
 # --- Source Files ---
 set(SOURCES
     src/main.cpp
@@ -114,6 +110,7 @@ set(SOURCES
     src/engine/MeshletStreamer.cpp
     src/engine/SurfaceCacheManager.cpp
     src/engine/PhysicsSystem.cpp
+    src/engine/VirtualShadowMap.cpp
 )
 
 # --- Executable ---

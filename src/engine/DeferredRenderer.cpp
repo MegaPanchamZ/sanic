@@ -492,13 +492,16 @@ void DeferredRenderer::updateCompositionDescriptorSet(VkBuffer uniformBuffer, Vk
 {
     VkDevice device = context.getDevice();
     
-    VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    allocInfo.descriptorPool = descriptorPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &compositionDescriptorSetLayout;
-    
-    if (vkAllocateDescriptorSets(device, &allocInfo, &compositionDescriptorSet) != VK_SUCCESS) {
-        throw std::runtime_error("failed to allocate composition descriptor set!");
+    // Only allocate if not already allocated
+    if (compositionDescriptorSet == VK_NULL_HANDLE) {
+        VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &compositionDescriptorSetLayout;
+        
+        if (vkAllocateDescriptorSets(device, &allocInfo, &compositionDescriptorSet) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate composition descriptor set!");
+        }
     }
 
     std::array<VkDescriptorImageInfo, 4> gbufferInfos;

@@ -146,14 +146,34 @@ void MeshletStreamer::createPipeline() {
 }
 
 void MeshletStreamer::update(VkCommandBuffer cmd, const std::vector<GameObject>& gameObjects) {
-    // Dispatch culling shader
+    if (gameObjects.empty()) return;
+    
+    // Dispatch culling shader for meshlet frustum and occlusion culling
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
     
-    // Dispatch enough threads for all meshlets of all objects
-    // For simplicity, we assume we dispatch for each object separately or use a global list.
-    // Since we don't have a global meshlet list yet, we'll skip dispatching for now or dispatch dummy.
-    // vkCmdDispatch(cmd, 1, 1, 1);
+    // Count total meshlets across all game objects
+    uint32_t totalMeshlets = 0;
+    for (const auto& obj : gameObjects) {
+        if (obj.mesh) {
+            totalMeshlets += obj.mesh->getMeshletCount();
+        }
+    }
+    
+    // Dispatch enough workgroups to process all meshlets (64 threads per workgroup)
+    if (totalMeshlets > 0) {
+        uint32_t workgroupCount = (totalMeshlets + 63) / 64;
+        vkCmdDispatch(cmd, workgroupCount, 1, 1);
+        
+        // Memory barrier to ensure culling results are visible before rendering
+        VkMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT, 
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
 }
 
 // Helpers

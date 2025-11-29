@@ -1,0 +1,118 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+struct Meshlet {
+    float center[3];
+    float radius;
+    int8_t cone_axis[3];
+    int8_t cone_cutoff;
+    uint vertex_offset;
+    uint triangle_offset;
+    uint8_t vertex_count;
+    uint8_t triangle_count;
+    uint8_t padding[2];
+};
+
+layout(buffer_reference, scalar) buffer Meshlets { Meshlet meshlets[]; };
+
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    mat4 lightViewProj;
+    vec4 pageTableParams; // x: virtualSize, y: pageSize, z: physicalSize
+    uint64_t meshletBufferAddress;
+    uint meshletCount;
+} push;
+
+layout(set = 0, binding = 0) uniform usampler2D pageTable;
+
+struct TaskData {
+    uint meshletIndex;
+    uint physicalPageID;
+};
+
+struct TaskPayload {
+    TaskData tasks[32]; 
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+// Shared counter for task allocation
+shared uint taskCount;
+
+void main() {
+    uint threadId = gl_LocalInvocationID.x;
+    uint meshletIndex = gl_GlobalInvocationID.x;
+
+    // Initialize shared counter
+    if (threadId == 0) {
+        taskCount = 0;
+    }
+    barrier();
+
+    // Early exit for out-of-bounds meshlets
+    bool validMeshlet = meshletIndex < push.meshletCount;
+    
+    if (validMeshlet) {
+        Meshlets meshletBuffer = Meshlets(push.meshletBufferAddress);
+        Meshlet m = meshletBuffer.meshlets[meshletIndex];
+
+        // Transform bounds to Light Space
+        vec4 center = push.model * vec4(m.center[0], m.center[1], m.center[2], 1.0);
+        float radius = m.radius * length(push.model[0]);
+        
+        vec4 lightPos = push.lightViewProj * center;
+        vec3 ndc = lightPos.xyz / lightPos.w;
+        
+        // Compute Virtual UV bounds
+        vec2 uvCenter = ndc.xy * 0.5 + 0.5;
+        vec4 rightPos = push.lightViewProj * (center + vec4(radius, 0, 0, 0));
+        vec2 rightUV = (rightPos.xy / rightPos.w) * 0.5 + 0.5;
+        float uvRadius = abs(rightUV.x - uvCenter.x);
+        
+        vec2 uvMin = clamp(uvCenter - uvRadius, 0.0, 1.0);
+        vec2 uvMax = clamp(uvCenter + uvRadius, 0.0, 1.0);
+        
+        // Convert to Page IDs
+        uint pagesPerRow = uint(push.pageTableParams.x / push.pageTableParams.y);
+        
+        uint pageMinX = uint(uvMin.x * float(pagesPerRow));
+        uint pageMaxX = min(uint(uvMax.x * float(pagesPerRow)), pageMinX + 4);
+        uint pageMinY = uint(uvMin.y * float(pagesPerRow));
+        uint pageMaxY = min(uint(uvMax.y * float(pagesPerRow)), pageMinY + 4);
+        
+        // Loop over pages and emit tasks for allocated pages
+        for (uint y = pageMinY; y <= pageMaxY; y++) {
+            for (uint x = pageMinX; x <= pageMaxX; x++) {
+                uint physicalPageID = texelFetch(pageTable, ivec2(x, y), 0).r;
+                
+                if (physicalPageID != 0xFFFFFFFF) {
+                    // Atomically allocate a slot in the payload
+                    uint slot = atomicAdd(taskCount, 1);
+                    if (slot < 32) {
+                        payload.tasks[slot].meshletIndex = meshletIndex;
+                        payload.tasks[slot].physicalPageID = physicalPageID;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Synchronize and emit mesh tasks
+    barrier();
+    
+    if (threadId == 0) {
+        uint emitCount = min(taskCount, 32u);
+        if (emitCount > 0) {
+            EmitMeshTasksEXT(emitCount, 1, 1);
+        }
+    }
+}

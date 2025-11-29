@@ -5,6 +5,19 @@
 // Outputs surface properties to Multiple Render Targets (MRT)
 // ============================================================================
 
+// Uniform buffer - matches gbuffer.vert UBO for camera position access
+layout(binding = 0) uniform UniformBufferObject {
+    mat4 view;
+    mat4 proj;
+    vec4 lightPos;
+    vec4 viewPos;        // Camera position in world space
+    vec4 lightColor;
+    mat4 lightSpaceMatrix;
+    mat4 cascadeViewProj[4];
+    vec4 cascadeSplits;
+    vec4 shadowParams;
+} ubo;
+
 // Material textures (matching main descriptor layout)
 layout(binding = 1) uniform sampler2D albedoMap;        // diffuse texture
 layout(binding = 2) uniform sampler2D metallicRoughnessMap;  // specular texture (R=AO, G=Roughness, B=Metallic)
@@ -92,9 +105,8 @@ void main() {
     
     if (ao < 0.01) ao = 1.0;
     
-    // Calculate view direction for normal perturbation
-    // Note: We'd need viewPos from UBO, but for G-Buffer we use geometric approach
-    vec3 V = normalize(-fragPos); // Approximate - proper would use camera position
+    // Calculate view direction for normal perturbation using actual camera position
+    vec3 V = normalize(ubo.viewPos.xyz - fragPos);
     
     // Apply normal mapping
     vec3 geomNormal = normalize(fragNormal);
