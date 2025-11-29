@@ -108,6 +108,8 @@ set(SOURCES
     src/engine/DeferredRenderer.cpp
     src/engine/DDGISystem.cpp
     src/engine/SSRSystem.cpp
+    src/engine/HiZBuffer.cpp
+    src/engine/SSRDenoiser.cpp
 )
 
 # --- Executable ---

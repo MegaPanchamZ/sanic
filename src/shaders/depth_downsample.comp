@@ -1,0 +1,53 @@
+#version 460
+
+// Hierarchical-Z (Hi-Z) Depth Pyramid Generator
+// Creates min-depth mipmaps for efficient screen-space ray marching
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Push constants for mip level info
+layout(push_constant) uniform PushConstants {
+    ivec2 inputSize;
+    ivec2 outputSize;
+    int mipLevel;
+} pc;
+
+layout(set = 0, binding = 0) uniform sampler2D inputDepth;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D outputDepth;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pos.x >= pc.outputSize.x || pos.y >= pc.outputSize.y) {
+        return;
+    }
+    
+    // Calculate the UV for the center of our 2x2 block in the previous mip
+    vec2 uv = (vec2(pos) * 2.0 + 1.0) / vec2(pc.inputSize);
+    
+    // Fetch 4 depth samples from the previous mip level
+    // Using texelFetch for precise sampling
+    ivec2 baseCoord = pos * 2;
+    
+    float d00 = texelFetch(inputDepth, baseCoord + ivec2(0, 0), 0).r;
+    float d10 = texelFetch(inputDepth, baseCoord + ivec2(1, 0), 0).r;
+    float d01 = texelFetch(inputDepth, baseCoord + ivec2(0, 1), 0).r;
+    float d11 = texelFetch(inputDepth, baseCoord + ivec2(1, 1), 0).r;
+    
+    // Handle edge cases where we might read out of bounds
+    if (baseCoord.x + 1 >= pc.inputSize.x) {
+        d10 = d00;
+        d11 = d01;
+    }
+    if (baseCoord.y + 1 >= pc.inputSize.y) {
+        d01 = d00;
+        d11 = d10;
+    }
+    
+    // MIN reduction for conservative depth test (standard depth buffer)
+    // This ensures we never skip geometry - if any of the 4 pixels has geometry,
+    // we'll detect it at this mip level
+    float minDepth = min(min(d00, d10), min(d01, d11));
+    
+    imageStore(outputDepth, pos, vec4(minDepth, 0.0, 0.0, 0.0));
+}

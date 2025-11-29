@@ -1,0 +1,347 @@
+#version 460
+#extension GL_EXT_ray_query : enable
+
+// Hybrid Screen-Space Reflections with Hi-Z Traversal and Ray-Traced Fallback
+// Uses hierarchical depth buffer for efficient ray marching
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Helper functions
+float saturate(float x) {
+    return clamp(x, 0.0, 1.0);
+}
+
+// G-Buffer inputs
+layout(set = 0, binding = 0) uniform sampler2D gPosition;
+layout(set = 0, binding = 1) uniform sampler2D gNormal;
+layout(set = 0, binding = 2) uniform sampler2D gAlbedo;
+layout(set = 0, binding = 3) uniform sampler2D gPBR;           // R=metallic, G=roughness
+layout(set = 0, binding = 4) uniform sampler2D depthBuffer;    // Full-res depth
+layout(set = 0, binding = 5) uniform sampler2D sceneColor;     // Previous frame lit scene
+layout(set = 0, binding = 6) uniform sampler2D hiZPyramid;     // Hierarchical depth pyramid
+
+// Output
+layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D reflectionOutput;
+
+// Acceleration structure for RT fallback
+layout(set = 0, binding = 8) uniform accelerationStructureEXT tlas;
+
+// DDGI irradiance for rough surface fallback
+layout(set = 0, binding = 9) uniform sampler2D ddgiIrradiance;
+
+// Uniforms
+layout(set = 0, binding = 10) uniform SSRUniforms {
+    mat4 view;
+    mat4 projection;
+    mat4 invView;
+    mat4 invProjection;
+    vec4 cameraPos;
+    vec2 screenSize;
+    float maxDistance;
+    float thickness;
+    float maxSteps;
+    float roughnessThreshold;   // Above this, prefer RT or DDGI
+    float rtFallbackEnabled;
+    float ddgiFallbackEnabled;
+    int hiZMipLevels;
+    float hiZThreshold;
+    float _padding[2];
+} ubo;
+
+// Importance sampling for GGX
+vec3 importanceSampleGGX(vec2 xi, vec3 N, float roughness) {
+    float a = roughness * roughness;
+    float phi = 2.0 * 3.14159265 * xi.x;
+    float cosTheta = sqrt((1.0 - xi.y) / (1.0 + (a*a - 1.0) * xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    
+    vec3 H;
+    H.x = cos(phi) * sinTheta;
+    H.y = sin(phi) * sinTheta;
+    H.z = cosTheta;
+    
+    vec3 up = abs(N.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
+    vec3 tangent = normalize(cross(up, N));
+    vec3 bitangent = cross(N, tangent);
+    
+    return normalize(tangent * H.x + bitangent * H.y + N * H.z);
+}
+
+// Hash function for noise
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+vec2 hash2(vec2 p) {
+    return vec2(hash(p), hash(p + vec2(1.0, 0.0)));
+}
+
+// Project world position to screen UV and clip-space Z
+vec3 projectToScreen(vec3 worldPos) {
+    vec4 clipPos = ubo.projection * ubo.view * vec4(worldPos, 1.0);
+    clipPos.xyz /= clipPos.w;
+    return vec3(clipPos.xy * 0.5 + 0.5, clipPos.z);
+}
+
+// Reconstruct world position from depth
+vec3 reconstructWorldPos(vec2 uv, float depth) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 viewPos = ubo.invProjection * clipPos;
+    viewPos /= viewPos.w;
+    vec4 worldPos = ubo.invView * viewPos;
+    return worldPos.xyz;
+}
+
+// Get cell size at a given mip level
+vec2 getCellSize(int mip) {
+    return ubo.screenSize / pow(2.0, float(mip));
+}
+
+// Get cell coordinates at a given mip level
+ivec2 getCellCoords(vec2 screenPos, int mip) {
+    vec2 cellSize = getCellSize(mip);
+    return ivec2(screenPos * cellSize);
+}
+
+// Sample Hi-Z pyramid at a specific mip level
+float sampleHiZ(vec2 uv, int mip) {
+    return textureLod(hiZPyramid, uv, float(mip)).r;
+}
+
+// Cross cell boundary and calculate next cell
+vec2 crossCell(vec2 pos, vec2 dir, int mip) {
+    vec2 cellSize = 1.0 / getCellSize(mip);
+    
+    // Find the next cell boundary
+    vec2 cellMin = floor(pos / cellSize) * cellSize;
+    vec2 cellMax = cellMin + cellSize;
+    
+    // Calculate distance to each boundary
+    vec2 tMin = (cellMin - pos) / dir;
+    vec2 tMax = (cellMax - pos) / dir;
+    
+    // Choose the closest positive intersection
+    vec2 t = mix(tMax, tMin, lessThan(dir, vec2(0.0)));
+    float tHit = min(t.x, t.y);
+    
+    // Small offset to ensure we're in the next cell
+    return pos + dir * (tHit + 0.001);
+}
+
+// Hierarchical ray marching in screen space using Hi-Z
+vec4 hiZRayMarch(vec3 worldPos, vec3 reflectDir, float roughness) {
+    vec3 rayOrigin = worldPos;
+    vec3 rayEnd = worldPos + reflectDir * ubo.maxDistance;
+    
+    vec3 screenStart = projectToScreen(rayOrigin);
+    vec3 screenEnd = projectToScreen(rayEnd);
+    
+    // Check if ray goes behind camera
+    if (screenEnd.z < 0.0) {
+        return vec4(0.0);
+    }
+    
+    vec3 screenDir = normalize(screenEnd - screenStart);
+    vec2 screenDirXY = screenDir.xy;
+    
+    // Ray marching parameters
+    vec2 currentPos = screenStart.xy;
+    float currentDepth = screenStart.z;
+    float rayZ = screenStart.z;
+    
+    int mip = 0;  // Start at highest resolution
+    int maxMip = ubo.hiZMipLevels - 1;
+    float stepCount = 0.0;
+    
+    // Adaptive step size based on roughness
+    float baseStepSize = 1.0 / ubo.maxSteps;
+    float stepMultiplier = mix(1.0, 2.0, roughness);
+    
+    while (stepCount < ubo.maxSteps) {
+        // Advance along the ray
+        float stepSize = baseStepSize * stepMultiplier * (1.0 + float(mip) * 0.5);
+        vec3 currentScreen = screenStart + screenDir * stepCount * stepSize * ubo.maxDistance / length(screenEnd - screenStart);
+        currentPos = currentScreen.xy;
+        rayZ = currentScreen.z;
+        
+        // Check bounds
+        if (currentPos.x < 0.0 || currentPos.x > 1.0 || 
+            currentPos.y < 0.0 || currentPos.y > 1.0 ||
+            rayZ > 1.0) {
+            break;  // Out of screen
+        }
+        
+        // Sample Hi-Z pyramid at current mip level
+        float minDepth = sampleHiZ(currentPos, mip);
+        
+        // Compare ray depth with scene depth
+        if (rayZ > minDepth) {
+            // Ray is behind the depth at this cell - potential hit
+            if (mip == 0) {
+                // At finest level - check for actual intersection
+                float sceneDepth = texture(depthBuffer, currentPos).r;
+                
+                if (sceneDepth >= 1.0) {
+                    // Sky pixel, continue
+                    stepCount += 1.0;
+                    continue;
+                }
+                
+                float depthDiff = rayZ - sceneDepth;
+                
+                if (depthDiff > 0.0 && depthDiff < ubo.thickness) {
+                    // Hit! Calculate fade based on edge proximity
+                    vec2 edgeFade = smoothstep(0.0, 0.1, currentPos) * smoothstep(1.0, 0.9, currentPos);
+                    float fade = edgeFade.x * edgeFade.y;
+                    fade *= 1.0 - roughness * 0.5;
+                    
+                    vec3 hitColor = texture(sceneColor, currentPos).rgb;
+                    return vec4(hitColor, fade);
+                }
+            } else {
+                // Go to finer mip level for more detail
+                mip = max(0, mip - 1);
+            }
+        } else {
+            // Ray is in front of depth - skip this cell
+            // Try to go to coarser mip for faster traversal
+            mip = min(maxMip, mip + 1);
+        }
+        
+        stepCount += 1.0;
+    }
+    
+    return vec4(0.0);  // No hit
+}
+
+// Ray-traced reflection for fallback
+vec3 rayTraceReflection(vec3 worldPos, vec3 reflectDir) {
+    rayQueryEXT rayQuery;
+    
+    rayQueryInitializeEXT(rayQuery, tlas,
+                          gl_RayFlagsOpaqueEXT,
+                          0xFF,
+                          worldPos + reflectDir * 0.01,
+                          0.01,
+                          reflectDir,
+                          ubo.maxDistance);
+    
+    while (rayQueryProceedEXT(rayQuery)) {
+        if (rayQueryGetIntersectionTypeEXT(rayQuery, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
+            rayQueryConfirmIntersectionEXT(rayQuery);
+        }
+    }
+    
+    if (rayQueryGetIntersectionTypeEXT(rayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        float hitT = rayQueryGetIntersectionTEXT(rayQuery, true);
+        vec3 hitPos = worldPos + reflectDir * hitT;
+        
+        vec3 screenHit = projectToScreen(hitPos);
+        
+        if (screenHit.x >= 0.0 && screenHit.x <= 1.0 && 
+            screenHit.y >= 0.0 && screenHit.y <= 1.0) {
+            return texture(sceneColor, screenHit.xy).rgb;
+        }
+        
+        float distFade = 1.0 - saturate(hitT / ubo.maxDistance);
+        return vec3(0.1) * distFade;
+    }
+    
+    // Sky reflection
+    vec3 skyColor = vec3(0.4, 0.6, 0.9) * max(0.0, reflectDir.y);
+    skyColor += vec3(0.8, 0.6, 0.4) * pow(max(0.0, dot(reflectDir, normalize(vec3(1, 0.5, 0)))), 32.0);
+    return skyColor;
+}
+
+// Sample DDGI probes for very rough surfaces
+vec3 sampleDDGI(vec3 worldPos, vec3 normal) {
+    // Simplified DDGI sampling - ideally this would use the actual probe grid
+    // For now, just sample irradiance texture based on position
+    vec2 probeUV = fract(worldPos.xz * 0.1);
+    vec3 irradiance = texture(ddgiIrradiance, probeUV).rgb;
+    
+    // Apply normal weighting
+    float weight = max(0.0, normal.y * 0.5 + 0.5);
+    return irradiance * weight;
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 screenSize = ubo.screenSize;
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) / screenSize;
+    
+    // Sample G-Buffer
+    vec3 worldPos = texture(gPosition, uv).xyz;
+    vec3 normal = normalize(texture(gNormal, uv).xyz * 2.0 - 1.0);
+    vec4 pbrData = texture(gPBR, uv);
+    float metallic = pbrData.r;
+    float roughness = pbrData.g;
+    
+    // Skip non-reflective surfaces early (saves GPU time)
+    if (metallic < 0.01 && roughness > 0.95) {
+        imageStore(reflectionOutput, pixelCoord, vec4(0.0));
+        return;
+    }
+    
+    // For very rough surfaces, fall back to DDGI probes (no ray tracing needed)
+    if (roughness > 0.8 && ubo.ddgiFallbackEnabled > 0.5) {
+        vec3 ddgiColor = sampleDDGI(worldPos, normal);
+        float weight = metallic * 0.3;  // Lower weight for rough surfaces
+        imageStore(reflectionOutput, pixelCoord, vec4(ddgiColor, weight));
+        return;
+    }
+    
+    // Calculate view direction
+    vec3 viewDir = normalize(ubo.cameraPos.xyz - worldPos);
+    
+    // Generate random values for importance sampling
+    vec2 noise = hash2(vec2(pixelCoord) + ubo.cameraPos.xy);
+    
+    // Importance sample reflection direction based on roughness
+    vec3 H = importanceSampleGGX(noise, normal, max(roughness, 0.04));
+    vec3 reflectDir = reflect(-viewDir, H);
+    
+    // For very smooth surfaces, use perfect reflection
+    if (roughness < 0.1) {
+        reflectDir = reflect(-viewDir, normal);
+    }
+    
+    vec4 reflection = vec4(0.0);
+    
+    // Try Hi-Z SSR first
+    vec4 ssrResult = hiZRayMarch(worldPos, reflectDir, roughness);
+    
+    if (ssrResult.a > 0.1) {
+        // SSR hit
+        reflection = ssrResult;
+    } else if (ubo.rtFallbackEnabled > 0.5 && roughness < ubo.roughnessThreshold) {
+        // RT fallback for smooth surfaces with SSR misses
+        vec3 rtColor = rayTraceReflection(worldPos, reflectDir);
+        float rtWeight = 1.0 - roughness * 0.5;
+        reflection = vec4(rtColor, rtWeight);
+    } else if (ubo.ddgiFallbackEnabled > 0.5) {
+        // DDGI fallback for rough surfaces
+        vec3 ddgiColor = sampleDDGI(worldPos, normal);
+        float weight = mix(0.3, 0.6, metallic);
+        reflection = vec4(ddgiColor, weight);
+    } else {
+        // Environment approximation
+        vec3 skyColor = vec3(0.4, 0.6, 0.9) * max(0.0, reflectDir.y);
+        reflection = vec4(skyColor, 0.2);
+    }
+    
+    // Apply Fresnel
+    float NdotV = max(dot(normal, viewDir), 0.0);
+    vec3 F0 = mix(vec3(0.04), texture(gAlbedo, uv).rgb, metallic);
+    vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
+    
+    reflection.rgb *= fresnel;
+    reflection.a *= (metallic * 0.8 + 0.2);
+    
+    imageStore(reflectionOutput, pixelCoord, reflection);
+}
