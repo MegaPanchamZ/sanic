@@ -1,0 +1,245 @@
+/**
+ * motion_vectors.comp
+ * 
+ * Generates motion vectors from visibility buffer data.
+ * Like Unreal's motion blur system, computes per-pixel velocity
+ * from current and previous frame transforms.
+ * 
+ * Turn 11: Motion vector generation for TAA and motion blur
+ */
+
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer VisibilityBuffer {
+    uint64_t data[];  // Packed: clusterID(24) | triangleID(16) | depth(24)
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertexBuffer {
+    float vertices[];  // stride: 14 floats (pos, normal, tangent, texcoord, prev_pos)
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IndexBuffer {
+    uint indices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
+    // ClusterGeometry structure
+    uint meshletOffset;
+    uint meshletCount;
+    uint vertexOffset;
+    uint triangleOffset;
+    uint triangleCount;
+    uint flags;
+    uint materialId;
+    uint padding;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 64) readonly buffer InstanceBuffer {
+    mat4 currentTransform;
+    mat4 prevTransform;
+    uint clusterId;
+    uint instanceId;
+    uint padding0;
+    uint padding1;
+};
+
+// G-Buffer output
+layout(set = 0, binding = 0, rg16f) writeonly uniform image2D motionVectors;
+layout(set = 0, binding = 1, rgba32f) readonly uniform image2D positionBuffer;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    mat4 prevViewProj;
+    mat4 invViewProj;
+    
+    uint64_t visibilityAddr;
+    uint64_t vertexAddr;
+    uint64_t indexAddr;
+    uint64_t clusterAddr;
+    uint64_t instanceAddr;
+    
+    uint screenWidth;
+    uint screenHeight;
+    uint vertexStride;  // in floats (14 for pos+normal+tangent+uv+prev_pos)
+    uint pad;
+};
+
+// Vertex layout offsets (in floats)
+const uint POS_OFFSET = 0;
+const uint NORMAL_OFFSET = 3;
+const uint TANGENT_OFFSET = 6;
+const uint UV_OFFSET = 10;
+const uint PREV_POS_OFFSET = 12;  // Optional previous frame position
+
+// Compute barycentric coordinates from screen position
+vec3 computeBarycentrics(vec2 pixelPos, vec2 v0, vec2 v1, vec2 v2) {
+    vec2 e0 = v1 - v0;
+    vec2 e1 = v2 - v0;
+    vec2 e2 = pixelPos - v0;
+    
+    float d00 = dot(e0, e0);
+    float d01 = dot(e0, e1);
+    float d11 = dot(e1, e1);
+    float d20 = dot(e2, e0);
+    float d21 = dot(e2, e1);
+    
+    float denom = d00 * d11 - d01 * d01;
+    if (abs(denom) < 1e-8) return vec3(1.0/3.0);
+    
+    float invDenom = 1.0 / denom;
+    float v = (d11 * d20 - d01 * d21) * invDenom;
+    float w = (d00 * d21 - d01 * d20) * invDenom;
+    float u = 1.0 - v - w;
+    
+    return vec3(u, v, w);
+}
+
+// Project world position to NDC
+vec4 projectToNDC(vec3 worldPos, mat4 viewProjMatrix) {
+    vec4 clipPos = viewProjMatrix * vec4(worldPos, 1.0);
+    vec3 ndc = clipPos.xyz / clipPos.w;
+    return vec4(ndc, clipPos.w);
+}
+
+void main() {
+    uvec2 pixelCoord = gl_GlobalInvocationID.xy;
+    
+    if (pixelCoord.x >= screenWidth || pixelCoord.y >= screenHeight) {
+        return;
+    }
+    
+    // Read visibility buffer
+    VisibilityBuffer visBuf = VisibilityBuffer(visibilityAddr);
+    uint pixelIndex = pixelCoord.y * screenWidth + pixelCoord.x;
+    uint64_t visData = visBuf.data[pixelIndex];
+    
+    // Unpack visibility data
+    uint clusterId = uint((visData >> 40) & 0xFFFFFF);
+    uint triangleId = uint((visData >> 24) & 0xFFFF);
+    
+    // Check for valid pixel
+    if (clusterId == 0xFFFFFF || triangleId == 0xFFFF) {
+        // Background - no motion
+        imageStore(motionVectors, ivec2(pixelCoord), vec4(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    
+    // Get cluster data
+    ClusterBuffer clusters = ClusterBuffer(clusterAddr);
+    uint clusterOffset = clusterId * 32; // 8 uints = 32 bytes
+    uint vertexBase = clusters.vertexOffset;
+    uint triangleBase = clusters.triangleOffset;
+    
+    // Get triangle indices
+    IndexBuffer idxBuf = IndexBuffer(indexAddr);
+    uint i0 = idxBuf.indices[triangleBase + triangleId * 3 + 0];
+    uint i1 = idxBuf.indices[triangleBase + triangleId * 3 + 1];
+    uint i2 = idxBuf.indices[triangleBase + triangleId * 3 + 2];
+    
+    // Get vertex data
+    VertexBuffer vtxBuf = VertexBuffer(vertexAddr);
+    
+    // Current frame positions
+    vec3 pos0 = vec3(
+        vtxBuf.vertices[(vertexBase + i0) * vertexStride + POS_OFFSET],
+        vtxBuf.vertices[(vertexBase + i0) * vertexStride + POS_OFFSET + 1],
+        vtxBuf.vertices[(vertexBase + i0) * vertexStride + POS_OFFSET + 2]
+    );
+    vec3 pos1 = vec3(
+        vtxBuf.vertices[(vertexBase + i1) * vertexStride + POS_OFFSET],
+        vtxBuf.vertices[(vertexBase + i1) * vertexStride + POS_OFFSET + 1],
+        vtxBuf.vertices[(vertexBase + i1) * vertexStride + POS_OFFSET + 2]
+    );
+    vec3 pos2 = vec3(
+        vtxBuf.vertices[(vertexBase + i2) * vertexStride + POS_OFFSET],
+        vtxBuf.vertices[(vertexBase + i2) * vertexStride + POS_OFFSET + 1],
+        vtxBuf.vertices[(vertexBase + i2) * vertexStride + POS_OFFSET + 2]
+    );
+    
+    // Previous frame positions (if available, otherwise use current)
+    vec3 prevPos0, prevPos1, prevPos2;
+    if (vertexStride >= 15) {
+        // Vertex buffer includes previous frame positions
+        prevPos0 = vec3(
+            vtxBuf.vertices[(vertexBase + i0) * vertexStride + PREV_POS_OFFSET],
+            vtxBuf.vertices[(vertexBase + i0) * vertexStride + PREV_POS_OFFSET + 1],
+            vtxBuf.vertices[(vertexBase + i0) * vertexStride + PREV_POS_OFFSET + 2]
+        );
+        prevPos1 = vec3(
+            vtxBuf.vertices[(vertexBase + i1) * vertexStride + PREV_POS_OFFSET],
+            vtxBuf.vertices[(vertexBase + i1) * vertexStride + PREV_POS_OFFSET + 1],
+            vtxBuf.vertices[(vertexBase + i1) * vertexStride + PREV_POS_OFFSET + 2]
+        );
+        prevPos2 = vec3(
+            vtxBuf.vertices[(vertexBase + i2) * vertexStride + PREV_POS_OFFSET],
+            vtxBuf.vertices[(vertexBase + i2) * vertexStride + PREV_POS_OFFSET + 1],
+            vtxBuf.vertices[(vertexBase + i2) * vertexStride + PREV_POS_OFFSET + 2]
+        );
+    } else {
+        prevPos0 = pos0;
+        prevPos1 = pos1;
+        prevPos2 = pos2;
+    }
+    
+    // Get instance transforms
+    InstanceBuffer instances = InstanceBuffer(instanceAddr);
+    mat4 currTransform = instances.currentTransform;
+    mat4 prevTransform = instances.prevTransform;
+    
+    // Transform to world space
+    vec3 worldPos0 = (currTransform * vec4(pos0, 1.0)).xyz;
+    vec3 worldPos1 = (currTransform * vec4(pos1, 1.0)).xyz;
+    vec3 worldPos2 = (currTransform * vec4(pos2, 1.0)).xyz;
+    
+    vec3 worldPrevPos0 = (prevTransform * vec4(prevPos0, 1.0)).xyz;
+    vec3 worldPrevPos1 = (prevTransform * vec4(prevPos1, 1.0)).xyz;
+    vec3 worldPrevPos2 = (prevTransform * vec4(prevPos2, 1.0)).xyz;
+    
+    // Project current positions to screen
+    vec4 proj0 = projectToNDC(worldPos0, viewProj);
+    vec4 proj1 = projectToNDC(worldPos1, viewProj);
+    vec4 proj2 = projectToNDC(worldPos2, viewProj);
+    
+    // Convert NDC to screen coordinates
+    vec2 screen0 = (proj0.xy * 0.5 + 0.5) * vec2(screenWidth, screenHeight);
+    vec2 screen1 = (proj1.xy * 0.5 + 0.5) * vec2(screenWidth, screenHeight);
+    vec2 screen2 = (proj2.xy * 0.5 + 0.5) * vec2(screenWidth, screenHeight);
+    
+    // Compute barycentric coordinates
+    vec2 pixelCenter = vec2(pixelCoord) + 0.5;
+    vec3 bary = computeBarycentrics(pixelCenter, screen0, screen1, screen2);
+    
+    // Clamp barycentrics
+    bary = max(bary, vec3(0.0));
+    float barySum = bary.x + bary.y + bary.z;
+    if (barySum > 0.0) bary /= barySum;
+    
+    // Interpolate current world position
+    vec3 currWorldPos = worldPos0 * bary.x + worldPos1 * bary.y + worldPos2 * bary.z;
+    
+    // Interpolate previous world position
+    vec3 prevWorldPos = worldPrevPos0 * bary.x + worldPrevPos1 * bary.y + worldPrevPos2 * bary.z;
+    
+    // Project both to screen space
+    vec4 currNDC = projectToNDC(currWorldPos, viewProj);
+    vec4 prevNDC = projectToNDC(prevWorldPos, prevViewProj);
+    
+    // Compute motion vector in UV space (-1 to 1 range)
+    vec2 currUV = currNDC.xy;
+    vec2 prevUV = prevNDC.xy;
+    
+    vec2 motion = currUV - prevUV;
+    
+    // Apply velocity scaling (for motion blur intensity control)
+    // Values are in NDC space, multiply by 0.5 to get UV delta
+    motion *= 0.5;
+    
+    // Store motion vector
+    imageStore(motionVectors, ivec2(pixelCoord), vec4(motion, 0.0, 0.0));
+}

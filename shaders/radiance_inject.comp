@@ -1,0 +1,222 @@
+/**
+ * radiance_inject.comp
+ * 
+ * Injects screen probe radiance into world-space radiance cache.
+ * Updates clipmap cells based on visible probes.
+ * 
+ * Turn 28-30: Radiance cache injection
+ */
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+struct ScreenProbe {
+    vec4 positionDepth;
+    vec4 normalRadius;
+    ivec4 atlasInfo;
+};
+
+// Spherical harmonics coefficient structure
+struct SHCoeffs {
+    vec4 coeffs[9];  // L2 SH = 9 coefficients (RGB packed per coeff)
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer ProbeBuffer {
+    ScreenProbe probes[];
+};
+
+layout(set = 0, binding = 1) uniform sampler2D probeAtlas;
+
+// Clipmap levels
+layout(rgba16f, set = 0, binding = 2) uniform image3D clipmap0;
+layout(rgba16f, set = 0, binding = 3) uniform image3D clipmap1;
+layout(rgba16f, set = 0, binding = 4) uniform image3D clipmap2;
+layout(rgba16f, set = 0, binding = 5) uniform image3D clipmap3;
+
+layout(push_constant) uniform PushConstants {
+    vec4 clipCenter[4];     // xyz = center, w = extent
+    ivec4 clipResolution;   // xyz = resolution per level, w = unused
+    ivec4 clipOffset[4];    // xyz = toroidal offset, w = level
+    uint probeCount;
+    float injectionWeight;
+    float cellSize0;        // Base cell size
+    float padding;
+};
+
+// SH basis functions
+float shBasis(int l, int m, vec3 dir) {
+    float x = dir.x, y = dir.y, z = dir.z;
+    
+    // L0
+    if (l == 0 && m == 0) return 0.282095;
+    
+    // L1
+    if (l == 1 && m == -1) return 0.488603 * y;
+    if (l == 1 && m == 0) return 0.488603 * z;
+    if (l == 1 && m == 1) return 0.488603 * x;
+    
+    // L2
+    if (l == 2 && m == -2) return 1.092548 * x * y;
+    if (l == 2 && m == -1) return 1.092548 * y * z;
+    if (l == 2 && m == 0) return 0.315392 * (3.0 * z * z - 1.0);
+    if (l == 2 && m == 1) return 1.092548 * x * z;
+    if (l == 2 && m == 2) return 0.546274 * (x * x - y * y);
+    
+    return 0.0;
+}
+
+// Convert SH index to l,m
+void shIndex(int i, out int l, out int m) {
+    if (i == 0) { l = 0; m = 0; return; }
+    if (i == 1) { l = 1; m = -1; return; }
+    if (i == 2) { l = 1; m = 0; return; }
+    if (i == 3) { l = 1; m = 1; return; }
+    if (i == 4) { l = 2; m = -2; return; }
+    if (i == 5) { l = 2; m = -1; return; }
+    if (i == 6) { l = 2; m = 0; return; }
+    if (i == 7) { l = 2; m = 1; return; }
+    if (i == 8) { l = 2; m = 2; return; }
+    l = 0; m = 0;
+}
+
+// Octahedral decode
+vec3 octDecode(vec2 f) {
+    f = f * 2.0 - 1.0;
+    vec3 n = vec3(f.xy, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-n.z, 0.0);
+    n.xy += (step(0.0, n.xy) * 2.0 - 1.0) * -t;
+    return normalize(n);
+}
+
+// Project probe radiance to SH
+void projectToSH(uint probeIndex, out vec3 shCoeffs[9]) {
+    ScreenProbe probe = probes[probeIndex];
+    int atlasOffset = probe.atlasInfo.x;
+    int resolution = probe.atlasInfo.y;
+    
+    // Initialize SH coefficients
+    for (int i = 0; i < 9; i++) {
+        shCoeffs[i] = vec3(0.0);
+    }
+    
+    ivec2 probeBase = ivec2(atlasOffset % 2048, atlasOffset / 2048);
+    
+    // Integrate over probe directions
+    float weight = 4.0 * 3.14159265 / float(resolution * resolution);
+    
+    for (int py = 0; py < resolution; py++) {
+        for (int px = 0; px < resolution; px++) {
+            vec2 octUV = (vec2(px, py) + 0.5) / float(resolution);
+            vec3 dir = octDecode(octUV);
+            
+            // Get radiance from probe atlas
+            ivec2 texCoord = probeBase + ivec2(px, py);
+            vec3 radiance = texelFetch(probeAtlas, texCoord, 0).rgb;
+            
+            // Project to each SH coefficient
+            for (int i = 0; i < 9; i++) {
+                int l, m;
+                shIndex(i, l, m);
+                float basis = shBasis(l, m, dir);
+                shCoeffs[i] += radiance * basis * weight;
+            }
+        }
+    }
+}
+
+// Apply toroidal addressing
+ivec3 toroidalCoord(ivec3 coord, ivec3 resolution, ivec3 offset) {
+    return (coord + offset) % resolution;
+}
+
+void main() {
+    ivec3 cellCoord = ivec3(gl_GlobalInvocationID.xyz);
+    
+    // Determine which clipmap level based on dispatch
+    uint level = gl_WorkGroupID.z / uint(clipResolution.z);
+    if (level >= 4) return;
+    
+    ivec3 localCoord = ivec3(cellCoord.xy, cellCoord.z % clipResolution.z);
+    
+    if (any(greaterThanEqual(localCoord, clipResolution.xyz))) return;
+    
+    // Get cell world position
+    float cellSize = cellSize0 * pow(2.0, float(level));
+    vec3 cellCenter = clipCenter[level].xyz + 
+        (vec3(localCoord) - vec3(clipResolution.xyz) * 0.5 + 0.5) * cellSize;
+    
+    // Find nearby probes and accumulate SH
+    vec3 totalSH[9];
+    for (int i = 0; i < 9; i++) {
+        totalSH[i] = vec3(0.0);
+    }
+    float totalWeight = 0.0;
+    
+    for (uint p = 0; p < probeCount && p < 1024u; p++) {
+        ScreenProbe probe = probes[p];
+        if (probe.atlasInfo.z == 0) continue;
+        
+        vec3 probePos = probe.positionDepth.xyz;
+        float probeRadius = probe.normalRadius.w;
+        
+        float dist = length(cellCenter - probePos);
+        if (dist > probeRadius * 4.0) continue;
+        
+        // Distance-based weight with falloff
+        float weight = 1.0 / (1.0 + dist * dist / (cellSize * cellSize));
+        
+        // Normal alignment weight
+        vec3 probeNormal = probe.normalRadius.xyz;
+        vec3 toCell = normalize(cellCenter - probePos);
+        float normalWeight = max(dot(probeNormal, toCell), 0.0);
+        weight *= normalWeight;
+        
+        if (weight > 0.001) {
+            vec3 probeSH[9];
+            projectToSH(p, probeSH);
+            
+            for (int i = 0; i < 9; i++) {
+                totalSH[i] += probeSH[i] * weight;
+            }
+            totalWeight += weight;
+        }
+    }
+    
+    if (totalWeight > 0.0) {
+        for (int i = 0; i < 9; i++) {
+            totalSH[i] /= totalWeight;
+        }
+    }
+    
+    // Apply toroidal offset
+    ivec3 storeCoord = toroidalCoord(localCoord, clipResolution.xyz, clipOffset[level].xyz);
+    
+    // Read existing value and blend
+    vec4 existing;
+    vec4 newVal;
+    
+    // Store first 4 SH coefficients (L0 + L1) - most important for diffuse
+    vec4 sh0 = vec4(totalSH[0], totalSH[1].r);
+    vec4 sh1 = vec4(totalSH[1].gb, totalSH[2].rg);
+    vec4 sh2 = vec4(totalSH[2].b, totalSH[3]);
+    
+    if (level == 0) {
+        existing = imageLoad(clipmap0, storeCoord);
+        newVal = mix(existing, sh0, injectionWeight);
+        imageStore(clipmap0, storeCoord, newVal);
+    } else if (level == 1) {
+        existing = imageLoad(clipmap1, storeCoord);
+        newVal = mix(existing, sh0, injectionWeight);
+        imageStore(clipmap1, storeCoord, newVal);
+    } else if (level == 2) {
+        existing = imageLoad(clipmap2, storeCoord);
+        newVal = mix(existing, sh0, injectionWeight);
+        imageStore(clipmap2, storeCoord, newVal);
+    } else {
+        existing = imageLoad(clipmap3, storeCoord);
+        newVal = mix(existing, sh0, injectionWeight);
+        imageStore(clipmap3, storeCoord, newVal);
+    }
+}

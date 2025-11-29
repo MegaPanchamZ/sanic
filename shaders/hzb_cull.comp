@@ -1,0 +1,213 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_GOOGLE_include_directive : enable
+
+/**
+ * HZB Occlusion Culling
+ * =====================
+ * Tests clusters against the Hierarchical Z-Buffer for occlusion.
+ * 
+ * Two-pass approach (like Nanite):
+ * 1. MAIN PASS: Cull using previous frame's HZB
+ * 2. POST PASS: Re-test culled clusters with updated HZB
+ * 
+ * This pass takes visible clusters from frustum culling and
+ * further culls them using depth-based occlusion.
+ */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "cluster_common.glsl"
+
+// HZB texture
+layout(set = 0, binding = 0) uniform sampler2D hzbTexture;
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
+    Cluster clusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer CandidateBuffer {
+    VisibleCluster candidates[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer OutputBuffer {
+    VisibleCluster visibleClusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer OccludedBuffer {
+    VisibleCluster occludedClusters[];  // For POST pass
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer CounterBuffer {
+    uint visibleCount;
+    uint occludedCount;
+    uint testedCount;
+    uint pad;
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    vec3 cameraPosition;
+    float nearPlane;
+    vec2 screenSize;
+    vec2 hzbSize;
+    uint hzbMipLevels;
+    uint candidateCount;
+    uint flags;
+    uint pad;
+    
+    ClusterBuffer clusterBuffer;
+    CandidateBuffer candidateBuffer;
+    OutputBuffer outputBuffer;
+    OccludedBuffer occludedBuffer;
+    CounterBuffer counterBuffer;
+} pc;
+
+// Flags
+const uint FLAG_IS_POST_PASS = 0x01;  // Second pass with updated HZB
+const uint FLAG_OUTPUT_OCCLUDED = 0x02;  // Output occluded list for POST pass
+
+/**
+ * Calculate appropriate HZB mip level for a given screen-space size
+ */
+int calculateHzbMipLevel(vec2 screenMin, vec2 screenMax) {
+    vec2 screenSize = screenMax - screenMin;
+    float maxDim = max(screenSize.x, screenSize.y);
+    
+    // Use mip level where one texel covers the object
+    int mipLevel = int(ceil(log2(maxDim)));
+    
+    // Clamp to valid range (leave some margin for safety)
+    return clamp(mipLevel, 0, int(pc.hzbMipLevels) - 1);
+}
+
+/**
+ * Project AABB corners to screen space
+ */
+void projectAabbToScreen(vec3 boxMin, vec3 boxMax, mat4 mvp, 
+                          out vec2 screenMin, out vec2 screenMax, out float minDepth) {
+    // Initialize with extreme values
+    screenMin = vec2(1e30);
+    screenMax = vec2(-1e30);
+    minDepth = 1.0;  // Farthest for reversed-Z
+    
+    // Project all 8 corners
+    for (int i = 0; i < 8; i++) {
+        vec3 corner = vec3(
+            (i & 1) != 0 ? boxMax.x : boxMin.x,
+            (i & 2) != 0 ? boxMax.y : boxMin.y,
+            (i & 4) != 0 ? boxMax.z : boxMin.z
+        );
+        
+        vec4 clipPos = mvp * vec4(corner, 1.0);
+        
+        // Handle behind camera
+        if (clipPos.w <= 0.0) {
+            // Object crosses near plane - assume visible
+            screenMin = vec2(0.0);
+            screenMax = pc.screenSize;
+            minDepth = 1.0;  // Near plane in reversed-Z
+            return;
+        }
+        
+        // Perspective divide
+        vec3 ndc = clipPos.xyz / clipPos.w;
+        
+        // NDC to screen
+        vec2 screen = (ndc.xy * 0.5 + 0.5) * pc.screenSize;
+        
+        screenMin = min(screenMin, screen);
+        screenMax = max(screenMax, screen);
+        
+        // Track closest depth (largest value in reversed-Z)
+        minDepth = min(minDepth, ndc.z);
+    }
+    
+    // Clamp to screen bounds
+    screenMin = clamp(screenMin, vec2(0.0), pc.screenSize);
+    screenMax = clamp(screenMax, vec2(0.0), pc.screenSize);
+}
+
+/**
+ * Sample HZB at appropriate mip level
+ */
+float sampleHzb(vec2 screenMin, vec2 screenMax) {
+    int mipLevel = calculateHzbMipLevel(screenMin, screenMax);
+    
+    // Calculate mip-adjusted size
+    vec2 mipSize = pc.hzbSize / float(1 << mipLevel);
+    
+    // Calculate screen-space rect in mip coordinates
+    vec2 mipMin = screenMin / float(1 << mipLevel);
+    vec2 mipMax = screenMax / float(1 << mipLevel);
+    
+    // Sample corners of the rect at this mip level
+    vec2 uv0 = (mipMin + 0.5) / mipSize;
+    vec2 uv1 = (mipMax - 0.5) / mipSize;
+    
+    // Take minimum of all samples (conservative for reversed-Z)
+    float d0 = textureLod(hzbTexture, uv0, float(mipLevel)).r;
+    float d1 = textureLod(hzbTexture, vec2(uv1.x, uv0.y), float(mipLevel)).r;
+    float d2 = textureLod(hzbTexture, vec2(uv0.x, uv1.y), float(mipLevel)).r;
+    float d3 = textureLod(hzbTexture, uv1, float(mipLevel)).r;
+    
+    return min(min(d0, d1), min(d2, d3));
+}
+
+/**
+ * Test if cluster is occluded
+ */
+bool isOccluded(Cluster cluster) {
+    // Get cluster AABB - boxExtent is split into X/Y/Z components
+    vec3 boxExtent = vec3(cluster.bounds.boxExtentX, 
+                          cluster.bounds.boxExtentY, 
+                          cluster.bounds.boxExtentZ);
+    vec3 boxMin = cluster.bounds.boxCenter - boxExtent;
+    vec3 boxMax = cluster.bounds.boxCenter + boxExtent;
+    
+    // Project to screen
+    vec2 screenMin, screenMax;
+    float clusterDepth;
+    projectAabbToScreen(boxMin, boxMax, pc.viewProj, screenMin, screenMax, clusterDepth);
+    
+    // Check if entirely off-screen
+    if (screenMin.x >= screenMax.x || screenMin.y >= screenMax.y) {
+        return true;  // Degenerate projection - cull
+    }
+    
+    // Sample HZB
+    float hzbDepth = sampleHzb(screenMin, screenMax);
+    
+    // In reversed-Z: hzbDepth is the farthest visible depth
+    // clusterDepth is the closest point of the cluster
+    // If cluster's closest point is farther than HZB, it's occluded
+    return clusterDepth < hzbDepth;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    if (idx >= pc.candidateCount) {
+        return;
+    }
+    
+    // Load candidate cluster
+    VisibleCluster candidate = pc.candidateBuffer.candidates[idx];
+    Cluster cluster = pc.clusterBuffer.clusters[candidate.clusterIndex];
+    
+    // Test occlusion
+    bool occluded = isOccluded(cluster);
+    
+    atomicAdd(pc.counterBuffer.testedCount, 1);
+    
+    if (!occluded) {
+        // Visible - output to visible list
+        uint outputIdx = atomicAdd(pc.counterBuffer.visibleCount, 1);
+        pc.outputBuffer.visibleClusters[outputIdx] = candidate;
+    } else if ((pc.flags & FLAG_OUTPUT_OCCLUDED) != 0) {
+        // Occluded in MAIN pass - output to occluded list for POST pass
+        uint occludedIdx = atomicAdd(pc.counterBuffer.occludedCount, 1);
+        pc.occludedBuffer.occludedClusters[occludedIdx] = candidate;
+    }
+}

@@ -1,0 +1,130 @@
+/**
+ * sdf_global_update.comp
+ * 
+ * Updates global distance field from mesh SDFs.
+ * Combines per-mesh SDFs using min operation.
+ * 
+ * Turn 22-24: Global SDF cascade update
+ */
+
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+// Mesh SDF descriptor
+struct MeshSDFDesc {
+    vec4 boundsMin;     // xyz = min, w = voxelSize
+    vec4 boundsMax;     // xyz = max, w = unused
+    ivec4 atlasOffset;  // xyz = offset in atlas, w = resolution
+};
+
+// Instance data
+struct InstanceData {
+    mat4 transform;
+    uint meshId;
+    uint sdfIndex;      // Index into mesh SDF array
+    uint pad0, pad1;
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer InstanceBuffer {
+    InstanceData instances[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer SDFDescBuffer {
+    MeshSDFDesc descs[];
+};
+
+// Mesh SDF atlas
+layout(set = 0, binding = 0) uniform sampler3D meshSDFAtlas;
+
+// Global SDF output (current cascade)
+layout(set = 0, binding = 1, r16f) writeonly uniform image3D globalSDF;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint64_t instanceAddr;
+    uint64_t sdfDescAddr;
+    
+    vec3 cascadeCenter;
+    float cascadeExtent;
+    
+    ivec3 resolution;
+    uint instanceCount;
+    
+    float voxelSize;
+    uint cascadeIndex;
+    uint pad0, pad1;
+};
+
+// Sample mesh SDF with transform
+float sampleMeshSDF(vec3 worldPos, InstanceData instance, MeshSDFDesc desc) {
+    // Transform world position to mesh local space
+    mat4 invTransform = inverse(instance.transform);
+    vec3 localPos = (invTransform * vec4(worldPos, 1.0)).xyz;
+    
+    // Check bounds
+    if (any(lessThan(localPos, desc.boundsMin.xyz)) || 
+        any(greaterThan(localPos, desc.boundsMax.xyz))) {
+        return 1e10;  // Outside mesh bounds
+    }
+    
+    // Compute UV in mesh SDF
+    vec3 normalizedPos = (localPos - desc.boundsMin.xyz) / (desc.boundsMax.xyz - desc.boundsMin.xyz);
+    
+    // Compute atlas UV
+    vec3 atlasSize = vec3(textureSize(meshSDFAtlas, 0));
+    vec3 atlasUV = (vec3(desc.atlasOffset.xyz) + normalizedPos * float(desc.atlasOffset.w)) / atlasSize;
+    
+    // Sample SDF
+    float dist = texture(meshSDFAtlas, atlasUV).r;
+    
+    // Scale distance by transform (approximation for uniform scale)
+    vec3 scale = vec3(length(instance.transform[0].xyz),
+                      length(instance.transform[1].xyz),
+                      length(instance.transform[2].xyz));
+    float avgScale = (scale.x + scale.y + scale.z) / 3.0;
+    
+    return dist * avgScale;
+}
+
+void main() {
+    ivec3 voxelCoord = ivec3(gl_GlobalInvocationID);
+    
+    if (any(greaterThanEqual(voxelCoord, resolution))) {
+        return;
+    }
+    
+    // Compute world position for this voxel
+    vec3 worldPos = cascadeCenter - vec3(cascadeExtent) + 
+                    (vec3(voxelCoord) + 0.5) * voxelSize;
+    
+    // Get buffers
+    InstanceBuffer instances = InstanceBuffer(instanceAddr);
+    SDFDescBuffer descs = SDFDescBuffer(sdfDescAddr);
+    
+    // Find minimum distance across all instances
+    float minDist = 1e10;
+    
+    for (uint i = 0; i < instanceCount; i++) {
+        InstanceData instance = instances.instances[i];
+        
+        // Skip if no SDF for this mesh
+        if (instance.sdfIndex == 0xFFFFFFFF) {
+            continue;
+        }
+        
+        MeshSDFDesc desc = descs.descs[instance.sdfIndex];
+        
+        float dist = sampleMeshSDF(worldPos, instance, desc);
+        minDist = min(minDist, dist);
+    }
+    
+    // Clamp to reasonable range
+    minDist = clamp(minDist, -cascadeExtent, cascadeExtent);
+    
+    imageStore(globalSDF, voxelCoord, vec4(minDist));
+}

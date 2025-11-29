@@ -1,0 +1,199 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : enable
+
+/**
+ * Nanite-style Mesh Shader
+ * ========================
+ * Processes meshlets from the task shader payload.
+ * 
+ * Each mesh shader workgroup processes one meshlet:
+ * 1. Load vertices and triangles from meshlet data
+ * 2. Transform vertices to clip space
+ * 3. Output primitives for rasterization
+ * 
+ * Output: Visibility buffer data (triangle ID, instance ID)
+ */
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+layout(triangles, max_vertices = 64, max_primitives = 124) out;
+
+#include "cluster_common.glsl"
+
+// Input from task shader
+struct TaskPayload {
+    uint clusterIndex;
+    uint instanceId;
+    uint meshletOffset;
+    uint meshletMask;
+    mat4 worldMatrix;
+    uint visibleMeshletCount;
+    uint pad[3];
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+// Vertex data
+struct Vertex {
+    vec3 position;
+    float pad0;
+    vec3 normal;
+    float pad1;
+    vec2 uv;
+    vec2 pad2;
+};
+
+// Meshlet data
+struct Meshlet {
+    vec3 coneApex;
+    float coneAngle;
+    vec3 coneAxis;
+    float padding;
+    
+    uint vertexOffset;
+    uint triangleOffset;
+    uint vertexCount;
+    uint triangleCount;
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VertexBuffer {
+    Vertex vertices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshletBuffer {
+    Meshlet meshlets[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer MeshletVertexBuffer {
+    uint vertexIndices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer MeshletTriangleBuffer {
+    uint triangleData[];  // Packed as 4 indices per uint
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    vec4 frustumPlanes[6];
+    vec3 cameraPosition;
+    float pad0;
+    
+    uint64_t vertexBufferAddr;
+    uint64_t meshletBufferAddr;
+    uint64_t meshletVertexBufferAddr;
+    uint64_t meshletTriangleBufferAddr;
+    
+    uint clusterBaseIndex;
+    uint pad1, pad2, pad3;
+} pc;
+
+// Output to fragment shader
+layout(location = 0) out VertexOutput {
+    vec3 worldPosition;
+    vec3 worldNormal;
+    vec2 texCoord;
+    flat uint triangleId;
+    flat uint instanceId;
+    flat uint clusterId;
+} vertexOut[];
+
+// Shared memory for meshlet processing
+shared uint sharedMeshletIndex;
+
+/**
+ * Find the N-th set bit in a bitmask
+ */
+uint findNthSetBit(uint mask, uint n) {
+    uint count = 0;
+    for (uint i = 0; i < 32; i++) {
+        if ((mask & (1u << i)) != 0) {
+            if (count == n) {
+                return i;
+            }
+            count++;
+        }
+    }
+    return 0;
+}
+
+void main() {
+    uint localIdx = gl_LocalInvocationIndex;
+    uint meshletWorkgroupIdx = gl_WorkGroupID.x;
+    
+    // Find which meshlet this workgroup should process
+    // (The N-th set bit in the meshlet mask)
+    if (localIdx == 0) {
+        sharedMeshletIndex = findNthSetBit(payload.meshletMask, meshletWorkgroupIdx);
+    }
+    barrier();
+    
+    uint meshletLocalIdx = sharedMeshletIndex;
+    uint meshletGlobalIdx = payload.meshletOffset + meshletLocalIdx;
+    
+    // Cast buffer references from addresses
+    VertexBuffer vertexBuffer = VertexBuffer(pc.vertexBufferAddr);
+    MeshletBuffer meshletBuffer = MeshletBuffer(pc.meshletBufferAddr);
+    MeshletVertexBuffer meshletVertexBuffer = MeshletVertexBuffer(pc.meshletVertexBufferAddr);
+    MeshletTriangleBuffer meshletTriangleBuffer = MeshletTriangleBuffer(pc.meshletTriangleBufferAddr);
+    
+    // Load meshlet data
+    Meshlet meshlet = meshletBuffer.meshlets[meshletGlobalIdx];
+    
+    uint vertexCount = meshlet.vertexCount;
+    uint triangleCount = meshlet.triangleCount;
+    
+    // Set output counts
+    SetMeshOutputsEXT(vertexCount, triangleCount);
+    
+    // Transform and output vertices
+    if (localIdx < vertexCount) {
+        // Get global vertex index
+        uint localVertexIdx = meshletVertexBuffer.vertexIndices[meshlet.vertexOffset + localIdx];
+        Vertex v = vertexBuffer.vertices[localVertexIdx];
+        
+        // Transform position
+        vec4 worldPos = payload.worldMatrix * vec4(v.position, 1.0);
+        vec4 clipPos = pc.viewProj * worldPos;
+        
+        // Transform normal
+        mat3 normalMatrix = transpose(inverse(mat3(payload.worldMatrix)));
+        vec3 worldNormal = normalize(normalMatrix * v.normal);
+        
+        // Output vertex
+        gl_MeshVerticesEXT[localIdx].gl_Position = clipPos;
+        
+        vertexOut[localIdx].worldPosition = worldPos.xyz;
+        vertexOut[localIdx].worldNormal = worldNormal;
+        vertexOut[localIdx].texCoord = v.uv;
+        vertexOut[localIdx].instanceId = payload.instanceId;
+        vertexOut[localIdx].clusterId = payload.clusterIndex;
+    }
+    
+    // Output triangles - indices packed 4 per uint
+    if (localIdx < triangleCount) {
+        uint baseIdx = meshlet.triangleOffset + localIdx * 3;
+        
+        // Unpack indices from packed format (4 bytes per uint)
+        uint word0 = meshletTriangleBuffer.triangleData[baseIdx / 4];
+        uint word1 = meshletTriangleBuffer.triangleData[(baseIdx + 1) / 4];
+        uint word2 = meshletTriangleBuffer.triangleData[(baseIdx + 2) / 4];
+        
+        uint i0 = (word0 >> ((baseIdx % 4) * 8)) & 0xFF;
+        uint i1 = (word1 >> (((baseIdx + 1) % 4) * 8)) & 0xFF;
+        uint i2 = (word2 >> (((baseIdx + 2) % 4) * 8)) & 0xFF;
+        
+        gl_PrimitiveTriangleIndicesEXT[localIdx] = uvec3(i0, i1, i2);
+        
+        // Store triangle ID for visibility buffer
+        // Encode: meshletLocalIdx (8 bits) | triangleLocalIdx (24 bits)
+        uint triangleId = (meshletLocalIdx << 24) | localIdx;
+        
+        // Set per-primitive data (flat interpolation)
+        vertexOut[i0].triangleId = triangleId;
+        vertexOut[i1].triangleId = triangleId;
+        vertexOut[i2].triangleId = triangleId;
+    }
+}

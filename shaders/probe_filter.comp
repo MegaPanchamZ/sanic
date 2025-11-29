@@ -1,0 +1,159 @@
+/**
+ * probe_filter.comp
+ * 
+ * Filters screen probe radiance for temporal stability.
+ * Applies spatial and temporal denoising.
+ * 
+ * Turn 25-27: Probe filtering
+ */
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct ScreenProbe {
+    vec4 positionDepth;
+    vec4 normalRadius;
+    ivec4 atlasInfo;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer ProbeBuffer {
+    ScreenProbe probes[];
+};
+
+// Current frame radiance
+layout(rgba16f, set = 0, binding = 1) uniform image2D probeAtlas;
+
+// Depth atlas
+layout(set = 0, binding = 2) uniform sampler2D probeDepthAtlas;
+
+// History atlas
+layout(set = 0, binding = 3) uniform sampler2D historyAtlas;
+
+// Filtered output
+layout(rgba16f, set = 0, binding = 4) uniform image2D outputAtlas;
+
+layout(push_constant) uniform PushConstants {
+    uint probeCount;
+    uint frameIndex;
+    float temporalWeight;
+    float spatialSigma;
+    float depthSigma;
+    float normalSigma;
+    float padding1;
+    float padding2;
+};
+
+// Gaussian weight
+float gaussian(float x, float sigma) {
+    return exp(-x * x / (2.0 * sigma * sigma));
+}
+
+// Octahedral decode for direction
+vec3 octDecode(vec2 f) {
+    f = f * 2.0 - 1.0;
+    vec3 n = vec3(f.xy, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-n.z, 0.0);
+    n.xy += (step(0.0, n.xy) * 2.0 - 1.0) * -t;
+    return normalize(n);
+}
+
+void main() {
+    uvec2 probeTexel = gl_GlobalInvocationID.xy;
+    
+    // Compute probe index
+    uint probeIndex = probeTexel.x / 8 + (probeTexel.y / 8) * 256;
+    uvec2 localTexel = probeTexel % 8;
+    
+    if (probeIndex >= probeCount) return;
+    
+    ScreenProbe probe = probes[probeIndex];
+    if (probe.atlasInfo.z == 0) return;
+    
+    vec3 probeNormal = probe.normalRadius.xyz;
+    float probeDepth = probe.positionDepth.w;
+    
+    ivec2 atlasCoord = ivec2(probeTexel);
+    
+    // Get current value
+    vec4 currentRadiance = imageLoad(probeAtlas, atlasCoord);
+    float currentDepth = texelFetch(probeDepthAtlas, atlasCoord, 0).r;
+    
+    // Spatial filter within probe
+    vec3 filteredRadiance = vec3(0.0);
+    float totalWeight = 0.0;
+    
+    int filterRadius = 1;
+    for (int dy = -filterRadius; dy <= filterRadius; dy++) {
+        for (int dx = -filterRadius; dx <= filterRadius; dx++) {
+            ivec2 sampleCoord = atlasCoord + ivec2(dx, dy);
+            
+            // Stay within probe bounds
+            uvec2 sampleLocal = uvec2(sampleCoord) % 8;
+            if (sampleLocal.x >= 8 || sampleLocal.y >= 8) continue;
+            
+            vec4 sampleRadiance = imageLoad(probeAtlas, sampleCoord);
+            float sampleDepth = texelFetch(probeDepthAtlas, sampleCoord, 0).r;
+            
+            // Direction from octahedral coordinates
+            vec2 octUV = (vec2(localTexel) + 0.5) / 8.0;
+            vec2 sampleOctUV = (vec2(sampleLocal) + 0.5) / 8.0;
+            vec3 dir = octDecode(octUV);
+            vec3 sampleDir = octDecode(sampleOctUV);
+            
+            // Weights
+            float spatialDist = length(vec2(dx, dy));
+            float spatialW = gaussian(spatialDist, spatialSigma);
+            
+            float depthDiff = abs(currentDepth - sampleDepth);
+            float depthW = gaussian(depthDiff, depthSigma);
+            
+            float angleDiff = 1.0 - dot(dir, sampleDir);
+            float normalW = gaussian(angleDiff, normalSigma);
+            
+            float weight = spatialW * depthW * normalW;
+            
+            filteredRadiance += sampleRadiance.rgb * weight;
+            totalWeight += weight;
+        }
+    }
+    
+    if (totalWeight > 0.0) {
+        filteredRadiance /= totalWeight;
+    } else {
+        filteredRadiance = currentRadiance.rgb;
+    }
+    
+    // Temporal filter
+    vec2 historyUV = (vec2(atlasCoord) + 0.5) / vec2(imageSize(probeAtlas));
+    vec3 historyRadiance = texture(historyAtlas, historyUV).rgb;
+    
+    // Compute variance for clamping
+    vec3 m1 = vec3(0.0);
+    vec3 m2 = vec3(0.0);
+    
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 sampleCoord = atlasCoord + ivec2(dx, dy);
+            vec3 sampleRadiance = imageLoad(probeAtlas, sampleCoord).rgb;
+            m1 += sampleRadiance;
+            m2 += sampleRadiance * sampleRadiance;
+        }
+    }
+    
+    m1 /= 9.0;
+    m2 /= 9.0;
+    vec3 variance = sqrt(max(m2 - m1 * m1, vec3(0.0)));
+    
+    // Clamp history to neighborhood
+    vec3 minRadiance = m1 - variance * 1.5;
+    vec3 maxRadiance = m1 + variance * 1.5;
+    historyRadiance = clamp(historyRadiance, minRadiance, maxRadiance);
+    
+    // Blend with temporal weight
+    vec3 finalRadiance = mix(filteredRadiance, historyRadiance, temporalWeight);
+    
+    // Store result
+    imageStore(outputAtlas, atlasCoord, vec4(finalRadiance, 1.0));
+}

@@ -1,0 +1,136 @@
+/**
+ * composite_final.comp
+ * 
+ * Final composite shader - combines all passes and applies debug overlays.
+ * 
+ * Turn 40-42: Final Integration
+ */
+
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D hdrInput;
+layout(set = 0, binding = 1) uniform sampler2D bloomInput;
+layout(set = 0, binding = 2) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 3) uniform sampler2D uiOverlay;        // UI/debug overlay
+
+layout(set = 0, binding = 4, rgba8) writeonly uniform image2D finalOutput;
+
+layout(push_constant) uniform PushConstants {
+    vec2 screenSize;
+    float bloomIntensity;
+    float exposure;
+    float gamma;
+    uint tonemapOperator;
+    uint showUI;
+    uint debugMode;
+    float fogDensity;
+    float fogStart;
+    vec3 fogColor;
+    float pad;
+} pc;
+
+// Tonemap operators
+vec3 tonemapReinhard(vec3 color) {
+    return color / (color + vec3(1.0));
+}
+
+vec3 tonemapACES(vec3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+vec3 tonemapUncharted2(vec3 x) {
+    float A = 0.15;
+    float B = 0.50;
+    float C = 0.10;
+    float D = 0.20;
+    float E = 0.02;
+    float F = 0.30;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+
+// Linearize depth for fog
+float linearizeDepth(float depth, float near, float far) {
+    return (2.0 * near * far) / (far + near - depth * (far - near));
+}
+
+// Apply gamma correction
+vec3 gammaCorrect(vec3 color, float gamma) {
+    return pow(color, vec3(1.0 / gamma));
+}
+
+// Dithering to reduce banding
+vec3 applyDither(vec3 color, ivec2 coord) {
+    float noise = fract(sin(dot(vec2(coord), vec2(12.9898, 78.233))) * 43758.5453);
+    return color + (noise - 0.5) / 255.0;
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= int(pc.screenSize.x) || gid.y >= int(pc.screenSize.y)) return;
+    
+    vec2 uv = (vec2(gid) + 0.5) / pc.screenSize;
+    
+    // Sample HDR
+    vec3 hdr = texture(hdrInput, uv).rgb;
+    
+    // Add bloom
+    vec3 bloom = texture(bloomInput, uv).rgb;
+    hdr += bloom * pc.bloomIntensity;
+    
+    // Apply fog (optional)
+    if (pc.fogDensity > 0.0) {
+        float depth = texture(depthBuffer, uv).r;
+        if (depth < 1.0) {
+            float linearDepth = linearizeDepth(depth, 0.1, 1000.0);
+            float fogFactor = 1.0 - exp(-pc.fogDensity * max(0.0, linearDepth - pc.fogStart));
+            hdr = mix(hdr, pc.fogColor, clamp(fogFactor, 0.0, 1.0));
+        }
+    }
+    
+    // Apply exposure
+    hdr *= pc.exposure;
+    
+    // Tonemap
+    vec3 ldr;
+    switch (pc.tonemapOperator) {
+        case 0: // Linear (clamp)
+            ldr = clamp(hdr, 0.0, 1.0);
+            break;
+        case 1: // Reinhard
+            ldr = tonemapReinhard(hdr);
+            break;
+        case 2: // ACES
+            ldr = tonemapACES(hdr);
+            break;
+        case 3: // Uncharted 2
+            float W = 11.2;
+            float exposureBias = 2.0;
+            vec3 curr = tonemapUncharted2(hdr * exposureBias);
+            vec3 whiteScale = 1.0 / tonemapUncharted2(vec3(W));
+            ldr = curr * whiteScale;
+            break;
+        default:
+            ldr = tonemapACES(hdr);
+    }
+    
+    // Gamma correction
+    ldr = gammaCorrect(ldr, pc.gamma);
+    
+    // Apply dithering
+    ldr = applyDither(ldr, gid);
+    
+    // Overlay UI if enabled
+    if (pc.showUI > 0) {
+        vec4 ui = texture(uiOverlay, uv);
+        ldr = mix(ldr, ui.rgb, ui.a);
+    }
+    
+    imageStore(finalOutput, gid, vec4(ldr, 1.0));
+}

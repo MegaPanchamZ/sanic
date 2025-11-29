@@ -113,6 +113,21 @@ set(SOURCES
     src/engine/VirtualShadowMap.cpp
     src/engine/ClusterHierarchy.cpp
     src/engine/ClusterCullingPipeline.cpp
+    src/engine/HZBPipeline.cpp
+    src/engine/IndirectDrawPipeline.cpp
+    src/engine/SoftwareRasterizerPipeline.cpp
+    src/engine/MaterialSystem.cpp
+    src/engine/TemporalSystem.cpp
+    src/engine/SurfaceCache.cpp
+    src/engine/ScreenSpaceTracing.cpp
+    src/engine/SDFGenerator.cpp
+    src/engine/ScreenProbes.cpp
+    src/engine/RadianceCache.cpp
+    src/engine/GlobalIllumination.cpp
+    src/engine/VirtualShadowMaps.cpp
+    src/engine/RayTracedShadows.cpp
+    src/engine/PostProcess.cpp
+    src/engine/FinalRenderer.cpp
 )
 
 # --- Executable ---

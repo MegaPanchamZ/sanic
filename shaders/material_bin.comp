@@ -1,0 +1,197 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+
+/**
+ * Material Classification Shader
+ * ===============================
+ * 
+ * Reads visibility buffer and bins pixels by material ID.
+ * Creates per-material tile lists for efficient deferred shading.
+ * 
+ * This enables:
+ * - Batched texture fetches per material
+ * - Reduced shader divergence
+ * - Efficient material-specific shading paths
+ * 
+ * Based on Nanite's material tile classification.
+ */
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#include "cluster_common.glsl"
+
+// Maximum materials supported
+const uint MAX_MATERIALS = 256;
+const uint TILE_SIZE = 8;
+
+// Pixel work item for deferred shading
+struct PixelWorkItem {
+    uint packedCoord;       // x | (y << 16)
+    uint triangleId;        // Triangle within cluster
+    uint clusterId;         // Cluster index
+    uint instanceId;        // Instance index
+};
+
+// Per-material tile descriptor
+struct MaterialTile {
+    uint tileX;
+    uint tileY;
+    uint pixelOffset;       // Offset into pixel work list
+    uint pixelCount;        // Number of pixels in this tile for this material
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer VisibilityBuffer {
+    uint64_t pixels[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
+    Cluster clusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer PixelWorkBuffer {
+    PixelWorkItem items[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer MaterialTileBuffer {
+    MaterialTile tiles[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer MaterialCounters {
+    uint tileCountPerMaterial[MAX_MATERIALS];
+    uint pixelCountPerMaterial[MAX_MATERIALS];
+    uint totalTiles;
+    uint totalPixels;
+};
+
+layout(push_constant) uniform PushConstants {
+    VisibilityBuffer visibilityBuffer;
+    ClusterBuffer clusterBuffer;
+    PixelWorkBuffer pixelWorkBuffer;
+    MaterialTileBuffer materialTileBuffer;
+    MaterialCounters counters;
+    
+    uint screenWidth;
+    uint screenHeight;
+    uint tileCountX;
+    uint tileCountY;
+} pc;
+
+// Shared memory for tile material counts
+shared uint sharedMaterialMask;           // Bitmask of materials present in tile
+shared uint sharedMaterialCounts[32];     // Counts per material (first 32)
+shared uint sharedMaterialOffsets[32];    // Write offsets per material
+
+// Invalid visibility marker
+const uint64_t INVALID_VISIBILITY = 0xFFFFFFFFFFFFFFFFul;
+
+/**
+ * Unpack visibility buffer value
+ */
+void unpackVisibility(uint64_t packed, out float depth, out uint triangleId, 
+                      out uint clusterId, out uint instanceId) {
+    uint depthBits = uint(packed >> 32);
+    depth = uintBitsToFloat(depthBits);
+    
+    uint id = uint(packed & 0xFFFFFFFFul);
+    instanceId = (id >> 24) & 0xFF;
+    clusterId = (id >> 12) & 0xFFF;
+    triangleId = id & 0xFFF;
+}
+
+void main() {
+    uvec2 tileCoord = gl_WorkGroupID.xy;
+    uvec2 localCoord = gl_LocalInvocationID.xy;
+    uint localIdx = gl_LocalInvocationIndex;
+    
+    // Initialize shared memory
+    if (localIdx < 32) {
+        sharedMaterialCounts[localIdx] = 0;
+        sharedMaterialOffsets[localIdx] = 0;
+    }
+    if (localIdx == 0) {
+        sharedMaterialMask = 0;
+    }
+    barrier();
+    
+    // Compute pixel coordinate
+    uvec2 pixelCoord = tileCoord * TILE_SIZE + localCoord;
+    
+    // Check bounds
+    bool validPixel = (pixelCoord.x < pc.screenWidth && pixelCoord.y < pc.screenHeight);
+    
+    uint materialId = 0;
+    uint triangleId = 0;
+    uint clusterId = 0;
+    uint instanceId = 0;
+    bool hasGeometry = false;
+    
+    if (validPixel) {
+        uint pixelIdx = pixelCoord.y * pc.screenWidth + pixelCoord.x;
+        uint64_t visibility = pc.visibilityBuffer.pixels[pixelIdx];
+        
+        if (visibility != INVALID_VISIBILITY) {
+            float depth;
+            unpackVisibility(visibility, depth, triangleId, clusterId, instanceId);
+            
+            // Get material from cluster
+            Cluster cluster = pc.clusterBuffer.clusters[clusterId];
+            materialId = cluster.geometry.materialId;
+            hasGeometry = true;
+            
+            // Atomically set material bit and increment count
+            atomicOr(sharedMaterialMask, 1u << (materialId & 31));
+            atomicAdd(sharedMaterialCounts[materialId & 31], 1);
+        }
+    }
+    
+    barrier();
+    
+    // First thread counts unique materials and allocates space
+    if (localIdx == 0) {
+        uint mask = sharedMaterialMask;
+        while (mask != 0) {
+            uint matBit = findLSB(mask);
+            uint count = sharedMaterialCounts[matBit];
+            
+            if (count > 0) {
+                // Allocate pixels in global buffer
+                uint offset = atomicAdd(pc.counters.pixelCountPerMaterial[matBit], count);
+                sharedMaterialOffsets[matBit] = offset;
+                
+                // Increment tile count for this material
+                atomicAdd(pc.counters.tileCountPerMaterial[matBit], 1);
+            }
+            
+            mask &= ~(1u << matBit);
+        }
+        
+        atomicAdd(pc.counters.totalTiles, bitCount(sharedMaterialMask));
+    }
+    
+    barrier();
+    
+    // Write pixel work items
+    if (hasGeometry) {
+        uint matIdx = materialId & 31;
+        uint localOffset = atomicAdd(sharedMaterialCounts[matIdx], 0); // Read current value
+        
+        // Use prefix sum within material group
+        uvec4 ballot = subgroupBallot(hasGeometry && (materialId & 31) == matIdx);
+        uint prefixCount = subgroupBallotExclusiveBitCount(ballot);
+        
+        uint globalOffset = sharedMaterialOffsets[matIdx] + prefixCount;
+        
+        PixelWorkItem item;
+        item.packedCoord = pixelCoord.x | (pixelCoord.y << 16);
+        item.triangleId = triangleId;
+        item.clusterId = clusterId;
+        item.instanceId = instanceId;
+        
+        pc.pixelWorkBuffer.items[globalOffset] = item;
+    }
+}

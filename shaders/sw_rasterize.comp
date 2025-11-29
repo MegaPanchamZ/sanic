@@ -1,0 +1,278 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+
+/**
+ * Software Rasterizer for Small Triangles
+ * ========================================
+ * 
+ * Nanite-style software rasterizer for sub-pixel and small triangles.
+ * These triangles are inefficient on hardware rasterizers due to:
+ * - Quad overshading (2x2 pixel quads)
+ * - Fixed-function setup overhead
+ * 
+ * This shader:
+ * 1. Bins triangles by screen-space tile (8x8 pixels)
+ * 2. Rasterizes using edge functions
+ * 3. Writes to visibility buffer with atomic depth test
+ * 
+ * Triangles smaller than ~16 pixels benefit from SW rasterization.
+ */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "cluster_common.glsl"
+
+// Tile size for binning
+const uint TILE_SIZE = 8;
+const uint TILE_SHIFT = 3;  // log2(8)
+
+// Vertex data
+struct Vertex {
+    vec3 position;
+    float pad0;
+    vec3 normal;
+    float pad1;
+    vec2 uv;
+    vec2 pad2;
+};
+
+// SW rasterized triangle
+struct SWTriangle {
+    uint clusterIndex;
+    uint triangleIndex;
+    uint instanceId;
+    uint pad;
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VisibleClusterBuffer {
+    VisibleCluster visibleClusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
+    Cluster clusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer InstanceBuffer {
+    mat4 worldMatrices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VertexBuffer {
+    Vertex vertices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IndexBuffer {
+    uint indices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer SWTriangleBuffer {
+    SWTriangle triangles[];
+};
+
+// Visibility buffer - 64-bit per pixel (32-bit depth + 32-bit ID)
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer VisibilityBuffer {
+    uint64_t pixels[];
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    
+    VisibleClusterBuffer visibleClusterBuffer;
+    ClusterBuffer clusterBuffer;
+    InstanceBuffer instanceBuffer;
+    VertexBuffer vertexBuffer;
+    IndexBuffer indexBuffer;
+    SWTriangleBuffer swTriangleBuffer;
+    VisibilityBuffer visibilityBuffer;
+    
+    uint swTriangleCount;
+    uint screenWidth;
+    uint screenHeight;
+    uint pad;
+} pc;
+
+// Shared memory for tile binning
+shared uint sharedTileTriCounts[64];  // Max 64 tiles per workgroup
+shared uint sharedTileTriIndices[64 * 16];  // Max 16 triangles per tile
+
+/**
+ * Edge function for triangle rasterization
+ * Returns positive if point is on the left side of the edge
+ */
+float edgeFunction(vec2 a, vec2 b, vec2 p) {
+    return (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
+}
+
+/**
+ * Transform vertex to screen space
+ * Returns xy in pixels, z as depth, w as 1/w for perspective correction
+ */
+vec4 transformToScreen(vec3 worldPos, mat4 worldMatrix) {
+    vec4 clipPos = pc.viewProj * worldMatrix * vec4(worldPos, 1.0);
+    
+    // Perspective divide
+    vec3 ndc = clipPos.xyz / clipPos.w;
+    
+    // To screen space
+    vec2 screen;
+    screen.x = (ndc.x * 0.5 + 0.5) * float(pc.screenWidth);
+    screen.y = (ndc.y * 0.5 + 0.5) * float(pc.screenHeight);
+    
+    return vec4(screen, ndc.z, 1.0 / clipPos.w);
+}
+
+/**
+ * Pack visibility buffer value
+ * Upper 32 bits: depth as uint (normalized)
+ * Lower 32 bits: triangle/cluster/instance ID
+ */
+uint64_t packVisibility(float depth, uint triangleId, uint clusterId, uint instanceId) {
+    // Convert depth [0,1] to uint32 for comparison
+    uint depthBits = floatBitsToUint(depth);
+    
+    // Pack ID: instance(8) | cluster(12) | triangle(12)
+    uint packedId = ((instanceId & 0xFF) << 24) |
+                    ((clusterId & 0xFFF) << 12) |
+                    (triangleId & 0xFFF);
+    
+    return (uint64_t(depthBits) << 32) | uint64_t(packedId);
+}
+
+/**
+ * Atomic min for visibility buffer
+ * Uses atomic compare-exchange to implement depth test
+ */
+void writeVisibility(uint pixelIdx, uint64_t newValue) {
+    uint64_t oldValue = pc.visibilityBuffer.pixels[pixelIdx];
+    
+    // Loop until we either win or lose the depth test
+    while (newValue < oldValue) {
+        uint64_t result = atomicCompSwap(pc.visibilityBuffer.pixels[pixelIdx], oldValue, newValue);
+        if (result == oldValue) {
+            // We won, wrote our value
+            return;
+        }
+        oldValue = result;
+    }
+}
+
+/**
+ * Rasterize a single triangle
+ */
+void rasterizeTriangle(vec2 v0, vec2 v1, vec2 v2,
+                       float z0, float z1, float z2,
+                       uint triangleId, uint clusterId, uint instanceId) {
+    // Compute bounding box
+    vec2 minBB = floor(min(v0, min(v1, v2)));
+    vec2 maxBB = ceil(max(v0, max(v1, v2)));
+    
+    // Clamp to screen
+    minBB = max(minBB, vec2(0.0));
+    maxBB = min(maxBB, vec2(float(pc.screenWidth - 1), float(pc.screenHeight - 1)));
+    
+    // Skip degenerate triangles
+    if (minBB.x >= maxBB.x || minBB.y >= maxBB.y) {
+        return;
+    }
+    
+    // Compute edge function normalization (for consistent winding)
+    float area = edgeFunction(v0, v1, v2);
+    if (abs(area) < 0.0001) {
+        return;  // Degenerate
+    }
+    
+    // Ensure consistent winding (CCW)
+    if (area < 0.0) {
+        // Swap v1 and v2
+        vec2 tmp = v1;
+        v1 = v2;
+        v2 = tmp;
+        float tmpZ = z1;
+        z1 = z2;
+        z2 = tmpZ;
+        area = -area;
+    }
+    
+    float invArea = 1.0 / area;
+    
+    // Rasterize pixels in bounding box
+    for (float y = minBB.y + 0.5; y <= maxBB.y; y += 1.0) {
+        for (float x = minBB.x + 0.5; x <= maxBB.x; x += 1.0) {
+            vec2 p = vec2(x, y);
+            
+            // Edge tests
+            float w0 = edgeFunction(v1, v2, p);
+            float w1 = edgeFunction(v2, v0, p);
+            float w2 = edgeFunction(v0, v1, p);
+            
+            // Check if inside triangle (all positive or all negative)
+            if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0) {
+                // Compute barycentric coordinates
+                w0 *= invArea;
+                w1 *= invArea;
+                w2 *= invArea;
+                
+                // Interpolate depth
+                float depth = w0 * z0 + w1 * z1 + w2 * z2;
+                
+                // Skip if behind near plane or beyond far plane
+                if (depth < 0.0 || depth > 1.0) {
+                    continue;
+                }
+                
+                // Write to visibility buffer with depth test
+                uint pixelIdx = uint(y) * pc.screenWidth + uint(x);
+                uint64_t packedVis = packVisibility(depth, triangleId, clusterId, instanceId);
+                writeVisibility(pixelIdx, packedVis);
+            }
+        }
+    }
+}
+
+void main() {
+    uint triIdx = gl_GlobalInvocationID.x;
+    
+    if (triIdx >= pc.swTriangleCount) {
+        return;
+    }
+    
+    // Load triangle info
+    SWTriangle swTri = pc.swTriangleBuffer.triangles[triIdx];
+    VisibleCluster visible = pc.visibleClusterBuffer.visibleClusters[swTri.clusterIndex];
+    Cluster cluster = pc.clusterBuffer.clusters[visible.clusterIndex];
+    mat4 worldMatrix = pc.instanceBuffer.worldMatrices[swTri.instanceId];
+    
+    // Get triangle vertex indices from triangle buffer
+    // Each triangle has 3 indices packed
+    uint baseIndex = cluster.geometry.triangleOffset + swTri.triangleIndex * 3;
+    uint i0 = pc.indexBuffer.indices[baseIndex + 0];
+    uint i1 = pc.indexBuffer.indices[baseIndex + 1];
+    uint i2 = pc.indexBuffer.indices[baseIndex + 2];
+    
+    // Load vertices
+    Vertex v0 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i0];
+    Vertex v1 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i1];
+    Vertex v2 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i2];
+    
+    // Transform to screen space
+    vec4 s0 = transformToScreen(v0.position, worldMatrix);
+    vec4 s1 = transformToScreen(v1.position, worldMatrix);
+    vec4 s2 = transformToScreen(v2.position, worldMatrix);
+    
+    // Cull backfaces and triangles behind camera
+    if (s0.w < 0.0 || s1.w < 0.0 || s2.w < 0.0) {
+        return;
+    }
+    
+    // Rasterize
+    rasterizeTriangle(s0.xy, s1.xy, s2.xy,
+                      s0.z, s1.z, s2.z,
+                      swTri.triangleIndex,
+                      visible.clusterIndex,
+                      swTri.instanceId);
+}

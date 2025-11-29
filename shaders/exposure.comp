@@ -1,0 +1,122 @@
+/**
+ * exposure.comp
+ * 
+ * Auto-exposure using histogram luminance analysis.
+ * Computes average luminance and adapts exposure over time.
+ * 
+ * Turn 37-39: Post-processing
+ */
+
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// Histogram with 256 bins
+layout(set = 0, binding = 0, std430) buffer Histogram {
+    uint bins[256];
+    float averageLuminance;
+    float targetExposure;
+    float currentExposure;
+    float adaptedExposure;
+} histogram;
+
+layout(push_constant) uniform PushConstants {
+    float minLuminance;
+    float maxLuminance;
+    float lowPercentile;      // Ignore darkest pixels (e.g., 0.1)
+    float highPercentile;     // Ignore brightest pixels (e.g., 0.9)
+    float adaptationSpeed;
+    float deltaTime;
+    float exposureCompensation;
+    float targetMiddleGray;   // 0.18 typically
+    uint width;
+    uint height;
+    uint pixelCount;
+    uint resetExposure;
+} pc;
+
+// Convert histogram bin to luminance
+float binToLuminance(uint bin) {
+    float t = (float(bin) + 0.5) / 256.0;
+    return pc.minLuminance * pow(pc.maxLuminance / pc.minLuminance, t);
+}
+
+// Compute weighted average using subgroups
+shared float sharedLuminance[256];
+shared float sharedWeight[256];
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    
+    // Read histogram bin
+    uint count = histogram.bins[lid];
+    float luminance = binToLuminance(lid);
+    
+    sharedLuminance[lid] = luminance * float(count);
+    sharedWeight[lid] = float(count);
+    
+    barrier();
+    
+    // Compute percentile bounds
+    if (lid == 0) {
+        uint totalPixels = pc.pixelCount;
+        uint lowCount = uint(float(totalPixels) * pc.lowPercentile);
+        uint highCount = uint(float(totalPixels) * pc.highPercentile);
+        
+        // Find low and high percentile bins
+        uint cumulative = 0;
+        uint lowBin = 0;
+        uint highBin = 255;
+        
+        for (uint i = 0; i < 256; i++) {
+            cumulative += histogram.bins[i];
+            if (cumulative <= lowCount) {
+                lowBin = i + 1;
+            }
+            if (cumulative < highCount) {
+                highBin = i;
+            }
+        }
+        
+        // Compute average luminance excluding percentile outliers
+        float sumLuminance = 0.0;
+        float sumWeight = 0.0;
+        
+        for (uint i = lowBin; i <= highBin; i++) {
+            float lum = binToLuminance(i);
+            float weight = float(histogram.bins[i]);
+            sumLuminance += lum * weight;
+            sumWeight += weight;
+        }
+        
+        float avgLuminance = sumLuminance / max(sumWeight, 1.0);
+        histogram.averageLuminance = avgLuminance;
+        
+        // Compute target exposure
+        // exposure = targetMiddleGray / avgLuminance
+        float targetExposure = pc.targetMiddleGray / max(avgLuminance, 0.0001);
+        targetExposure *= pow(2.0, pc.exposureCompensation);
+        
+        // Clamp to reasonable range
+        targetExposure = clamp(targetExposure, 0.01, 100.0);
+        histogram.targetExposure = targetExposure;
+        
+        // Temporal adaptation
+        float currentExposure = histogram.currentExposure;
+        if (pc.resetExposure > 0 || currentExposure <= 0.0) {
+            currentExposure = targetExposure;
+        } else {
+            // Exponential smoothing
+            float speed = pc.adaptationSpeed * pc.deltaTime;
+            currentExposure = mix(currentExposure, targetExposure, clamp(speed, 0.0, 1.0));
+        }
+        
+        histogram.currentExposure = currentExposure;
+        histogram.adaptedExposure = currentExposure;
+    }
+    
+    // Clear histogram for next frame
+    barrier();
+    histogram.bins[lid] = 0;
+}

@@ -1,0 +1,229 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : enable
+
+/**
+ * Visibility Buffer Resolve Shader
+ * =================================
+ * 
+ * Reads visibility buffer and outputs interpolated attributes for
+ * deferred material shading. This is the second pass of visibility
+ * buffer rendering.
+ * 
+ * For each pixel:
+ * 1. Read visibility buffer (triangle ID, cluster ID, instance ID)
+ * 2. Fetch triangle vertices
+ * 3. Compute barycentric coordinates
+ * 4. Interpolate attributes (position, normal, UVs)
+ * 5. Output to G-Buffer
+ */
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+#include "cluster_common.glsl"
+
+// Vertex data
+struct Vertex {
+    vec3 position;
+    float pad0;
+    vec3 normal;
+    float pad1;
+    vec2 uv;
+    vec2 pad2;
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
+    Cluster clusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer InstanceBuffer {
+    mat4 worldMatrices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VertexBuffer {
+    Vertex vertices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IndexBuffer {
+    uint indices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer VisibilityBuffer {
+    uint64_t pixels[];
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    mat4 invViewProj;
+    
+    ClusterBuffer clusterBuffer;
+    InstanceBuffer instanceBuffer;
+    VertexBuffer vertexBuffer;
+    IndexBuffer indexBuffer;
+    VisibilityBuffer visibilityBuffer;
+    
+    uint screenWidth;
+    uint screenHeight;
+    uint pad0;
+    uint pad1;
+} pc;
+
+// G-Buffer outputs
+layout(binding = 0, rgba32f) writeonly uniform image2D gbufferPosition;
+layout(binding = 1, rgba16f) writeonly uniform image2D gbufferNormal;
+layout(binding = 2, rgba8) writeonly uniform image2D gbufferAlbedo;
+layout(binding = 3, rgba8) writeonly uniform image2D gbufferMaterial;
+
+// Invalid visibility marker (max uint64)
+const uint64_t INVALID_VISIBILITY = 0xFFFFFFFFFFFFFFFFul;
+
+/**
+ * Unpack visibility buffer value
+ */
+void unpackVisibility(uint64_t packed, out float depth, out uint triangleId, 
+                      out uint clusterId, out uint instanceId) {
+    uint depthBits = uint(packed >> 32);
+    depth = uintBitsToFloat(depthBits);
+    
+    uint id = uint(packed & 0xFFFFFFFFul);
+    instanceId = (id >> 24) & 0xFF;
+    clusterId = (id >> 12) & 0xFFF;
+    triangleId = id & 0xFFF;
+}
+
+/**
+ * Compute barycentric coordinates for a point in a triangle
+ * Uses screen-space coordinates
+ */
+vec3 computeBarycentrics(vec2 p, vec2 v0, vec2 v1, vec2 v2) {
+    vec2 v0v1 = v1 - v0;
+    vec2 v0v2 = v2 - v0;
+    vec2 v0p = p - v0;
+    
+    float d00 = dot(v0v1, v0v1);
+    float d01 = dot(v0v1, v0v2);
+    float d11 = dot(v0v2, v0v2);
+    float d20 = dot(v0p, v0v1);
+    float d21 = dot(v0p, v0v2);
+    
+    float denom = d00 * d11 - d01 * d01;
+    
+    if (abs(denom) < 0.000001) {
+        return vec3(1.0, 0.0, 0.0);  // Degenerate, return first vertex
+    }
+    
+    float v = (d11 * d20 - d01 * d21) / denom;
+    float w = (d00 * d21 - d01 * d20) / denom;
+    float u = 1.0 - v - w;
+    
+    return vec3(u, v, w);
+}
+
+/**
+ * Transform vertex to screen space
+ */
+vec2 vertexToScreen(vec3 worldPos, mat4 worldMatrix) {
+    vec4 clipPos = pc.viewProj * worldMatrix * vec4(worldPos, 1.0);
+    vec3 ndc = clipPos.xyz / clipPos.w;
+    
+    vec2 screen;
+    screen.x = (ndc.x * 0.5 + 0.5) * float(pc.screenWidth);
+    screen.y = (ndc.y * 0.5 + 0.5) * float(pc.screenHeight);
+    
+    return screen;
+}
+
+/**
+ * Encode normal to octahedral mapping (for compact storage)
+ */
+vec2 encodeNormal(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return n.xy * 0.5 + 0.5;
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    // Bounds check
+    if (pixelCoord.x >= int(pc.screenWidth) || pixelCoord.y >= int(pc.screenHeight)) {
+        return;
+    }
+    
+    // Read visibility buffer
+    uint pixelIdx = uint(pixelCoord.y) * pc.screenWidth + uint(pixelCoord.x);
+    uint64_t visibility = pc.visibilityBuffer.pixels[pixelIdx];
+    
+    // Check for empty pixel
+    if (visibility == INVALID_VISIBILITY) {
+        // Write sky/background
+        imageStore(gbufferPosition, pixelCoord, vec4(0.0, 0.0, 0.0, 0.0));
+        imageStore(gbufferNormal, pixelCoord, vec4(0.0, 0.0, 0.0, 0.0));
+        imageStore(gbufferAlbedo, pixelCoord, vec4(0.1, 0.1, 0.2, 1.0));  // Sky blue
+        imageStore(gbufferMaterial, pixelCoord, vec4(0.0));
+        return;
+    }
+    
+    // Unpack visibility data
+    float depth;
+    uint triangleId, clusterId, instanceId;
+    unpackVisibility(visibility, depth, triangleId, clusterId, instanceId);
+    
+    // Load cluster and instance data
+    Cluster cluster = pc.clusterBuffer.clusters[clusterId];
+    mat4 worldMatrix = pc.instanceBuffer.worldMatrices[instanceId];
+    mat3 normalMatrix = transpose(inverse(mat3(worldMatrix)));
+    
+    // Load triangle vertices
+    uint baseIndex = cluster.geometry.triangleOffset + triangleId * 3;
+    uint i0 = pc.indexBuffer.indices[baseIndex + 0];
+    uint i1 = pc.indexBuffer.indices[baseIndex + 1];
+    uint i2 = pc.indexBuffer.indices[baseIndex + 2];
+    
+    Vertex v0 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i0];
+    Vertex v1 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i1];
+    Vertex v2 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i2];
+    
+    // Compute screen-space vertex positions
+    vec2 s0 = vertexToScreen(v0.position, worldMatrix);
+    vec2 s1 = vertexToScreen(v1.position, worldMatrix);
+    vec2 s2 = vertexToScreen(v2.position, worldMatrix);
+    
+    // Compute barycentric coordinates
+    vec2 pixelCenter = vec2(pixelCoord) + 0.5;
+    vec3 bary = computeBarycentrics(pixelCenter, s0, s1, s2);
+    
+    // Perspective-correct interpolation
+    // For now, use simple linear interpolation (TODO: add perspective correction)
+    
+    // Interpolate world position
+    vec3 localPos = bary.x * v0.position + bary.y * v1.position + bary.z * v2.position;
+    vec4 worldPos = worldMatrix * vec4(localPos, 1.0);
+    
+    // Interpolate normal
+    vec3 localNormal = normalize(bary.x * v0.normal + bary.y * v1.normal + bary.z * v2.normal);
+    vec3 worldNormal = normalize(normalMatrix * localNormal);
+    
+    // Interpolate UVs
+    vec2 uv = bary.x * v0.uv + bary.y * v1.uv + bary.z * v2.uv;
+    
+    // Material ID from cluster geometry
+    uint materialId = cluster.geometry.materialId;
+    
+    // Write G-Buffer
+    imageStore(gbufferPosition, pixelCoord, vec4(worldPos.xyz, depth));
+    imageStore(gbufferNormal, pixelCoord, vec4(worldNormal * 0.5 + 0.5, 1.0));
+    
+    // Placeholder albedo based on UVs (would normally sample texture here)
+    vec3 albedo = vec3(fract(uv.x * 4.0) > 0.5 ? 0.8 : 0.6,
+                       fract(uv.y * 4.0) > 0.5 ? 0.8 : 0.6,
+                       0.7);
+    imageStore(gbufferAlbedo, pixelCoord, vec4(albedo, 1.0));
+    
+    // Material properties: roughness, metallic, AO, material ID
+    imageStore(gbufferMaterial, pixelCoord, vec4(0.5, 0.0, 1.0, float(materialId) / 255.0));
+}

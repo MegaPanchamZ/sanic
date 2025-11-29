@@ -187,9 +187,9 @@ void ClusterHierarchy::buildFromMeshlets(
         cluster.geometry.meshletCount = 1;
         cluster.geometry.vertexOffset = m.vertex_offset;
         cluster.geometry.triangleOffset = m.triangle_offset;
-        cluster.geometry.materialId = 0;
+        cluster.geometry.triangleCount = m.triangle_count;
         cluster.geometry.flags = 0;
-        cluster.geometry.instanceDataOffset = 0;
+        cluster.geometry.materialId = 0;
         
         clusters.push_back(cluster);
     }
@@ -375,9 +375,9 @@ void ClusterHierarchy::buildWithLOD(
             cluster.geometry.meshletCount = 1;
             cluster.geometry.vertexOffset = m.vertex_offset;
             cluster.geometry.triangleOffset = m.triangle_offset;
-            cluster.geometry.materialId = 0;
+            cluster.geometry.triangleCount = m.triangle_count;
             cluster.geometry.flags = (lodIdx << 16); // Store LOD level in flags
-            cluster.geometry.instanceDataOffset = 0;
+            cluster.geometry.materialId = 0;
             
             clusters.push_back(cluster);
         }

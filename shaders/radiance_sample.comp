@@ -1,0 +1,146 @@
+/**
+ * radiance_sample.comp
+ * 
+ * Samples world-space radiance cache for GI contribution.
+ * Uses trilinear interpolation with clipmap level blending.
+ * 
+ * Turn 28-30: Radiance cache sampling
+ */
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Clipmap samplers
+layout(set = 0, binding = 0) uniform sampler3D clipmap0;
+layout(set = 0, binding = 1) uniform sampler3D clipmap1;
+layout(set = 0, binding = 2) uniform sampler3D clipmap2;
+layout(set = 0, binding = 3) uniform sampler3D clipmap3;
+
+// G-Buffer
+layout(set = 0, binding = 4) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 5) uniform sampler2D normalBuffer;
+layout(set = 0, binding = 6) uniform sampler2D albedoBuffer;
+
+// Output
+layout(rgba16f, set = 0, binding = 7) uniform image2D outputRadiance;
+
+layout(push_constant) uniform PushConstants {
+    mat4 invViewProj;
+    vec4 clipCenter[4];
+    ivec4 clipResolution;
+    vec4 screenSize;
+    float cellSize0;
+    float clipScale;
+    float intensity;
+    float padding;
+};
+
+// SH evaluation for irradiance
+vec3 evaluateSH(vec4 sh0, vec3 normal) {
+    // Simplified L1 evaluation for diffuse irradiance
+    // sh0.xyz = L0, sh0.w = L1_-1 (partial)
+    
+    float c0 = 0.282095;  // Y_0_0
+    float c1 = 0.488603;  // Y_1_x coefficients
+    
+    // L0 contribution (constant)
+    vec3 irradiance = sh0.xyz * c0;
+    
+    // Would need more SH coefficients for full evaluation
+    // This is a simplified version
+    
+    return irradiance * 3.14159265;  // Diffuse BRDF factor
+}
+
+// Sample clipmap at world position
+vec3 sampleClipmap(vec3 worldPos, vec3 normal, uint level) {
+    vec3 localPos = (worldPos - clipCenter[level].xyz) / clipCenter[level].w;
+    
+    // Check if within clipmap bounds
+    if (any(greaterThan(abs(localPos), vec3(1.0)))) {
+        return vec3(0.0);
+    }
+    
+    vec3 uvw = localPos * 0.5 + 0.5;
+    
+    vec4 sh0;
+    if (level == 0) {
+        sh0 = texture(clipmap0, uvw);
+    } else if (level == 1) {
+        sh0 = texture(clipmap1, uvw);
+    } else if (level == 2) {
+        sh0 = texture(clipmap2, uvw);
+    } else {
+        sh0 = texture(clipmap3, uvw);
+    }
+    
+    return evaluateSH(sh0, normal);
+}
+
+// Find best clipmap level for position
+uint getBestLevel(vec3 worldPos) {
+    for (uint i = 0; i < 4; i++) {
+        vec3 localPos = (worldPos - clipCenter[i].xyz) / clipCenter[i].w;
+        
+        // Use some margin to avoid edge artifacts
+        if (all(lessThan(abs(localPos), vec3(0.8)))) {
+            return i;
+        }
+    }
+    return 3;  // Use coarsest level as fallback
+}
+
+vec3 reconstructWorldPos(vec2 uv, float depth) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = invViewProj * clipPos;
+    return worldPos.xyz / worldPos.w;
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) return;
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) * screenSize.zw;
+    
+    float depth = texture(depthBuffer, uv).r;
+    
+    // Skip sky pixels
+    if (depth >= 1.0) {
+        imageStore(outputRadiance, pixelCoord, vec4(0.0));
+        return;
+    }
+    
+    vec3 normal = texture(normalBuffer, uv).xyz * 2.0 - 1.0;
+    vec3 albedo = texture(albedoBuffer, uv).rgb;
+    vec3 worldPos = reconstructWorldPos(uv, depth);
+    
+    // Offset position slightly along normal to avoid self-sampling
+    vec3 samplePos = worldPos + normal * cellSize0 * 0.5;
+    
+    // Find best clipmap level
+    uint level = getBestLevel(samplePos);
+    
+    // Sample with level blending for smooth transitions
+    vec3 irradiance = vec3(0.0);
+    
+    if (level < 3) {
+        // Sample current and next level, blend at boundaries
+        vec3 localPos = (samplePos - clipCenter[level].xyz) / clipCenter[level].w;
+        float blendFactor = smoothstep(0.6, 0.8, max(max(abs(localPos.x), abs(localPos.y)), abs(localPos.z)));
+        
+        vec3 currentLevel = sampleClipmap(samplePos, normal, level);
+        vec3 nextLevel = sampleClipmap(samplePos, normal, level + 1);
+        
+        irradiance = mix(currentLevel, nextLevel, blendFactor);
+    } else {
+        irradiance = sampleClipmap(samplePos, normal, level);
+    }
+    
+    // Apply albedo for diffuse GI
+    vec3 diffuseGI = irradiance * albedo * intensity;
+    
+    imageStore(outputRadiance, pixelCoord, vec4(diffuseGI, 1.0));
+}

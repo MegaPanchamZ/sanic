@@ -1,0 +1,156 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+
+/**
+ * Nanite-style Task Shader
+ * ========================
+ * Amplification stage that selects which meshlets to render.
+ * Each task group processes one cluster's worth of meshlets.
+ * 
+ * Flow:
+ * 1. Load cluster from visible cluster list
+ * 2. Perform per-meshlet culling (cone, frustum)
+ * 3. Emit mesh shader workgroups for visible meshlets
+ */
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+#include "cluster_common.glsl"
+
+// Output to mesh shader
+struct TaskPayload {
+    uint clusterIndex;
+    uint instanceId;
+    uint meshletOffset;      // Base meshlet index
+    uint meshletMask;        // Bitmask of which meshlets to draw (up to 32)
+    mat4 worldMatrix;
+    uint visibleMeshletCount;
+    uint pad[3];
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+// Meshlet data
+struct Meshlet {
+    vec3 coneApex;
+    float coneAngle;
+    vec3 coneAxis;
+    float padding;
+    
+    uint vertexOffset;
+    uint triangleOffset;
+    uint vertexCount;
+    uint triangleCount;
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VisibleClusterBuffer {
+    VisibleCluster visibleClusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
+    Cluster clusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer InstanceBuffer {
+    mat4 worldMatrices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MeshletBuffer {
+    Meshlet meshlets[];
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    vec4 frustumPlanes[6];
+    vec3 cameraPosition;
+    float pad0;
+    
+    VisibleClusterBuffer visibleClusterBuffer;
+    ClusterBuffer clusterBuffer;
+    InstanceBuffer instanceBuffer;
+    MeshletBuffer meshletBuffer;
+    
+    uint clusterBaseIndex;   // Offset into visible cluster list
+} pc;
+
+// Shared memory for meshlet culling results
+shared uint sharedMeshletMask;
+shared uint sharedVisibleCount;
+
+/**
+ * Cone culling test for meshlet backface culling
+ */
+bool coneCullMeshlet(Meshlet meshlet, vec3 viewDir) {
+    // If cone is degenerate (covers hemisphere), always visible
+    if (meshlet.coneAngle >= 1.0) {
+        return false;
+    }
+    
+    // Test if view direction is outside the cone
+    float cosAngle = dot(viewDir, meshlet.coneAxis);
+    return cosAngle < meshlet.coneAngle;
+}
+
+void main() {
+    uint localIdx = gl_LocalInvocationID.x;
+    uint clusterIdx = pc.clusterBaseIndex + gl_WorkGroupID.x;
+    
+    // Initialize shared memory
+    if (localIdx == 0) {
+        sharedMeshletMask = 0;
+        sharedVisibleCount = 0;
+    }
+    barrier();
+    
+    // Load cluster and instance data
+    VisibleCluster visible = pc.visibleClusterBuffer.visibleClusters[clusterIdx];
+    Cluster cluster = pc.clusterBuffer.clusters[visible.clusterIndex];
+    mat4 worldMatrix = pc.instanceBuffer.worldMatrices[visible.instanceId];
+    
+    uint meshletCount = cluster.geometry.meshletCount;
+    uint meshletOffset = cluster.geometry.meshletOffset;
+    
+    // Each thread processes one meshlet (up to 32 meshlets per cluster)
+    if (localIdx < meshletCount && localIdx < 32) {
+        Meshlet meshlet = pc.meshletBuffer.meshlets[meshletOffset + localIdx];
+        
+        // Transform meshlet cone apex to world space
+        vec3 worldApex = (worldMatrix * vec4(meshlet.coneApex, 1.0)).xyz;
+        vec3 worldAxis = normalize(mat3(worldMatrix) * meshlet.coneAxis);
+        
+        // View direction from camera to meshlet
+        vec3 viewDir = normalize(worldApex - pc.cameraPosition);
+        
+        // Cone culling
+        bool visible_meshlet = true;
+        if (meshlet.coneAngle < 1.0) {
+            float cosAngle = dot(viewDir, worldAxis);
+            visible_meshlet = cosAngle >= meshlet.coneAngle;
+        }
+        
+        // If visible, set bit in mask
+        if (visible_meshlet) {
+            atomicOr(sharedMeshletMask, 1u << localIdx);
+            atomicAdd(sharedVisibleCount, 1);
+        }
+    }
+    
+    barrier();
+    
+    // First thread emits mesh shader workgroups
+    if (localIdx == 0) {
+        payload.clusterIndex = visible.clusterIndex;
+        payload.instanceId = visible.instanceId;
+        payload.meshletOffset = meshletOffset;
+        payload.meshletMask = sharedMeshletMask;
+        payload.worldMatrix = worldMatrix;
+        payload.visibleMeshletCount = sharedVisibleCount;
+        
+        // Emit one mesh shader workgroup per visible meshlet
+        EmitMeshTasksEXT(sharedVisibleCount, 1, 1);
+    }
+}

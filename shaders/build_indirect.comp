@@ -1,0 +1,121 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_GOOGLE_include_directive : enable
+
+/**
+ * Build Indirect Commands
+ * =======================
+ * Generates VkDrawMeshTasksIndirectCommandEXT from visible cluster list.
+ * 
+ * For each visible cluster, creates a mesh shader dispatch command.
+ * Also bins clusters by material for efficient shading.
+ */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "cluster_common.glsl"
+
+// Indirect command structure (matches VkDrawMeshTasksIndirectCommandEXT)
+struct MeshTasksIndirectCommand {
+    uint groupCountX;
+    uint groupCountY;
+    uint groupCountZ;
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VisibleClusterBuffer {
+    VisibleCluster visibleClusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
+    Cluster clusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer IndirectCommandBuffer {
+    MeshTasksIndirectCommand commands[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer DrawCountBuffer {
+    uint drawCount;
+    uint hwRasterCount;
+    uint swRasterCount;
+    uint padding;
+};
+
+// Material binning - each bin stores cluster indices for that material
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer MaterialBinCounters {
+    uint binCounts[];  // One per material
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer MaterialBinData {
+    uint clusterIndices[];  // Packed cluster indices per material bin
+};
+
+layout(push_constant) uniform PushConstants {
+    VisibleClusterBuffer visibleClusterBuffer;
+    ClusterBuffer clusterBuffer;
+    IndirectCommandBuffer indirectBuffer;
+    DrawCountBuffer drawCountBuffer;
+    MaterialBinCounters materialBinCounters;
+    MaterialBinData materialBinData;
+    
+    uint visibleClusterCount;
+    uint maxClustersPerBin;
+    uint materialCount;
+    uint meshletsPerCluster;  // Average meshlets per cluster for dispatch sizing
+} pc;
+
+// Meshlet dispatch sizing constants
+const uint MAX_MESHLETS_PER_TASK = 32;  // Task shader processes up to 32 meshlets
+const uint TRIANGLES_PER_MESHLET = 124; // Max triangles per meshlet
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    if (idx >= pc.visibleClusterCount) {
+        return;
+    }
+    
+    // Load visible cluster info
+    VisibleCluster visible = pc.visibleClusterBuffer.visibleClusters[idx];
+    Cluster cluster = pc.clusterBuffer.clusters[visible.clusterIndex];
+    
+    // Determine if HW or SW rasterization based on flags
+    bool useHWRaster = (visible.flags & VISIBLE_FLAG_HW_RASTER) != 0;
+    bool useSWRaster = (visible.flags & VISIBLE_FLAG_SW_RASTER) != 0;
+    
+    // For HW rasterized clusters, generate indirect draw command
+    if (useHWRaster) {
+        uint cmdIdx = atomicAdd(pc.drawCountBuffer.hwRasterCount, 1);
+        
+        // Calculate task group count based on meshlet count
+        uint meshletCount = cluster.geometry.meshletCount;
+        uint taskGroupCount = (meshletCount + MAX_MESHLETS_PER_TASK - 1) / MAX_MESHLETS_PER_TASK;
+        
+        MeshTasksIndirectCommand cmd;
+        cmd.groupCountX = taskGroupCount;
+        cmd.groupCountY = 1;
+        cmd.groupCountZ = 1;
+        
+        pc.indirectBuffer.commands[cmdIdx] = cmd;
+    }
+    
+    // Track SW raster count separately
+    if (useSWRaster) {
+        atomicAdd(pc.drawCountBuffer.swRasterCount, 1);
+    }
+    
+    // Material binning for deferred shading
+    uint materialId = cluster.geometry.materialId;
+    if (materialId < pc.materialCount) {
+        uint binOffset = atomicAdd(pc.materialBinCounters.binCounts[materialId], 1);
+        
+        if (binOffset < pc.maxClustersPerBin) {
+            uint globalOffset = materialId * pc.maxClustersPerBin + binOffset;
+            pc.materialBinData.clusterIndices[globalOffset] = idx;
+        }
+    }
+    
+    // Increment total draw count
+    atomicAdd(pc.drawCountBuffer.drawCount, 1);
+}

@@ -1,0 +1,200 @@
+/**
+ * gi_temporal.comp
+ * 
+ * Temporal filtering for GI stability.
+ * Uses motion vectors and variance-based clamping.
+ * 
+ * Turn 34-36: GI temporal stability
+ */
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Current frame GI
+layout(set = 0, binding = 0) uniform sampler2D currentDiffuseGI;
+layout(set = 0, binding = 1) uniform sampler2D currentSpecularGI;
+
+// History
+layout(set = 0, binding = 2) uniform sampler2D historyDiffuseGI;
+layout(set = 0, binding = 3) uniform sampler2D historySpecularGI;
+
+// Motion vectors
+layout(set = 0, binding = 4) uniform sampler2D motionVectors;
+
+// G-Buffer for rejection
+layout(set = 0, binding = 5) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 6) uniform sampler2D normalBuffer;
+
+// Output
+layout(rgba16f, set = 0, binding = 7) uniform image2D outputDiffuseGI;
+layout(rgba16f, set = 0, binding = 8) uniform image2D outputSpecularGI;
+
+layout(push_constant) uniform PushConstants {
+    vec4 screenSize;
+    float temporalWeight;
+    float varianceGamma;
+    float depthThreshold;
+    float normalThreshold;
+};
+
+// Catmull-Rom bicubic sampling
+vec4 sampleCatmullRom(sampler2D tex, vec2 uv, vec2 texSize) {
+    vec2 position = uv * texSize;
+    vec2 center = floor(position - 0.5) + 0.5;
+    vec2 f = position - center;
+    vec2 f2 = f * f;
+    vec2 f3 = f2 * f;
+    
+    // Catmull-Rom weights
+    vec2 w0 = f2 - 0.5 * (f3 + f);
+    vec2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
+    vec2 w2 = -1.5 * f3 + 2.0 * f2 + 0.5 * f;
+    vec2 w3 = 0.5 * (f3 - f2);
+    
+    vec2 w12 = w1 + w2;
+    vec2 tc12 = (center + w2 / w12) / texSize;
+    vec2 tc0 = (center - 1.0) / texSize;
+    vec2 tc3 = (center + 2.0) / texSize;
+    
+    vec4 result = vec4(0.0);
+    result += texture(tex, vec2(tc0.x, tc0.y)) * w0.x * w0.y;
+    result += texture(tex, vec2(tc12.x, tc0.y)) * w12.x * w0.y;
+    result += texture(tex, vec2(tc3.x, tc0.y)) * w3.x * w0.y;
+    
+    result += texture(tex, vec2(tc0.x, tc12.y)) * w0.x * w12.y;
+    result += texture(tex, vec2(tc12.x, tc12.y)) * w12.x * w12.y;
+    result += texture(tex, vec2(tc3.x, tc12.y)) * w3.x * w12.y;
+    
+    result += texture(tex, vec2(tc0.x, tc3.y)) * w0.x * w3.y;
+    result += texture(tex, vec2(tc12.x, tc3.y)) * w12.x * w3.y;
+    result += texture(tex, vec2(tc3.x, tc3.y)) * w3.x * w3.y;
+    
+    return result;
+}
+
+// RGB to YCoCg
+vec3 rgbToYCoCg(vec3 rgb) {
+    return vec3(
+        0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b,
+        0.5 * rgb.r - 0.5 * rgb.b,
+        -0.25 * rgb.r + 0.5 * rgb.g - 0.25 * rgb.b
+    );
+}
+
+// YCoCg to RGB
+vec3 yCoCgToRgb(vec3 ycocg) {
+    return vec3(
+        ycocg.x + ycocg.y - ycocg.z,
+        ycocg.x + ycocg.z,
+        ycocg.x - ycocg.y - ycocg.z
+    );
+}
+
+// Clip color to AABB in YCoCg space
+vec3 clipToAABB(vec3 color, vec3 minimum, vec3 maximum) {
+    vec3 center = 0.5 * (maximum + minimum);
+    vec3 extents = 0.5 * (maximum - minimum);
+    
+    vec3 offset = color - center;
+    vec3 ts = abs(extents / (offset + 0.0001));
+    float t = min(min(ts.x, ts.y), ts.z);
+    
+    return center + offset * min(t, 1.0);
+}
+
+vec3 temporalFilter(sampler2D currentTex, sampler2D historyTex, vec2 uv, vec2 motion) {
+    vec3 current = texture(currentTex, uv).rgb;
+    
+    // Sample history with motion compensation
+    vec2 historyUV = uv - motion;
+    
+    // Check if history is valid
+    if (historyUV.x < 0.0 || historyUV.x > 1.0 || historyUV.y < 0.0 || historyUV.y > 1.0) {
+        return current;
+    }
+    
+    // High-quality history sampling
+    vec3 history = sampleCatmullRom(historyTex, historyUV, screenSize.xy).rgb;
+    
+    // Compute neighborhood statistics
+    vec3 m1 = vec3(0.0);
+    vec3 m2 = vec3(0.0);
+    
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            vec2 sampleUV = uv + vec2(x, y) * screenSize.zw;
+            vec3 sample_ = texture(currentTex, sampleUV).rgb;
+            vec3 sampleYCoCg = rgbToYCoCg(sample_);
+            m1 += sampleYCoCg;
+            m2 += sampleYCoCg * sampleYCoCg;
+        }
+    }
+    
+    m1 /= 9.0;
+    m2 /= 9.0;
+    
+    vec3 sigma = sqrt(max(m2 - m1 * m1, vec3(0.0)));
+    
+    // Variance-based clipping
+    vec3 minColor = m1 - varianceGamma * sigma;
+    vec3 maxColor = m1 + varianceGamma * sigma;
+    
+    vec3 historyYCoCg = rgbToYCoCg(history);
+    vec3 clippedHistory = clipToAABB(historyYCoCg, minColor, maxColor);
+    history = yCoCgToRgb(clippedHistory);
+    
+    // Velocity-based weight adjustment
+    float velocityMag = length(motion * screenSize.xy);
+    float velocityWeight = 1.0 / (1.0 + velocityMag * 0.1);
+    
+    float finalWeight = temporalWeight * velocityWeight;
+    
+    return mix(current, history, finalWeight);
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) return;
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) * screenSize.zw;
+    
+    // Get motion vector
+    vec2 motion = texture(motionVectors, uv).xy;
+    
+    // Check for disocclusion using depth/normal
+    float currentDepth = texture(depthBuffer, uv).r;
+    vec3 currentNormal = texture(normalBuffer, uv).xyz * 2.0 - 1.0;
+    
+    vec2 historyUV = uv - motion;
+    bool valid = historyUV.x >= 0.0 && historyUV.x <= 1.0 && 
+                 historyUV.y >= 0.0 && historyUV.y <= 1.0;
+    
+    if (valid) {
+        float historyDepth = texture(depthBuffer, historyUV).r;
+        vec3 historyNormal = texture(normalBuffer, historyUV).xyz * 2.0 - 1.0;
+        
+        float depthDiff = abs(currentDepth - historyDepth);
+        float normalDot = dot(currentNormal, historyNormal);
+        
+        if (depthDiff > depthThreshold || normalDot < normalThreshold) {
+            valid = false;
+        }
+    }
+    
+    vec3 diffuseResult;
+    vec3 specularResult;
+    
+    if (valid) {
+        diffuseResult = temporalFilter(currentDiffuseGI, historyDiffuseGI, uv, motion);
+        specularResult = temporalFilter(currentSpecularGI, historySpecularGI, uv, motion);
+    } else {
+        diffuseResult = texture(currentDiffuseGI, uv).rgb;
+        specularResult = texture(currentSpecularGI, uv).rgb;
+    }
+    
+    imageStore(outputDiffuseGI, pixelCoord, vec4(diffuseResult, 1.0));
+    imageStore(outputSpecularGI, pixelCoord, vec4(specularResult, 1.0));
+}

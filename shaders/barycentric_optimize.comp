@@ -1,0 +1,247 @@
+/**
+ * barycentric_optimize.comp
+ * 
+ * Optimized barycentric coordinate reconstruction from visibility buffer.
+ * Uses perspective-correct interpolation with subpixel precision.
+ * 
+ * Turn 13-15: Enhanced visibility buffer processing
+ */
+
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer VisibilityBuffer {
+    uint64_t data[];  // Packed: clusterID(24) | triangleID(16) | depth(24)
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertexBuffer {
+    float vertices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IndexBuffer {
+    uint indices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
+    uint meshletOffset;
+    uint meshletCount;
+    uint vertexOffset;
+    uint triangleOffset;
+    uint triangleCount;
+    uint flags;
+    uint materialId;
+    uint padding;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 64) readonly buffer InstanceBuffer {
+    mat4 transform;
+    mat4 prevTransform;
+    uint clusterId;
+    uint instanceId;
+    uint padding0;
+    uint padding1;
+};
+
+// Output - packed barycentric data for efficient material evaluation
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer BarycentricBuffer {
+    // Packed: bary.x(16) | bary.y(16) | ddx.x(16) | ddx.y(16) | ddy.x(16) | ddy.y(16) | depth(32)
+    uvec4 data[];  // 16 bytes per pixel
+};
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    mat4 invViewProj;
+    
+    uint64_t visibilityAddr;
+    uint64_t vertexAddr;
+    uint64_t indexAddr;
+    uint64_t clusterAddr;
+    uint64_t instanceAddr;
+    uint64_t barycentricAddr;
+    
+    uint screenWidth;
+    uint screenHeight;
+    uint vertexStride;
+    uint flags;  // Bit 0: compute derivatives, Bit 1: use subpixel
+};
+
+// Vertex layout
+const uint POS_OFFSET = 0;
+
+// Pack float to half (16-bit)
+uint floatToHalf(float f) {
+    uint bits = floatBitsToUint(f);
+    uint sign = (bits >> 16) & 0x8000;
+    int exp = int((bits >> 23) & 0xFF) - 127 + 15;
+    uint mantissa = bits & 0x007FFFFF;
+    
+    if (exp <= 0) {
+        return sign;
+    } else if (exp >= 31) {
+        return sign | 0x7C00;
+    }
+    
+    return sign | (uint(exp) << 10) | (mantissa >> 13);
+}
+
+// Pack two halfs into uint
+uint packHalf2(vec2 v) {
+    return floatToHalf(v.x) | (floatToHalf(v.y) << 16);
+}
+
+// Compute edge function for barycentric calculation
+float edgeFunction(vec2 a, vec2 b, vec2 c) {
+    return (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x);
+}
+
+// Perspective-correct barycentric interpolation
+vec3 perspectiveCorrectBarycentrics(vec3 bary, vec3 invW) {
+    vec3 perspBary = bary * invW;
+    return perspBary / (perspBary.x + perspBary.y + perspBary.z);
+}
+
+void main() {
+    uvec2 pixelCoord = gl_GlobalInvocationID.xy;
+    
+    if (pixelCoord.x >= screenWidth || pixelCoord.y >= screenHeight) {
+        return;
+    }
+    
+    uint pixelIndex = pixelCoord.y * screenWidth + pixelCoord.x;
+    
+    // Read visibility data
+    VisibilityBuffer visBuf = VisibilityBuffer(visibilityAddr);
+    uint64_t visData = visBuf.data[pixelIndex];
+    
+    // Unpack
+    uint clusterId = uint((visData >> 40) & 0xFFFFFF);
+    uint triangleId = uint((visData >> 24) & 0xFFFF);
+    uint packedDepth = uint(visData & 0xFFFFFF);
+    
+    BarycentricBuffer baryBuf = BarycentricBuffer(barycentricAddr);
+    
+    // Invalid pixel
+    if (clusterId == 0xFFFFFF) {
+        baryBuf.data[pixelIndex] = uvec4(0);
+        return;
+    }
+    
+    // Get cluster and instance data
+    ClusterBuffer clusters = ClusterBuffer(clusterAddr);
+    InstanceBuffer instances = InstanceBuffer(instanceAddr);
+    
+    uint vertexBase = clusters.vertexOffset;
+    uint triangleBase = clusters.triangleOffset;
+    
+    // Get triangle indices
+    IndexBuffer idxBuf = IndexBuffer(indexAddr);
+    uint i0 = idxBuf.indices[triangleBase + triangleId * 3 + 0];
+    uint i1 = idxBuf.indices[triangleBase + triangleId * 3 + 1];
+    uint i2 = idxBuf.indices[triangleBase + triangleId * 3 + 2];
+    
+    // Get vertex positions
+    VertexBuffer vtxBuf = VertexBuffer(vertexAddr);
+    vec3 p0 = vec3(
+        vtxBuf.vertices[(vertexBase + i0) * vertexStride + POS_OFFSET],
+        vtxBuf.vertices[(vertexBase + i0) * vertexStride + POS_OFFSET + 1],
+        vtxBuf.vertices[(vertexBase + i0) * vertexStride + POS_OFFSET + 2]
+    );
+    vec3 p1 = vec3(
+        vtxBuf.vertices[(vertexBase + i1) * vertexStride + POS_OFFSET],
+        vtxBuf.vertices[(vertexBase + i1) * vertexStride + POS_OFFSET + 1],
+        vtxBuf.vertices[(vertexBase + i1) * vertexStride + POS_OFFSET + 2]
+    );
+    vec3 p2 = vec3(
+        vtxBuf.vertices[(vertexBase + i2) * vertexStride + POS_OFFSET],
+        vtxBuf.vertices[(vertexBase + i2) * vertexStride + POS_OFFSET + 1],
+        vtxBuf.vertices[(vertexBase + i2) * vertexStride + POS_OFFSET + 2]
+    );
+    
+    // Transform to clip space
+    mat4 mvp = viewProj * instances.transform;
+    vec4 clip0 = mvp * vec4(p0, 1.0);
+    vec4 clip1 = mvp * vec4(p1, 1.0);
+    vec4 clip2 = mvp * vec4(p2, 1.0);
+    
+    // Compute screen coordinates
+    vec3 ndc0 = clip0.xyz / clip0.w;
+    vec3 ndc1 = clip1.xyz / clip1.w;
+    vec3 ndc2 = clip2.xyz / clip2.w;
+    
+    vec2 screen0 = (ndc0.xy * 0.5 + 0.5) * vec2(screenWidth, screenHeight);
+    vec2 screen1 = (ndc1.xy * 0.5 + 0.5) * vec2(screenWidth, screenHeight);
+    vec2 screen2 = (ndc2.xy * 0.5 + 0.5) * vec2(screenWidth, screenHeight);
+    
+    // Pixel center with optional subpixel offset
+    vec2 pixelCenter = vec2(pixelCoord) + 0.5;
+    
+    // Compute barycentric coordinates using edge functions
+    float area = edgeFunction(screen0, screen1, screen2);
+    
+    if (abs(area) < 1e-10) {
+        baryBuf.data[pixelIndex] = uvec4(0);
+        return;
+    }
+    
+    float invArea = 1.0 / area;
+    
+    float w0 = edgeFunction(screen1, screen2, pixelCenter) * invArea;
+    float w1 = edgeFunction(screen2, screen0, pixelCenter) * invArea;
+    float w2 = 1.0 - w0 - w1;
+    
+    vec3 bary = vec3(w0, w1, w2);
+    
+    // Apply perspective correction
+    vec3 invW = vec3(1.0 / clip0.w, 1.0 / clip1.w, 1.0 / clip2.w);
+    vec3 perspBary = perspectiveCorrectBarycentrics(bary, invW);
+    
+    // Compute derivatives if requested
+    vec2 ddxBary = vec2(0.0);
+    vec2 ddyBary = vec2(0.0);
+    
+    if ((flags & 1u) != 0) {
+        // Compute barycentric gradients analytically
+        // dBary/dScreen = edge_perpendicular / (2 * area)
+        vec2 edge01 = screen1 - screen0;
+        vec2 edge12 = screen2 - screen1;
+        vec2 edge20 = screen0 - screen2;
+        
+        // Perpendicular vectors (rotate 90 degrees)
+        vec2 perp01 = vec2(-edge01.y, edge01.x);
+        vec2 perp12 = vec2(-edge12.y, edge12.x);
+        vec2 perp20 = vec2(-edge20.y, edge20.x);
+        
+        float invArea2 = invArea * 0.5;
+        
+        // Screen-space derivatives of barycentrics
+        vec2 dBary0 = perp12 * invArea2;
+        vec2 dBary1 = perp20 * invArea2;
+        
+        // For perspective-correct derivatives, we need chain rule
+        // d(perspBary)/dScreen involves 1/w terms
+        float sumInvW = dot(bary, invW);
+        float invSumInvW = 1.0 / sumInvW;
+        
+        // Simplified perspective-correct gradient (approximation)
+        float avgInvW = (invW.x + invW.y + invW.z) / 3.0;
+        ddxBary = vec2(dBary0.x, dBary1.x) * avgInvW * invSumInvW;
+        ddyBary = vec2(dBary0.y, dBary1.y) * avgInvW * invSumInvW;
+    }
+    
+    // Reconstruct depth
+    float depth = float(packedDepth) / float(0xFFFFFF);
+    
+    // Pack output
+    uvec4 packed;
+    packed.x = packHalf2(perspBary.xy);
+    packed.y = packHalf2(ddxBary);
+    packed.z = packHalf2(ddyBary);
+    packed.w = floatBitsToUint(depth);
+    
+    baryBuf.data[pixelIndex] = packed;
+}

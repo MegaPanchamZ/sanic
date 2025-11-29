@@ -1,0 +1,74 @@
+/**
+ * histogram.comp
+ * 
+ * Build luminance histogram from HDR image.
+ * 
+ * Turn 37-39: Post-processing
+ */
+
+#version 460
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D hdrImage;
+
+layout(set = 0, binding = 1, std430) buffer Histogram {
+    uint bins[256];
+    float averageLuminance;
+    float targetExposure;
+    float currentExposure;
+    float adaptedExposure;
+} histogram;
+
+layout(push_constant) uniform PushConstants {
+    float minLuminance;
+    float maxLuminance;
+    uint width;
+    uint height;
+} pc;
+
+shared uint localHistogram[256];
+
+// Compute luminance from RGB
+float computeLuminance(vec3 color) {
+    return dot(color, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// Convert luminance to histogram bin
+uint luminanceToBin(float luminance) {
+    if (luminance <= pc.minLuminance) return 0;
+    if (luminance >= pc.maxLuminance) return 255;
+    
+    float t = log(luminance / pc.minLuminance) / log(pc.maxLuminance / pc.minLuminance);
+    return clamp(uint(t * 255.0), 0u, 255u);
+}
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    uint lid = gl_LocalInvocationIndex;
+    
+    // Initialize shared histogram
+    if (lid < 256) {
+        localHistogram[lid] = 0;
+    }
+    barrier();
+    
+    // Process pixel
+    if (gid.x < pc.width && gid.y < pc.height) {
+        vec2 uv = (vec2(gid) + 0.5) / vec2(pc.width, pc.height);
+        vec3 color = texture(hdrImage, uv).rgb;
+        
+        float luminance = computeLuminance(color);
+        uint bin = luminanceToBin(luminance);
+        
+        atomicAdd(localHistogram[bin], 1);
+    }
+    
+    barrier();
+    
+    // Merge to global histogram
+    if (lid < 256) {
+        atomicAdd(histogram.bins[lid], localHistogram[lid]);
+    }
+}

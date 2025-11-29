@@ -1,0 +1,193 @@
+/**
+ * card_radiance.comp
+ * 
+ * Updates radiance on surface cache cards using probe data.
+ * Integrates indirect lighting from radiance probes.
+ * 
+ * Turn 16-18: Surface cache radiance update
+ */
+
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Card data structure  
+struct MeshCard {
+    vec4 centerExtent;
+    vec4 normalAtlas;
+    vec4 atlasSizeMeshId;
+    vec4 boundsMin;
+    vec4 boundsMax;
+};
+
+// Probe data for interpolation
+struct RadianceProbe {
+    vec4 position;          // xyz = world pos, w = radius
+    vec4 shCoeffs[9];       // Spherical harmonics L2
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer CardBuffer {
+    MeshCard cards[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ProbeBuffer {
+    uint probeCountX;
+    uint probeCountY;
+    uint probeCountZ;
+    float probeSpacing;
+    vec4 gridOrigin;
+    RadianceProbe probes[];
+};
+
+// Atlas textures
+layout(set = 0, binding = 0, rgba16f) uniform image2D radianceAtlas;
+layout(set = 0, binding = 1, rgba16f) readonly uniform image2D normalAtlas;
+
+// Irradiance probe atlas (octahedral)
+layout(set = 0, binding = 2) uniform sampler2D irradianceProbeAtlas;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint64_t cardAddr;
+    uint64_t probeAddr;
+    
+    uint cardIndex;
+    uint cardResolution;
+    uint atlasOffsetX;
+    uint atlasOffsetY;
+    
+    float indirectIntensity;
+    float blendFactor;      // Blend with existing radiance
+    uint pad0, pad1;
+};
+
+// Octahedral mapping
+vec2 octEncode(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    if (n.z < 0.0) {
+        vec2 wrapped = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+        n.xy = wrapped;
+    }
+    return n.xy * 0.5 + 0.5;
+}
+
+// Spherical harmonics evaluation
+vec3 evaluateSH(vec3 dir, vec4 shCoeffs[9]) {
+    // L0
+    vec3 result = shCoeffs[0].xyz * 0.282095;
+    
+    // L1
+    result += shCoeffs[1].xyz * 0.488603 * dir.y;
+    result += shCoeffs[2].xyz * 0.488603 * dir.z;
+    result += shCoeffs[3].xyz * 0.488603 * dir.x;
+    
+    // L2
+    result += shCoeffs[4].xyz * 1.092548 * dir.x * dir.y;
+    result += shCoeffs[5].xyz * 1.092548 * dir.y * dir.z;
+    result += shCoeffs[6].xyz * 0.315392 * (3.0 * dir.z * dir.z - 1.0);
+    result += shCoeffs[7].xyz * 1.092548 * dir.x * dir.z;
+    result += shCoeffs[8].xyz * 0.546274 * (dir.x * dir.x - dir.y * dir.y);
+    
+    return max(result, vec3(0.0));
+}
+
+// Trilinear probe interpolation
+vec3 sampleProbeGrid(vec3 worldPos, vec3 normal, ProbeBuffer probes) {
+    // Compute grid coordinates
+    vec3 gridPos = (worldPos - probes.gridOrigin.xyz) / probes.probeSpacing;
+    
+    ivec3 baseIdx = ivec3(floor(gridPos));
+    vec3 frac = fract(gridPos);
+    
+    // Clamp to grid bounds
+    baseIdx = clamp(baseIdx, ivec3(0), ivec3(probes.probeCountX, probes.probeCountY, probes.probeCountZ) - 2);
+    
+    // Trilinear interpolation of 8 corner probes
+    vec3 result = vec3(0.0);
+    float totalWeight = 0.0;
+    
+    for (int dz = 0; dz <= 1; dz++) {
+        for (int dy = 0; dy <= 1; dy++) {
+            for (int dx = 0; dx <= 1; dx++) {
+                ivec3 idx = baseIdx + ivec3(dx, dy, dz);
+                uint probeIdx = idx.x + idx.y * probes.probeCountX + 
+                               idx.z * probes.probeCountX * probes.probeCountY;
+                
+                RadianceProbe probe = probes.probes[probeIdx];
+                
+                // Trilinear weight
+                vec3 w = mix(1.0 - frac, frac, vec3(dx, dy, dz));
+                float weight = w.x * w.y * w.z;
+                
+                // Visibility weight (normal-based)
+                vec3 toProbe = normalize(probe.position.xyz - worldPos);
+                float visWeight = max(0.0, dot(normal, toProbe));
+                visWeight = visWeight * visWeight;  // Sharper falloff
+                
+                weight *= max(visWeight, 0.1);
+                
+                // Evaluate SH in normal direction
+                vec3 irradiance = evaluateSH(normal, probe.shCoeffs);
+                
+                result += irradiance * weight;
+                totalWeight += weight;
+            }
+        }
+    }
+    
+    if (totalWeight > 0.0) {
+        result /= totalWeight;
+    }
+    
+    return result;
+}
+
+// Card UV to world position
+vec3 cardUVToWorld(vec2 uv, MeshCard card) {
+    vec3 center = card.centerExtent.xyz;
+    float extent = card.centerExtent.w;
+    vec3 normal = card.normalAtlas.xyz;
+    
+    vec3 up = abs(normal.y) < 0.999 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
+    
+    vec2 localPos = (uv * 2.0 - 1.0) * extent;
+    
+    return center + tangent * localPos.x + bitangent * localPos.y;
+}
+
+void main() {
+    uvec2 localCoord = gl_GlobalInvocationID.xy;
+    
+    if (localCoord.x >= cardResolution || localCoord.y >= cardResolution) {
+        return;
+    }
+    
+    vec2 uv = (vec2(localCoord) + 0.5) / float(cardResolution);
+    
+    CardBuffer cardBuf = CardBuffer(cardAddr);
+    MeshCard card = cardBuf.cards[cardIndex];
+    
+    vec3 worldPos = cardUVToWorld(uv, card);
+    vec3 normal = card.normalAtlas.xyz;
+    
+    // Read existing radiance
+    ivec2 atlasCoord = ivec2(atlasOffsetX + localCoord.x, atlasOffsetY + localCoord.y);
+    vec3 existingRadiance = imageLoad(radianceAtlas, atlasCoord).rgb;
+    
+    // Sample probe grid for indirect lighting
+    ProbeBuffer probes = ProbeBuffer(probeAddr);
+    vec3 indirectLight = sampleProbeGrid(worldPos, normal, probes);
+    
+    // Combine direct and indirect
+    vec3 totalRadiance = existingRadiance + indirectLight * indirectIntensity;
+    
+    // Temporal blend
+    vec3 finalRadiance = mix(existingRadiance, totalRadiance, blendFactor);
+    
+    imageStore(radianceAtlas, atlasCoord, vec4(finalRadiance, 1.0));
+}

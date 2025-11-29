@@ -1,0 +1,149 @@
+/**
+ * vsm_mark_pages.comp
+ * 
+ * Marks visible shadow pages from the depth buffer.
+ * Determines which virtual shadow map pages are needed.
+ * 
+ * Turn 37-39: Virtual Shadow Maps
+ */
+
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 1) uniform sampler2D normalBuffer;
+
+layout(set = 0, binding = 2, scalar) buffer PageRequests {
+    uint requestCount;
+    uint requests[];  // Packed: lightIdx | level | pageX | pageY
+} pageRequests;
+
+layout(set = 0, binding = 3, scalar) buffer PageTable {
+    uvec4 entries[];  // x=physX, y=physY, z=flags, w=lastFrame
+} pageTable;
+
+layout(push_constant) uniform PushConstants {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    uint width;
+    uint height;
+    uint pageSize;
+    uint virtualResolution;
+    uint numLights;
+    uint maxPages;
+    uint frameIndex;
+    uint pad;
+} pc;
+
+struct LightInfo {
+    mat4 viewProj;
+    vec4 position;
+    vec4 direction;
+    vec4 shadowParams;
+};
+
+layout(set = 0, binding = 4, scalar) readonly buffer Lights {
+    LightInfo lights[];
+};
+
+// Convert world position to shadow map UV
+vec2 worldToShadowUV(vec3 worldPos, mat4 lightViewProj) {
+    vec4 shadowPos = lightViewProj * vec4(worldPos, 1.0);
+    shadowPos.xyz /= shadowPos.w;
+    return shadowPos.xy * 0.5 + 0.5;
+}
+
+// Get page index for UV coordinate
+uvec2 uvToPage(vec2 uv, uint level) {
+    float levelScale = float(1u << level);
+    uint resolution = pc.virtualResolution >> level;
+    uint pageCount = resolution / pc.pageSize;
+    
+    uvec2 pageCoord = uvec2(uv * float(pageCount));
+    return clamp(pageCoord, uvec2(0), uvec2(pageCount - 1));
+}
+
+// Request a page
+void requestPage(uint lightIdx, uint level, uvec2 pageCoord) {
+    // Pack request
+    uint request = (lightIdx << 24) | (level << 20) | (pageCoord.x << 10) | pageCoord.y;
+    
+    // Add to request list (atomic)
+    uint idx = atomicAdd(pageRequests.requestCount, 1);
+    if (idx < pc.maxPages) {
+        pageRequests.requests[idx] = request;
+    }
+}
+
+// Compute appropriate mip level based on screen-space derivatives
+uint computeLOD(vec3 worldPos, vec3 lightPos, vec4 lightDir) {
+    float dist = length(worldPos - lightPos);
+    
+    // For directional lights, use fixed LOD based on distance from camera
+    if (lightDir.w < 0.0) {
+        float camDist = length(worldPos - pc.cameraPos.xyz);
+        return clamp(uint(log2(camDist / 10.0)), 0u, 5u);
+    }
+    
+    // For point/spot lights, use distance to light
+    return clamp(uint(log2(dist / 5.0)), 0u, 5u);
+}
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= pc.width || gid.y >= pc.height) return;
+    
+    vec2 uv = (vec2(gid) + 0.5) / vec2(pc.width, pc.height);
+    
+    // Sample depth and reconstruct world position
+    float depth = texture(depthBuffer, uv).r;
+    if (depth >= 1.0) return;  // Sky
+    
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos4 = pc.invViewProj * clipPos;
+    vec3 worldPos = worldPos4.xyz / worldPos4.w;
+    
+    // Sample normal for bias
+    vec3 normal = texture(normalBuffer, uv).xyz * 2.0 - 1.0;
+    
+    // Process each light
+    for (uint i = 0; i < pc.numLights; i++) {
+        LightInfo light = lights[i];
+        
+        // Skip if shadows disabled
+        if (light.shadowParams.w < 0.5) continue;
+        
+        // Apply normal bias
+        vec3 biasedPos = worldPos + normal * light.shadowParams.y;
+        
+        // Get shadow UV
+        vec2 shadowUV = worldToShadowUV(biasedPos, light.viewProj);
+        
+        // Skip if outside shadow map
+        if (any(lessThan(shadowUV, vec2(0.0))) || any(greaterThan(shadowUV, vec2(1.0)))) {
+            continue;
+        }
+        
+        // Compute LOD
+        uint lod = computeLOD(worldPos, light.position.xyz, light.direction);
+        
+        // Get page coordinate
+        uvec2 pageCoord = uvToPage(shadowUV, lod);
+        
+        // Request page and neighbors (for filtering)
+        requestPage(i, lod, pageCoord);
+        
+        // Also request adjacent pages for PCF
+        if (pageCoord.x > 0) requestPage(i, lod, pageCoord - uvec2(1, 0));
+        if (pageCoord.y > 0) requestPage(i, lod, pageCoord - uvec2(0, 1));
+        if (pageCoord.x < (pc.virtualResolution / pc.pageSize) - 1) {
+            requestPage(i, lod, pageCoord + uvec2(1, 0));
+        }
+        if (pageCoord.y < (pc.virtualResolution / pc.pageSize) - 1) {
+            requestPage(i, lod, pageCoord + uvec2(0, 1));
+        }
+    }
+}

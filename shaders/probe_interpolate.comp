@@ -1,0 +1,194 @@
+/**
+ * probe_interpolate.comp
+ * 
+ * Interpolates screen probe radiance to full resolution.
+ * Uses bilateral upsampling for edge preservation.
+ * 
+ * Turn 25-27: Probe interpolation
+ */
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct ScreenProbe {
+    vec4 positionDepth;
+    vec4 normalRadius;
+    ivec4 atlasInfo;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer ProbeBuffer {
+    ScreenProbe probes[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer TileBuffer {
+    uvec4 tiles[];  // x = probeIndex, y = probeCount
+};
+
+// Filtered probe atlas
+layout(set = 0, binding = 2) uniform sampler2D probeAtlas;
+
+// G-Buffer for bilateral filtering
+layout(set = 0, binding = 3) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 4) uniform sampler2D normalBuffer;
+
+// Output radiance
+layout(rgba16f, set = 0, binding = 5) uniform image2D outputRadiance;
+
+layout(push_constant) uniform PushConstants {
+    mat4 invViewProj;
+    vec4 screenSize;        // xy = size, zw = 1/size
+    uint tileSize;
+    uint probeCount;
+    float depthWeight;
+    float normalWeight;
+};
+
+// Octahedral encoding
+vec2 octEncode(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * (step(0.0, n.xy) * 2.0 - 1.0);
+    }
+    return n.xy * 0.5 + 0.5;
+}
+
+vec3 octDecode(vec2 f) {
+    f = f * 2.0 - 1.0;
+    vec3 n = vec3(f.xy, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-n.z, 0.0);
+    n.xy += (step(0.0, n.xy) * 2.0 - 1.0) * -t;
+    return normalize(n);
+}
+
+// Reconstruct world position
+vec3 reconstructWorldPos(vec2 uv, float depth) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = invViewProj * clipPos;
+    return worldPos.xyz / worldPos.w;
+}
+
+// Sample probe radiance for a direction
+vec3 sampleProbeRadiance(uint probeIndex, vec3 direction) {
+    if (probeIndex >= probeCount) return vec3(0.0);
+    
+    ScreenProbe probe = probes[probeIndex];
+    if (probe.atlasInfo.z == 0) return vec3(0.0);
+    
+    // Convert direction to probe-local hemisphere
+    vec3 probeNormal = probe.normalRadius.xyz;
+    
+    // Rotate direction to probe space
+    // Simple projection onto probe hemisphere
+    float cosAngle = dot(direction, probeNormal);
+    if (cosAngle < 0.0) {
+        // Direction below horizon - use horizon
+        direction = normalize(direction - probeNormal * cosAngle);
+    }
+    
+    // Encode direction to octahedral UV
+    vec2 octUV = octEncode(direction);
+    
+    // Get atlas coordinates
+    int atlasOffset = probe.atlasInfo.x;
+    int resolution = probe.atlasInfo.y;
+    
+    // Convert to atlas UV
+    ivec2 probeBase = ivec2(atlasOffset % 2048, atlasOffset / 2048);
+    vec2 atlasUV = (vec2(probeBase) + octUV * float(resolution)) / vec2(textureSize(probeAtlas, 0));
+    
+    return texture(probeAtlas, atlasUV).rgb;
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) return;
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) * screenSize.zw;
+    
+    // Get pixel data
+    float depth = texture(depthBuffer, uv).r;
+    
+    // Skip sky
+    if (depth >= 1.0) {
+        imageStore(outputRadiance, pixelCoord, vec4(0.0));
+        return;
+    }
+    
+    vec3 normal = texture(normalBuffer, uv).xyz * 2.0 - 1.0;
+    vec3 worldPos = reconstructWorldPos(uv, depth);
+    
+    // Find which tile this pixel is in
+    ivec2 tileCoord = pixelCoord / int(tileSize);
+    uint tilesX = uint(ceil(screenSize.x / float(tileSize)));
+    uint tileIndex = tileCoord.y * tilesX + tileCoord.x;
+    
+    // Get tile probes
+    uvec4 tile = tiles[tileIndex];
+    uint baseProbeIndex = tile.x;
+    uint probeCountInTile = max(tile.y, 1u);
+    
+    // Gather from neighboring tiles for better coverage
+    vec3 radiance = vec3(0.0);
+    float totalWeight = 0.0;
+    
+    for (int ty = -1; ty <= 1; ty++) {
+        for (int tx = -1; tx <= 1; tx++) {
+            ivec2 neighborTile = tileCoord + ivec2(tx, ty);
+            
+            if (neighborTile.x < 0 || neighborTile.y < 0) continue;
+            if (neighborTile.x >= int(tilesX)) continue;
+            
+            uint neighborIndex = neighborTile.y * tilesX + neighborTile.x;
+            uvec4 neighborData = tiles[neighborIndex];
+            uint neighborProbe = neighborData.x;
+            uint neighborCount = max(neighborData.y, 1u);
+            
+            for (uint p = 0; p < neighborCount && p < 4u; p++) {
+                if (neighborProbe + p >= probeCount) continue;
+                
+                ScreenProbe probe = probes[neighborProbe + p];
+                if (probe.atlasInfo.z == 0) continue;
+                
+                vec3 probePos = probe.positionDepth.xyz;
+                vec3 probeNormal = probe.normalRadius.xyz;
+                float probeDepth = probe.positionDepth.w;
+                float probeRadius = probe.normalRadius.w;
+                
+                // Distance weight
+                float dist = length(worldPos - probePos);
+                float distWeight = 1.0 / (1.0 + dist * dist / (probeRadius * probeRadius));
+                
+                // Depth similarity
+                float depthDiff = abs(depth - probeDepth);
+                float depthW = exp(-depthDiff * depthWeight);
+                
+                // Normal similarity  
+                float normalDot = max(dot(normal, probeNormal), 0.0);
+                float normalW = pow(normalDot, normalWeight);
+                
+                float weight = distWeight * depthW * normalW;
+                
+                if (weight > 0.001) {
+                    // Direction from probe to pixel
+                    vec3 direction = normalize(worldPos - probePos);
+                    
+                    // Sample probe in this direction (actually we want incoming radiance)
+                    // For diffuse GI, we want hemisphere average weighted by normal
+                    vec3 probeRadiance = sampleProbeRadiance(neighborProbe + p, normal);
+                    
+                    radiance += probeRadiance * weight;
+                    totalWeight += weight;
+                }
+            }
+        }
+    }
+    
+    if (totalWeight > 0.0) {
+        radiance /= totalWeight;
+    }
+    
+    imageStore(outputRadiance, pixelCoord, vec4(radiance, 1.0));
+}

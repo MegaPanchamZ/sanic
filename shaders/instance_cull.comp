@@ -1,0 +1,184 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+/**
+ * Instance Culling Compute Shader
+ * ================================
+ * First pass: Cull instances (objects) before processing their clusters.
+ * 
+ * For each instance:
+ * 1. Frustum cull against bounding sphere
+ * 2. Distance-based LOD selection for initial error threshold
+ * 3. Output visible instances to stream
+ * 
+ * This reduces the cluster culling workload significantly.
+ */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Instance data layout
+struct InstanceData {
+    mat4 worldMatrix;
+    vec4 boundingSphere;      // xyz = center in local space, w = radius
+    uint hierarchyOffset;      // Offset into hierarchy buffer
+    uint clusterOffset;        // Offset into cluster buffer  
+    uint clusterCount;         // Number of clusters
+    uint flags;                // Instance flags
+};
+
+// Visible instance output
+struct VisibleInstance {
+    uint instanceId;
+    uint hierarchyOffset;
+    uint clusterOffset;
+    uint clusterCount;
+    mat4 worldMatrix;
+    float lodScale;           // Distance-based LOD adjustment
+    uint pad0, pad1, pad2;
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer InstanceBuffer {
+    InstanceData instances[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer VisibleInstanceBuffer {
+    VisibleInstance visibleInstances[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer CounterBuffer {
+    uint visibleCount;
+    uint totalProcessed;
+};
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    vec4 frustumPlanes[6];
+    vec3 cameraPosition;
+    float nearPlane;
+    vec2 screenSize;
+    float lodBias;
+    float errorThreshold;
+    
+    // Buffer addresses
+    InstanceBuffer instanceBuffer;
+    VisibleInstanceBuffer visibleInstanceBuffer;
+    CounterBuffer counterBuffer;
+    
+    uint instanceCount;
+    uint flags;
+    uint pad0, pad1;
+} pc;
+
+// Culling flags
+const uint FLAG_FRUSTUM_CULL = 0x01;
+const uint FLAG_DISTANCE_CULL = 0x02;
+
+/**
+ * Test sphere against frustum planes
+ */
+bool frustumCullSphere(vec3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        float dist = dot(pc.frustumPlanes[i].xyz, center) + pc.frustumPlanes[i].w;
+        if (dist < -radius) {
+            return true;  // Culled
+        }
+    }
+    return false;  // Visible
+}
+
+/**
+ * Calculate LOD scale based on distance
+ */
+float calculateLodScale(vec3 worldCenter, float radius) {
+    float distance = length(worldCenter - pc.cameraPosition);
+    
+    // Clamp to near plane minimum
+    distance = max(distance - radius, pc.nearPlane);
+    
+    // LOD scale increases with distance (coarser LOD)
+    // Base formula: screen coverage = (radius / distance) * fov_factor
+    float screenCoverage = (2.0 * radius) / distance;
+    float lodScale = 1.0 / max(screenCoverage, 0.001);
+    
+    return lodScale * pc.lodBias;
+}
+
+/**
+ * Transform bounding sphere to world space
+ */
+void transformBoundingSphere(InstanceData instance, out vec3 worldCenter, out float worldRadius) {
+    // Get world matrix scale (approximation for uniform scale)
+    vec3 scale = vec3(
+        length(instance.worldMatrix[0].xyz),
+        length(instance.worldMatrix[1].xyz),
+        length(instance.worldMatrix[2].xyz)
+    );
+    float maxScale = max(scale.x, max(scale.y, scale.z));
+    
+    // Transform center
+    vec4 localCenter = vec4(instance.boundingSphere.xyz, 1.0);
+    worldCenter = (instance.worldMatrix * localCenter).xyz;
+    
+    // Scale radius
+    worldRadius = instance.boundingSphere.w * maxScale;
+}
+
+void main() {
+    uint instanceId = gl_GlobalInvocationID.x;
+    
+    if (instanceId >= pc.instanceCount) {
+        return;
+    }
+    
+    // Load instance data
+    InstanceData instance = pc.instanceBuffer.instances[instanceId];
+    
+    // Transform bounding sphere to world space
+    vec3 worldCenter;
+    float worldRadius;
+    transformBoundingSphere(instance, worldCenter, worldRadius);
+    
+    // Frustum culling
+    if ((pc.flags & FLAG_FRUSTUM_CULL) != 0) {
+        if (frustumCullSphere(worldCenter, worldRadius)) {
+            return;  // Instance culled
+        }
+    }
+    
+    // Calculate LOD scale for this instance
+    float lodScale = calculateLodScale(worldCenter, worldRadius);
+    
+    // Distance culling (optional)
+    if ((pc.flags & FLAG_DISTANCE_CULL) != 0) {
+        // Cull if screen coverage is too small
+        float distance = length(worldCenter - pc.cameraPosition);
+        float screenRadius = (worldRadius / distance) * pc.screenSize.y * 0.5;
+        if (screenRadius < 1.0) {  // Less than 1 pixel
+            return;  // Too small to see
+        }
+    }
+    
+    // Instance is visible - add to output
+    uint outputIdx = atomicAdd(pc.counterBuffer.visibleCount, 1);
+    
+    VisibleInstance visible;
+    visible.instanceId = instanceId;
+    visible.hierarchyOffset = instance.hierarchyOffset;
+    visible.clusterOffset = instance.clusterOffset;
+    visible.clusterCount = instance.clusterCount;
+    visible.worldMatrix = instance.worldMatrix;
+    visible.lodScale = lodScale;
+    visible.pad0 = 0;
+    visible.pad1 = 0;
+    visible.pad2 = 0;
+    
+    pc.visibleInstanceBuffer.visibleInstances[outputIdx] = visible;
+    
+    // Update stats
+    atomicAdd(pc.counterBuffer.totalProcessed, 1);
+}

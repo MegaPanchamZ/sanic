@@ -1,0 +1,123 @@
+/**
+ * rt_shadow.rgen
+ * 
+ * Ray generation shader for hardware ray-traced shadows.
+ * Traces shadow rays with soft shadows support.
+ * 
+ * Turn 37-39: Ray-traced Shadows
+ */
+
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_scalar_block_layout : require
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 2) uniform sampler2D normalBuffer;
+layout(set = 0, binding = 3, rgba8) uniform image2D shadowOutput;
+
+layout(push_constant) uniform PushConstants {
+    mat4 invViewProj;
+    vec4 lightDir;      // xyz = direction, w = soft angle (radians)
+    vec4 lightColor;    // rgb = color, a = intensity
+    vec4 cameraPos;
+    uint width;
+    uint height;
+    uint samplesPerPixel;
+    uint frameIndex;
+    float maxDistance;
+    float bias;
+    uint pad0;
+    uint pad1;
+} pc;
+
+layout(location = 0) rayPayloadEXT float shadowPayload;
+
+// Blue noise for temporal dithering
+float blueNoise(uvec2 coord) {
+    // Simple hash-based blue noise approximation
+    uint n = coord.x + coord.y * pc.width + pc.frameIndex * pc.width * pc.height;
+    n = (n << 13) ^ n;
+    n = n * (n * n * 15731 + 789221) + 1376312589;
+    return float(n & 0x7fffffff) / float(0x7fffffff);
+}
+
+// Uniform sample hemisphere around direction
+vec3 sampleCone(vec3 dir, float angle, vec2 xi) {
+    // Create orthonormal basis
+    vec3 up = abs(dir.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, dir));
+    vec3 bitangent = cross(dir, tangent);
+    
+    // Sample cone
+    float cosAngle = cos(angle);
+    float z = cosAngle + xi.x * (1.0 - cosAngle);
+    float phi = xi.y * 6.28318530718;
+    float sinTheta = sqrt(1.0 - z * z);
+    
+    vec3 localDir = vec3(sinTheta * cos(phi), sinTheta * sin(phi), z);
+    return normalize(tangent * localDir.x + bitangent * localDir.y + dir * localDir.z);
+}
+
+void main() {
+    uvec2 launchID = gl_LaunchIDEXT.xy;
+    vec2 uv = (vec2(launchID) + 0.5) / vec2(pc.width, pc.height);
+    
+    // Sample depth
+    float depth = texture(depthBuffer, uv).r;
+    if (depth >= 1.0) {
+        imageStore(shadowOutput, ivec2(launchID), vec4(1.0));
+        return;
+    }
+    
+    // Reconstruct world position
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos4 = pc.invViewProj * clipPos;
+    vec3 worldPos = worldPos4.xyz / worldPos4.w;
+    
+    // Get surface normal
+    vec3 normal = texture(normalBuffer, uv).xyz * 2.0 - 1.0;
+    
+    // Apply bias along normal
+    vec3 rayOrigin = worldPos + normal * pc.bias;
+    
+    // Accumulate shadow samples
+    float shadow = 0.0;
+    
+    for (uint i = 0; i < pc.samplesPerPixel; i++) {
+        // Generate sample direction with soft shadow cone
+        vec2 xi;
+        xi.x = blueNoise(uvec2(launchID.x + i * 17, launchID.y + i * 31));
+        xi.y = blueNoise(uvec2(launchID.x + i * 47, launchID.y + i * 13));
+        
+        vec3 rayDir = -pc.lightDir.xyz;  // Light direction points TO the light
+        if (pc.lightDir.w > 0.0) {
+            rayDir = sampleCone(rayDir, pc.lightDir.w, xi);
+        }
+        
+        // Initialize payload
+        shadowPayload = 1.0;
+        
+        // Trace shadow ray
+        traceRayEXT(
+            tlas,
+            gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+            0xFF,
+            0,  // sbtRecordOffset
+            0,  // sbtRecordStride
+            0,  // missIndex
+            rayOrigin,
+            0.001,
+            rayDir,
+            pc.maxDistance,
+            0   // payload location
+        );
+        
+        shadow += shadowPayload;
+    }
+    
+    shadow /= float(pc.samplesPerPixel);
+    
+    // Store result (will be denoised in next pass)
+    imageStore(shadowOutput, ivec2(launchID), vec4(shadow, shadow, shadow, 1.0));
+}

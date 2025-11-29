@@ -1,0 +1,264 @@
+/**
+ * cone_trace.comp
+ * 
+ * Cone tracing infrastructure for glossy reflections and AO.
+ * Uses distance fields or Hi-Z for efficient tracing.
+ * 
+ * Turn 19-21: Cone tracing for rough surfaces
+ */
+
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Input textures
+layout(set = 0, binding = 0) uniform sampler2D colorBuffer;
+layout(set = 0, binding = 1) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 2) uniform sampler2D normalBuffer;
+layout(set = 0, binding = 3) uniform sampler2D materialBuffer;
+layout(set = 0, binding = 4) uniform sampler2D hizBuffer;
+
+// Distance field (3D texture for global SDF)
+layout(set = 0, binding = 5) uniform sampler3D globalSDF;
+
+// Output
+layout(set = 0, binding = 6, rgba16f) writeonly uniform image2D coneTraceOutput;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    mat4 invViewProj;
+    mat4 invView;
+    
+    vec2 screenSize;
+    vec2 invScreenSize;
+    
+    vec3 sdfOrigin;         // SDF volume origin
+    float sdfVoxelSize;     // Size of one voxel
+    
+    vec3 sdfExtent;         // SDF volume extent
+    float maxConeDistance;
+    
+    uint maxSteps;
+    float coneAngle;        // Base cone angle
+    float aoIntensity;
+    uint flags;             // Bit 0: use SDF, Bit 1: compute AO
+};
+
+// Reconstruct world position
+vec3 reconstructWorldPos(vec2 uv, float depth) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = invViewProj * clipPos;
+    return worldPos.xyz / worldPos.w;
+}
+
+// Sample SDF at world position
+float sampleSDF(vec3 worldPos) {
+    vec3 uvw = (worldPos - sdfOrigin) / sdfExtent;
+    
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
+        return maxConeDistance;  // Outside volume
+    }
+    
+    return texture(globalSDF, uvw).r * sdfVoxelSize;
+}
+
+// Cone trace through SDF
+// Returns: visibility (0-1) and hit distance
+vec2 coneTraceSDF(vec3 origin, vec3 dir, float coneHalfAngle, float maxDist) {
+    float t = 0.0;
+    float visibility = 1.0;
+    float coneRadius = 0.0;
+    
+    for (uint i = 0; i < maxSteps && t < maxDist; i++) {
+        vec3 pos = origin + dir * t;
+        float dist = sampleSDF(pos);
+        
+        // Expand cone radius based on distance
+        coneRadius = t * tan(coneHalfAngle);
+        
+        // Soft visibility based on distance vs cone radius
+        if (dist < coneRadius) {
+            float occlusion = 1.0 - clamp(dist / coneRadius, 0.0, 1.0);
+            visibility *= 1.0 - occlusion;
+            
+            if (visibility < 0.01) {
+                return vec2(0.0, t);
+            }
+        }
+        
+        // Step by SDF distance (sphere tracing)
+        t += max(dist, sdfVoxelSize * 0.5);
+    }
+    
+    return vec2(visibility, t);
+}
+
+// Screen-space cone approximation using mip levels
+vec3 coneTraceScreen(vec3 origin, vec3 dir, float roughness, vec2 screenUV) {
+    // Use roughness to determine mip level (higher roughness = blurrier)
+    float mipBias = roughness * 8.0;
+    
+    vec3 result = vec3(0.0);
+    float totalWeight = 0.0;
+    
+    // Sample along ray with increasing blur
+    float stepSize = 0.02;
+    vec3 rayPos = origin + dir * stepSize;
+    
+    for (uint i = 0; i < 16; i++) {
+        vec4 clipPos = viewProj * vec4(rayPos, 1.0);
+        vec3 ndc = clipPos.xyz / clipPos.w;
+        vec2 sampleUV = ndc.xy * 0.5 + 0.5;
+        
+        // Check bounds
+        if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || 
+            sampleUV.y < 0.0 || sampleUV.y > 1.0 ||
+            ndc.z < 0.0 || ndc.z > 1.0) {
+            break;
+        }
+        
+        // Compute mip level based on cone spread
+        float coneSpread = float(i) * stepSize * tan(roughness * 1.5);
+        float pixelSpread = coneSpread * screenSize.x * 0.5;
+        float mipLevel = log2(max(pixelSpread, 1.0)) + mipBias;
+        
+        // Sample color at mip level
+        vec3 sampleColor = textureLod(colorBuffer, sampleUV, mipLevel).rgb;
+        
+        // Distance-based weight
+        float dist = float(i + 1) * stepSize;
+        float weight = 1.0 / (1.0 + dist * dist);
+        
+        result += sampleColor * weight;
+        totalWeight += weight;
+        
+        rayPos += dir * stepSize;
+        stepSize *= 1.2;  // Increase step size for distant samples
+    }
+    
+    if (totalWeight > 0.0) {
+        result /= totalWeight;
+    }
+    
+    return result;
+}
+
+// Compute ambient occlusion using cone traces
+float computeConeAO(vec3 worldPos, vec3 normal) {
+    if ((flags & 1u) == 0) {
+        return 1.0;  // SDF not available
+    }
+    
+    float ao = 0.0;
+    const int numCones = 8;
+    
+    // Cosine-weighted hemisphere directions
+    vec3 tangent = abs(normal.y) < 0.999 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    tangent = normalize(tangent - normal * dot(tangent, normal));
+    vec3 bitangent = cross(normal, tangent);
+    
+    // Golden ratio spiral for uniform distribution
+    float goldenRatio = (1.0 + sqrt(5.0)) * 0.5;
+    
+    for (int i = 0; i < numCones; i++) {
+        float fi = float(i);
+        float theta = 2.0 * 3.14159 * fi / goldenRatio;
+        float phi = acos(1.0 - 2.0 * (fi + 0.5) / float(numCones));
+        
+        vec3 localDir = vec3(
+            sin(phi) * cos(theta),
+            sin(phi) * sin(theta),
+            cos(phi)
+        );
+        
+        // Transform to world space
+        vec3 worldDir = tangent * localDir.x + bitangent * localDir.y + normal * localDir.z;
+        
+        // Trace cone
+        vec2 traceResult = coneTraceSDF(
+            worldPos + normal * sdfVoxelSize,
+            worldDir,
+            coneAngle,
+            maxConeDistance
+        );
+        
+        // Weight by cosine
+        float NdotL = max(0.0, dot(normal, worldDir));
+        ao += traceResult.x * NdotL;
+    }
+    
+    ao /= float(numCones);
+    return mix(1.0, ao, aoIntensity);
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) * invScreenSize;
+    
+    float depth = texture(depthBuffer, uv).r;
+    
+    if (depth >= 1.0) {
+        imageStore(coneTraceOutput, pixelCoord, vec4(0.0));
+        return;
+    }
+    
+    vec3 worldPos = reconstructWorldPos(uv, depth);
+    vec3 normal = normalize(texture(normalBuffer, uv).xyz * 2.0 - 1.0);
+    
+    vec4 materialData = texture(materialBuffer, uv);
+    float roughness = materialData.r;
+    float metallic = materialData.g;
+    
+    // Compute view direction
+    vec3 viewPos = (invView * vec4(0, 0, 0, 1)).xyz;
+    vec3 viewDir = normalize(worldPos - viewPos);
+    
+    // Reflection direction
+    vec3 reflectDir = reflect(viewDir, normal);
+    
+    vec3 result = vec3(0.0);
+    float confidence = 0.0;
+    
+    // Use SDF cone trace for rough reflections if available
+    if ((flags & 1u) != 0 && roughness > 0.3) {
+        float coneHalfAngle = roughness * 0.5;  // Wider cone for rougher surfaces
+        
+        vec2 traceResult = coneTraceSDF(
+            worldPos + normal * sdfVoxelSize,
+            reflectDir,
+            coneHalfAngle,
+            maxConeDistance
+        );
+        
+        // If we hit something, sample screen for color
+        if (traceResult.x < 0.99) {
+            result = coneTraceScreen(worldPos, reflectDir, roughness, uv);
+            confidence = 1.0 - traceResult.x;
+        }
+    } else {
+        // Fallback to screen-space cone trace
+        result = coneTraceScreen(worldPos, reflectDir, roughness, uv);
+        confidence = 1.0 - roughness;
+    }
+    
+    // Compute AO if requested
+    float ao = 1.0;
+    if ((flags & 2u) != 0) {
+        ao = computeConeAO(worldPos, normal);
+    }
+    
+    // Apply Fresnel
+    float NdotV = max(0.0, dot(normal, -viewDir));
+    float F0 = mix(0.04, 1.0, metallic);
+    float fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
+    
+    result *= fresnel * confidence;
+    
+    imageStore(coneTraceOutput, pixelCoord, vec4(result, ao));
+}

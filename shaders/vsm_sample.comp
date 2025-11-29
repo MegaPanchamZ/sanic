@@ -1,0 +1,171 @@
+/**
+ * vsm_sample.comp
+ * 
+ * Sample virtual shadow maps with PCF filtering.
+ * 
+ * Turn 37-39: Virtual Shadow Maps
+ */
+
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 1) uniform sampler2D normalBuffer;
+layout(set = 0, binding = 2) uniform sampler2DShadow shadowAtlas;
+
+layout(set = 0, binding = 3, scalar) readonly buffer PageTable {
+    uvec4 entries[];  // x=physX, y=physY, z=flags, w=lastFrame
+} pageTable;
+
+layout(set = 0, binding = 4, rgba8) writeonly uniform image2D shadowMask;
+
+layout(push_constant) uniform PushConstants {
+    mat4 invViewProj;
+    vec4 cameraPos;
+    uint width;
+    uint height;
+    uint pageSize;
+    uint virtualResolution;
+    uint atlasSize;
+    uint numLights;
+    float softness;
+    uint pcfSamples;
+} pc;
+
+struct LightInfo {
+    mat4 viewProj;
+    vec4 position;
+    vec4 direction;
+    vec4 shadowParams;
+};
+
+layout(set = 0, binding = 5, scalar) readonly buffer Lights {
+    LightInfo lights[];
+};
+
+// Poisson disk samples for PCF
+const vec2 poissonDisk[16] = vec2[](
+    vec2(-0.94201624, -0.39906216),
+    vec2(0.94558609, -0.76890725),
+    vec2(-0.094184101, -0.92938870),
+    vec2(0.34495938, 0.29387760),
+    vec2(-0.91588581, 0.45771432),
+    vec2(-0.81544232, -0.87912464),
+    vec2(-0.38277543, 0.27676845),
+    vec2(0.97484398, 0.75648379),
+    vec2(0.44323325, -0.97511554),
+    vec2(0.53742981, -0.47373420),
+    vec2(-0.26496911, -0.41893023),
+    vec2(0.79197514, 0.19090188),
+    vec2(-0.24188840, 0.99706507),
+    vec2(-0.81409955, 0.91437590),
+    vec2(0.19984126, 0.78641367),
+    vec2(0.14383161, -0.14100790)
+);
+
+// Get page table entry
+uvec4 getPageEntry(uint lightIdx, uint level, uvec2 pageCoord) {
+    uint pageCount = pc.virtualResolution / pc.pageSize;
+    uint pagesPerLevel = pageCount * pageCount;
+    
+    // Calculate total offset including previous levels
+    uint levelOffset = 0;
+    for (uint l = 0; l < level; l++) {
+        uint count = (pc.virtualResolution >> l) / pc.pageSize;
+        levelOffset += count * count;
+    }
+    
+    uint thisLevelCount = (pc.virtualResolution >> level) / pc.pageSize;
+    uint pageIndex = levelOffset + pageCoord.y * thisLevelCount + pageCoord.x;
+    pageIndex += lightIdx * pagesPerLevel * 6;  // 6 mip levels per light
+    
+    return pageTable.entries[pageIndex];
+}
+
+// Sample shadow with page lookup
+float sampleShadow(vec3 worldPos, vec3 normal, uint lightIdx) {
+    LightInfo light = lights[lightIdx];
+    
+    // Apply normal bias
+    vec3 biasedPos = worldPos + normal * light.shadowParams.y;
+    
+    // Transform to light space
+    vec4 shadowPos = light.viewProj * vec4(biasedPos, 1.0);
+    shadowPos.xyz /= shadowPos.w;
+    
+    vec2 shadowUV = shadowPos.xy * 0.5 + 0.5;
+    
+    // Check bounds
+    if (any(lessThan(shadowUV, vec2(0.0))) || any(greaterThan(shadowUV, vec2(1.0)))) {
+        return 1.0;  // Outside shadow map
+    }
+    
+    // Compute LOD
+    float dist = length(worldPos - pc.cameraPos.xyz);
+    uint lod = clamp(uint(log2(dist / 10.0)), 0u, 5u);
+    
+    // Get page
+    uint resolution = pc.virtualResolution >> lod;
+    uint pageCount = resolution / pc.pageSize;
+    uvec2 pageCoord = uvec2(shadowUV * float(pageCount));
+    pageCoord = clamp(pageCoord, uvec2(0), uvec2(pageCount - 1));
+    
+    uvec4 pageEntry = getPageEntry(lightIdx, lod, pageCoord);
+    
+    // Check if page is resident
+    if ((pageEntry.z & 1u) == 0u) {
+        return 0.5;  // Page not resident - use fallback
+    }
+    
+    // Calculate atlas UV
+    vec2 pageLocalUV = fract(shadowUV * float(pageCount));
+    vec2 atlasUV = (vec2(pageEntry.xy) * float(pc.pageSize) + pageLocalUV * float(pc.pageSize)) / float(pc.atlasSize);
+    
+    // Apply depth bias
+    float compareDepth = shadowPos.z - light.shadowParams.x;
+    
+    // PCF sampling
+    float shadow = 0.0;
+    float radius = pc.softness / float(pc.atlasSize);
+    
+    for (uint i = 0; i < pc.pcfSamples; i++) {
+        vec2 offset = poissonDisk[i % 16] * radius;
+        shadow += texture(shadowAtlas, vec3(atlasUV + offset, compareDepth));
+    }
+    
+    return shadow / float(pc.pcfSamples);
+}
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= pc.width || gid.y >= pc.height) return;
+    
+    vec2 uv = (vec2(gid) + 0.5) / vec2(pc.width, pc.height);
+    
+    // Sample depth and reconstruct world position
+    float depth = texture(depthBuffer, uv).r;
+    if (depth >= 1.0) {
+        imageStore(shadowMask, ivec2(gid), vec4(1.0));
+        return;
+    }
+    
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos4 = pc.invViewProj * clipPos;
+    vec3 worldPos = worldPos4.xyz / worldPos4.w;
+    
+    vec3 normal = texture(normalBuffer, uv).xyz * 2.0 - 1.0;
+    
+    // Sample shadows for each light and combine
+    vec4 shadows = vec4(1.0);
+    
+    for (uint i = 0; i < min(pc.numLights, 4u); i++) {
+        if (lights[i].shadowParams.w > 0.5) {
+            shadows[i] = sampleShadow(worldPos, normal, i);
+        }
+    }
+    
+    imageStore(shadowMask, ivec2(gid), shadows);
+}

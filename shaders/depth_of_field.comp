@@ -1,0 +1,120 @@
+/**
+ * depth_of_field.comp
+ * 
+ * Depth of field effect using physically-based circle of confusion.
+ * 
+ * Turn 37-39: Post-processing
+ */
+
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D colorBuffer;
+layout(set = 0, binding = 1) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D outputImage;
+
+layout(push_constant) uniform PushConstants {
+    float focusDistance;      // Focus plane distance
+    float focusRange;         // Depth range in focus
+    float aperture;           // f-stop
+    float focalLength;        // Lens focal length (mm)
+    float nearPlane;
+    float farPlane;
+    float maxBlur;            // Maximum blur radius
+    float aspectRatio;
+    uint width;
+    uint height;
+    uint bokehSamples;
+    uint pad;
+} pc;
+
+// Linearize depth
+float linearizeDepth(float depth) {
+    float z = depth * 2.0 - 1.0;
+    return (2.0 * pc.nearPlane * pc.farPlane) / (pc.farPlane + pc.nearPlane - z * (pc.farPlane - pc.nearPlane));
+}
+
+// Compute circle of confusion
+float computeCoC(float depth) {
+    // Simplified thin lens equation
+    // CoC = abs(aperture * focalLength * (focusDistance - depth)) / (depth * (focusDistance - focalLength))
+    
+    float linearDepth = linearizeDepth(depth);
+    float diff = abs(linearDepth - pc.focusDistance);
+    
+    // Simplified CoC calculation
+    float coc = pc.aperture * (pc.focalLength / 1000.0) * diff / max(linearDepth, 0.001);
+    
+    // Apply focus range (transition zone)
+    if (diff < pc.focusRange) {
+        coc *= diff / pc.focusRange;
+    }
+    
+    return clamp(coc, 0.0, pc.maxBlur);
+}
+
+// Bokeh shape (circular for simplicity)
+vec2 bokehSample(uint i, uint n) {
+    float angle = float(i) / float(n) * 6.28318530718;
+    float r = sqrt((float(i) + 0.5) / float(n));
+    return vec2(cos(angle), sin(angle)) * r;
+}
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= pc.width || gid.y >= pc.height) return;
+    
+    vec2 uv = (vec2(gid) + 0.5) / vec2(pc.width, pc.height);
+    vec2 texelSize = 1.0 / vec2(pc.width, pc.height);
+    
+    // Sample center
+    vec4 centerColor = texture(colorBuffer, uv);
+    float centerDepth = texture(depthBuffer, uv).r;
+    float centerCoC = computeCoC(centerDepth);
+    
+    // If no blur needed, early out
+    if (centerCoC < 0.5) {
+        imageStore(outputImage, ivec2(gid), centerColor);
+        return;
+    }
+    
+    // Gather samples in bokeh pattern
+    vec4 color = vec4(0.0);
+    float totalWeight = 0.0;
+    
+    for (uint i = 0; i < pc.bokehSamples; i++) {
+        vec2 offset = bokehSample(i, pc.bokehSamples) * centerCoC * texelSize;
+        offset.y *= pc.aspectRatio;
+        
+        vec2 sampleUV = uv + offset;
+        
+        // Skip out-of-bounds samples
+        if (any(lessThan(sampleUV, vec2(0.0))) || any(greaterThan(sampleUV, vec2(1.0)))) {
+            continue;
+        }
+        
+        vec4 sampleColor = texture(colorBuffer, sampleUV);
+        float sampleDepth = texture(depthBuffer, sampleUV).r;
+        float sampleCoC = computeCoC(sampleDepth);
+        
+        // Weight by CoC overlap (scatter-as-gather approximation)
+        float weight = 1.0;
+        
+        // Background bleeding prevention
+        float linearCenter = linearizeDepth(centerDepth);
+        float linearSample = linearizeDepth(sampleDepth);
+        
+        if (linearSample < linearCenter) {
+            // Sample is in front - use its CoC to weight
+            weight *= clamp(sampleCoC / centerCoC, 0.0, 1.0);
+        }
+        
+        color += sampleColor * weight;
+        totalWeight += weight;
+    }
+    
+    color /= max(totalWeight, 0.001);
+    
+    imageStore(outputImage, ivec2(gid), color);
+}

@@ -1,0 +1,240 @@
+/**
+ * temporal_aa.comp
+ * 
+ * Temporal Anti-Aliasing similar to Unreal Engine's implementation.
+ * Combines current frame with history using motion vectors and
+ * neighborhood clamping for stable, high-quality AA.
+ * 
+ * Turn 11-12: TAA for stable image quality
+ */
+
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Input/Output images
+layout(set = 0, binding = 0, rgba16f) readonly uniform image2D currentFrame;
+layout(set = 0, binding = 1, rg16f) readonly uniform image2D motionVectors;
+layout(set = 0, binding = 2, rgba16f) readonly uniform image2D historyFrame;
+layout(set = 0, binding = 3, r32f) readonly uniform image2D depthBuffer;
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2D outputFrame;
+
+// Samplers for bilinear sampling
+layout(set = 1, binding = 0) uniform sampler2D historyTexture;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    vec2 screenSize;
+    vec2 invScreenSize;
+    float feedbackMin;   // Minimum blend factor (0.88 typical)
+    float feedbackMax;   // Maximum blend factor (0.97 typical)
+    float motionScale;   // Scale for motion vectors
+    float jitterX;       // Current frame jitter
+    float jitterY;
+    float sharpness;     // Sharpening strength (0.2-0.5 typical)
+    uint frameIndex;
+    uint flags;          // Bit 0: enable variance clipping, Bit 1: enable motion blur
+};
+
+// Convert RGB to YCoCg color space
+vec3 RGBToYCoCg(vec3 rgb) {
+    return vec3(
+         0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b,
+         0.5  * rgb.r                - 0.5  * rgb.b,
+        -0.25 * rgb.r + 0.5 * rgb.g - 0.25 * rgb.b
+    );
+}
+
+// Convert YCoCg to RGB
+vec3 YCoCgToRGB(vec3 ycocg) {
+    float y  = ycocg.x;
+    float co = ycocg.y;
+    float cg = ycocg.z;
+    return vec3(
+        y + co - cg,
+        y + cg,
+        y - co - cg
+    );
+}
+
+// Luminance for weighting
+float luminance(vec3 color) {
+    return dot(color, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// Tonemap for HDR handling
+vec3 tonemap(vec3 color) {
+    return color / (1.0 + luminance(color));
+}
+
+vec3 tonemapInverse(vec3 color) {
+    return color / max(1.0 - luminance(color), 0.001);
+}
+
+// Catmull-Rom bicubic sampling for sharper history lookup
+vec4 sampleHistoryCatmullRom(vec2 uv) {
+    vec2 position = uv * screenSize;
+    vec2 centerPosition = floor(position - 0.5) + 0.5;
+    vec2 f = position - centerPosition;
+    vec2 f2 = f * f;
+    vec2 f3 = f2 * f;
+    
+    // Catmull-Rom weights
+    vec2 w0 = f2 - 0.5 * (f3 + f);
+    vec2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
+    vec2 w2 = -1.5 * f3 + 2.0 * f2 + 0.5 * f;
+    vec2 w3 = 0.5 * (f3 - f2);
+    
+    // Combine weights for bilinear fetches
+    vec2 w12 = w1 + w2;
+    vec2 tc12 = (centerPosition + w2 / w12) * invScreenSize;
+    vec2 tc0 = (centerPosition - 1.0) * invScreenSize;
+    vec2 tc3 = (centerPosition + 2.0) * invScreenSize;
+    
+    // 4 bilinear samples instead of 16 point samples
+    vec4 color = vec4(0.0);
+    color += texture(historyTexture, vec2(tc12.x, tc0.y)) * (w12.x * w0.y);
+    color += texture(historyTexture, vec2(tc0.x, tc12.y)) * (w0.x * w12.y);
+    color += texture(historyTexture, vec2(tc12.x, tc12.y)) * (w12.x * w12.y);
+    color += texture(historyTexture, vec2(tc3.x, tc12.y)) * (w3.x * w12.y);
+    color += texture(historyTexture, vec2(tc12.x, tc3.y)) * (w12.x * w3.y);
+    
+    return color;
+}
+
+// Variance clipping - clips history to color neighborhood
+vec3 clipToAABB(vec3 history, vec3 minimum, vec3 maximum) {
+    vec3 center = 0.5 * (minimum + maximum);
+    vec3 extents = 0.5 * (maximum - minimum);
+    
+    vec3 offset = history - center;
+    vec3 ts = abs(extents) / max(abs(offset), vec3(0.0001));
+    float t = clamp(min(min(ts.x, ts.y), ts.z), 0.0, 1.0);
+    
+    return center + offset * t;
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) * invScreenSize;
+    
+    // Sample current frame (with jitter removed conceptually)
+    vec3 currentColor = imageLoad(currentFrame, pixelCoord).rgb;
+    
+    // Sample motion vector
+    vec2 motion = imageLoad(motionVectors, pixelCoord).xy;
+    motion *= motionScale;
+    
+    // Compute velocity magnitude for feedback adjustment
+    float velocityMag = length(motion * screenSize);
+    
+    // Sample neighborhood for variance clipping
+    vec3 m1 = vec3(0.0);  // Mean
+    vec3 m2 = vec3(0.0);  // Mean of squares
+    vec3 minColor = vec3(99999.0);
+    vec3 maxColor = vec3(-99999.0);
+    
+    // 3x3 neighborhood sampling
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            ivec2 samplePos = pixelCoord + ivec2(x, y);
+            samplePos = clamp(samplePos, ivec2(0), ivec2(screenSize) - 1);
+            
+            vec3 sample_rgb = imageLoad(currentFrame, samplePos).rgb;
+            vec3 sample_ycocg = RGBToYCoCg(tonemap(sample_rgb));
+            
+            m1 += sample_ycocg;
+            m2 += sample_ycocg * sample_ycocg;
+            minColor = min(minColor, sample_ycocg);
+            maxColor = max(maxColor, sample_ycocg);
+        }
+    }
+    
+    // Compute variance-based AABB
+    m1 /= 9.0;
+    m2 /= 9.0;
+    vec3 sigma = sqrt(max(m2 - m1 * m1, vec3(0.0)));
+    
+    // Variance clipping AABB (tighter than min-max)
+    float gamma = 1.0;  // Can be adjusted based on motion
+    vec3 aabbMin = m1 - gamma * sigma;
+    vec3 aabbMax = m1 + gamma * sigma;
+    
+    // Use wider AABB for faster motion (reduces ghosting at cost of stability)
+    if ((flags & 1u) != 0) {
+        float motionBlend = clamp(velocityMag * 0.1, 0.0, 1.0);
+        aabbMin = mix(aabbMin, minColor, motionBlend);
+        aabbMax = mix(aabbMax, maxColor, motionBlend);
+    }
+    
+    // Sample history with motion compensation
+    vec2 historyUV = uv - motion;
+    
+    // Check if history sample is valid (on screen)
+    bool historyValid = historyUV.x >= 0.0 && historyUV.x <= 1.0 &&
+                        historyUV.y >= 0.0 && historyUV.y <= 1.0;
+    
+    vec3 historyColor;
+    if (historyValid) {
+        // High quality bicubic sampling
+        historyColor = sampleHistoryCatmullRom(historyUV).rgb;
+    } else {
+        historyColor = currentColor;
+    }
+    
+    // Convert to YCoCg for clipping
+    vec3 currentYCoCg = RGBToYCoCg(tonemap(currentColor));
+    vec3 historyYCoCg = RGBToYCoCg(tonemap(historyColor));
+    
+    // Clip history to neighborhood
+    if ((flags & 1u) != 0) {
+        historyYCoCg = clipToAABB(historyYCoCg, aabbMin, aabbMax);
+    } else {
+        historyYCoCg = clamp(historyYCoCg, aabbMin, aabbMax);
+    }
+    
+    // Compute blend factor
+    float feedback = mix(feedbackMax, feedbackMin, clamp(velocityMag * 0.02, 0.0, 1.0));
+    
+    // Reduce feedback when history was clipped significantly
+    float clipDist = length(RGBToYCoCg(tonemap(historyColor)) - historyYCoCg);
+    feedback = mix(feedback, feedbackMin, clamp(clipDist * 4.0, 0.0, 1.0));
+    
+    // Use less feedback when history UV is near screen edge
+    float edgeFade = 1.0;
+    vec2 edgeDist = min(historyUV, 1.0 - historyUV);
+    edgeFade = smoothstep(0.0, 0.1, min(edgeDist.x, edgeDist.y));
+    feedback *= edgeFade;
+    
+    // Blend current and history
+    vec3 resultYCoCg = mix(currentYCoCg, historyYCoCg, feedback);
+    
+    // Convert back to RGB
+    vec3 result = tonemapInverse(YCoCgToRGB(resultYCoCg));
+    
+    // Optional sharpening (can help counteract TAA blur)
+    if (sharpness > 0.0) {
+        vec3 blur = vec3(0.0);
+        blur += imageLoad(currentFrame, pixelCoord + ivec2(-1, 0)).rgb;
+        blur += imageLoad(currentFrame, pixelCoord + ivec2(1, 0)).rgb;
+        blur += imageLoad(currentFrame, pixelCoord + ivec2(0, -1)).rgb;
+        blur += imageLoad(currentFrame, pixelCoord + ivec2(0, 1)).rgb;
+        blur *= 0.25;
+        
+        vec3 sharp = currentColor + (currentColor - blur) * sharpness;
+        
+        // Blend sharpened result based on confidence
+        float sharpBlend = clamp(1.0 - velocityMag * 0.1, 0.0, 1.0);
+        result = mix(result, sharp, sharpBlend * sharpness * 0.5);
+    }
+    
+    // Clamp to valid range
+    result = max(result, vec3(0.0));
+    
+    imageStore(outputFrame, pixelCoord, vec4(result, 1.0));
+}

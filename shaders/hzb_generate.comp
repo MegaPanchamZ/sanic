@@ -1,0 +1,81 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+
+/**
+ * HZB (Hierarchical Z-Buffer) Generation
+ * =======================================
+ * Generates a mip chain from the depth buffer for occlusion culling.
+ * 
+ * Each mip level stores the MAXIMUM depth (farthest) of 4 texels.
+ * This allows conservative occlusion testing - if an object is behind
+ * the max depth of any HZB texel, it's definitely occluded.
+ * 
+ * Uses reversed-Z: 1.0 is near plane, 0.0 is far plane.
+ * We take the MIN value to get the farthest depth.
+ */
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Input: source mip level
+layout(set = 0, binding = 0) uniform sampler2D srcDepth;
+
+// Output: destination mip level
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D dstMip;
+
+layout(push_constant) uniform PushConstants {
+    vec2 srcSize;
+    vec2 dstSize;
+    int srcMipLevel;
+    int isFirstPass;  // 1 = reading from depth buffer, 0 = reading from previous HZB mip
+} pc;
+
+void main() {
+    ivec2 dstCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    // Early out if outside destination bounds
+    if (dstCoord.x >= int(pc.dstSize.x) || dstCoord.y >= int(pc.dstSize.y)) {
+        return;
+    }
+    
+    // Calculate source coordinates (2x2 block)
+    vec2 srcTexelSize = 1.0 / pc.srcSize;
+    vec2 srcUV = (vec2(dstCoord) * 2.0 + 0.5) * srcTexelSize;
+    
+    // Sample 4 source texels
+    float d0, d1, d2, d3;
+    
+    if (pc.isFirstPass != 0) {
+        // Reading from depth buffer - use texelFetch for exact values
+        ivec2 srcCoord = dstCoord * 2;
+        d0 = texelFetch(srcDepth, srcCoord + ivec2(0, 0), 0).r;
+        d1 = texelFetch(srcDepth, srcCoord + ivec2(1, 0), 0).r;
+        d2 = texelFetch(srcDepth, srcCoord + ivec2(0, 1), 0).r;
+        d3 = texelFetch(srcDepth, srcCoord + ivec2(1, 1), 0).r;
+    } else {
+        // Reading from previous HZB mip - use texture sampling for proper filtering
+        // Offset to sample centers of 2x2 block
+        d0 = textureLod(srcDepth, srcUV + srcTexelSize * vec2(-0.25, -0.25), float(pc.srcMipLevel)).r;
+        d1 = textureLod(srcDepth, srcUV + srcTexelSize * vec2( 0.25, -0.25), float(pc.srcMipLevel)).r;
+        d2 = textureLod(srcDepth, srcUV + srcTexelSize * vec2(-0.25,  0.25), float(pc.srcMipLevel)).r;
+        d3 = textureLod(srcDepth, srcUV + srcTexelSize * vec2( 0.25,  0.25), float(pc.srcMipLevel)).r;
+    }
+    
+    // For reversed-Z, take minimum to get farthest depth
+    // This is conservative: if min depth is farther than test point, it's definitely occluded
+    float result = min(min(d0, d1), min(d2, d3));
+    
+    // Handle edge cases where some samples are outside the valid region
+    // (near screen edges on odd-sized sources)
+    ivec2 srcCoord = dstCoord * 2;
+    if (srcCoord.x + 1 >= int(pc.srcSize.x)) {
+        result = min(d0, d2);  // Only left column valid
+    }
+    if (srcCoord.y + 1 >= int(pc.srcSize.y)) {
+        result = min(d0, d1);  // Only top row valid
+    }
+    if (srcCoord.x + 1 >= int(pc.srcSize.x) && srcCoord.y + 1 >= int(pc.srcSize.y)) {
+        result = d0;  // Only single texel valid
+    }
+    
+    imageStore(dstMip, dstCoord, vec4(result));
+}

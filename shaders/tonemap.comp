@@ -1,0 +1,266 @@
+/**
+ * tonemap.comp
+ * 
+ * Final tonemapping pass with color grading.
+ * Supports multiple tonemap operators including ACES.
+ * 
+ * Turn 37-39: Post-processing
+ */
+
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D hdrImage;
+layout(set = 0, binding = 1) uniform sampler2D bloomImage;
+layout(set = 0, binding = 2, rgba8) writeonly uniform image2D outputImage;
+
+layout(set = 0, binding = 3) readonly buffer ExposureBuffer {
+    float bins[256];
+    float averageLuminance;
+    float targetExposure;
+    float currentExposure;
+    float adaptedExposure;
+};
+
+layout(push_constant) uniform PushConstants {
+    // Tonemap settings
+    uint tonemapOperator;     // 0=Linear, 1=Reinhard, 2=ACES, 3=ACESFitted, 4=Uncharted2, 5=AgX
+    float whitePoint;
+    float gamma;
+    float saturation;
+    
+    // Color grading
+    vec4 shadowsColor;        // rgb = tint, a = range
+    vec4 midtonesColor;       // rgb = tint, a = range
+    vec4 highlightsColor;     // rgb = tint, a = range
+    
+    float shadowsWeight;
+    float midtonesWeight;
+    float highlightsWeight;
+    float contrast;
+    
+    // Bloom
+    float bloomStrength;
+    
+    // Vignette
+    float vignetteIntensity;
+    float vignetteRoundness;
+    
+    // Dithering
+    uint enableDithering;
+    uint width;
+    uint height;
+    uint frameIndex;
+} pc;
+
+// Linear to sRGB
+vec3 linearToSRGB(vec3 color) {
+    vec3 sRGB = mix(
+        color * 12.92,
+        1.055 * pow(color, vec3(1.0 / 2.4)) - 0.055,
+        step(vec3(0.0031308), color)
+    );
+    return sRGB;
+}
+
+// Reinhard tonemap
+vec3 tonemapReinhard(vec3 color) {
+    return color / (color + vec3(1.0));
+}
+
+// Reinhard extended with white point
+vec3 tonemapReinhardExtended(vec3 color, float whitePoint) {
+    vec3 numerator = color * (1.0 + color / (whitePoint * whitePoint));
+    return numerator / (1.0 + color);
+}
+
+// ACES approximation (Narkowicz)
+vec3 tonemapACES(vec3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+// ACES Fitted (Stephen Hill)
+vec3 tonemapACESFitted(vec3 color) {
+    // sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
+    mat3 ACESInputMat = mat3(
+        0.59719, 0.07600, 0.02840,
+        0.35458, 0.90834, 0.13383,
+        0.04823, 0.01566, 0.83777
+    );
+    
+    // ODT_SAT => XYZ => D60_2_D65 => sRGB
+    mat3 ACESOutputMat = mat3(
+        1.60475, -0.10208, -0.00327,
+        -0.53108, 1.10813, -0.07276,
+        -0.07367, -0.00605, 1.07602
+    );
+    
+    color = ACESInputMat * color;
+    
+    // RRT
+    vec3 a = color * (color + 0.0245786) - 0.000090537;
+    vec3 b = color * (0.983729 * color + 0.4329510) + 0.238081;
+    color = a / b;
+    
+    color = ACESOutputMat * color;
+    return clamp(color, 0.0, 1.0);
+}
+
+// Uncharted 2 tonemap
+vec3 uncharted2Tonemap(vec3 x) {
+    float A = 0.15;
+    float B = 0.50;
+    float C = 0.10;
+    float D = 0.20;
+    float E = 0.02;
+    float F = 0.30;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+
+vec3 tonemapUncharted2(vec3 color) {
+    float W = 11.2;
+    float exposureBias = 2.0;
+    vec3 curr = uncharted2Tonemap(color * exposureBias);
+    vec3 whiteScale = 1.0 / uncharted2Tonemap(vec3(W));
+    return curr * whiteScale;
+}
+
+// AgX tonemap (new alternative to ACES)
+vec3 agxDefaultContrastApprox(vec3 x) {
+    vec3 x2 = x * x;
+    vec3 x4 = x2 * x2;
+    return + 15.5 * x4 * x2
+           - 40.14 * x4 * x
+           + 31.96 * x4
+           - 6.868 * x2 * x
+           + 0.4298 * x2
+           + 0.1191 * x
+           - 0.00232;
+}
+
+vec3 tonemapAgX(vec3 color) {
+    mat3 agxTransform = mat3(
+        0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+        0.0784335999999992, 0.878468636469772, 0.0784336,
+        0.0792237451477643, 0.0791661274605434, 0.879142973793104
+    );
+    
+    mat3 agxInverse = mat3(
+        1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+        -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+        -0.0990297440797205, -0.0989611768448433, 1.15107367264116
+    );
+    
+    color = agxTransform * max(color, vec3(0.0));
+    color = agxDefaultContrastApprox(color);
+    color = agxInverse * color;
+    
+    return clamp(color, 0.0, 1.0);
+}
+
+// Color grading
+vec3 applyColorGrading(vec3 color) {
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    
+    // Split-toning with smooth transitions
+    float shadowMask = 1.0 - smoothstep(0.0, pc.shadowsColor.a, luma);
+    float highlightMask = smoothstep(1.0 - pc.highlightsColor.a, 1.0, luma);
+    float midtoneMask = 1.0 - shadowMask - highlightMask;
+    midtoneMask = max(midtoneMask, 0.0);
+    
+    vec3 shadowsTint = mix(vec3(1.0), pc.shadowsColor.rgb, pc.shadowsWeight);
+    vec3 midtonesTint = mix(vec3(1.0), pc.midtonesColor.rgb, pc.midtonesWeight);
+    vec3 highlightsTint = mix(vec3(1.0), pc.highlightsColor.rgb, pc.highlightsWeight);
+    
+    color *= shadowsTint * shadowMask + midtonesTint * midtoneMask + highlightsTint * highlightMask;
+    
+    // Contrast
+    color = mix(vec3(0.5), color, pc.contrast);
+    
+    // Saturation
+    vec3 grey = vec3(luma);
+    color = mix(grey, color, pc.saturation);
+    
+    return color;
+}
+
+// Vignette
+float computeVignette(vec2 uv) {
+    vec2 center = uv - 0.5;
+    float dist = length(center * vec2(pc.vignetteRoundness, 1.0));
+    return 1.0 - smoothstep(0.5 - 0.25 * pc.vignetteIntensity, 0.5, dist);
+}
+
+// Simple dither to reduce banding
+vec3 applyDither(vec3 color, uvec2 coord) {
+    // Interleaved gradient noise
+    float noise = fract(52.9829189 * fract(0.06711056 * float(coord.x + pc.frameIndex) + 
+                                           0.00583715 * float(coord.y)));
+    return color + (noise - 0.5) / 255.0;
+}
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= pc.width || gid.y >= pc.height) return;
+    
+    vec2 uv = (vec2(gid) + 0.5) / vec2(pc.width, pc.height);
+    
+    // Sample HDR image
+    vec3 hdr = texture(hdrImage, uv).rgb;
+    
+    // Add bloom
+    vec3 bloom = texture(bloomImage, uv).rgb;
+    hdr += bloom * pc.bloomStrength;
+    
+    // Apply exposure
+    hdr *= adaptedExposure;
+    
+    // Tonemap
+    vec3 color;
+    switch (pc.tonemapOperator) {
+        case 0:  // Linear
+            color = clamp(hdr, 0.0, 1.0);
+            break;
+        case 1:  // Reinhard
+            color = tonemapReinhardExtended(hdr, pc.whitePoint);
+            break;
+        case 2:  // ACES
+            color = tonemapACES(hdr);
+            break;
+        case 3:  // ACES Fitted
+            color = tonemapACESFitted(hdr);
+            break;
+        case 4:  // Uncharted 2
+            color = tonemapUncharted2(hdr);
+            break;
+        case 5:  // AgX
+            color = tonemapAgX(hdr);
+            break;
+        default:
+            color = tonemapACESFitted(hdr);
+    }
+    
+    // Color grading
+    color = applyColorGrading(color);
+    
+    // Vignette
+    color *= computeVignette(uv);
+    
+    // Gamma correction (only if not using sRGB swapchain)
+    if (pc.gamma != 1.0) {
+        color = pow(color, vec3(1.0 / pc.gamma));
+    }
+    
+    // Dither
+    if (pc.enableDithering > 0) {
+        color = applyDither(color, gid);
+    }
+    
+    imageStore(outputImage, ivec2(gid), vec4(color, 1.0));
+}

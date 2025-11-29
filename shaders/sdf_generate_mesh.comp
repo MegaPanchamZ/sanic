@@ -1,0 +1,169 @@
+/**
+ * sdf_generate_mesh.comp
+ * 
+ * GPU-accelerated mesh SDF generation.
+ * Computes signed distance from each voxel to mesh triangles.
+ * 
+ * Turn 22-24: Per-mesh SDF generation
+ */
+
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VertexBuffer {
+    float vertices[];  // xyz positions, stride 3
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IndexBuffer {
+    uint indices[];
+};
+
+// Output SDF volume
+layout(set = 0, binding = 0, r16f) writeonly uniform image3D sdfVolume;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint64_t vertexAddr;
+    uint64_t indexAddr;
+    
+    vec3 boundsMin;
+    float voxelSize;
+    
+    ivec3 resolution;
+    uint triangleCount;
+    
+    float padding;      // Extra distance padding
+    uint pad0, pad1, pad2;
+};
+
+// Point to triangle distance
+// Returns signed distance (negative inside)
+float pointTriangleDistance(vec3 p, vec3 a, vec3 b, vec3 c) {
+    vec3 ba = b - a;
+    vec3 cb = c - b;
+    vec3 ac = a - c;
+    vec3 pa = p - a;
+    vec3 pb = p - b;
+    vec3 pc = p - c;
+    
+    vec3 nor = cross(ba, ac);
+    float area2 = length(nor);
+    nor /= area2;
+    
+    // Check if point projects inside triangle
+    float sba = sign(dot(cross(ba, nor), pa));
+    float scb = sign(dot(cross(cb, nor), pb));
+    float sac = sign(dot(cross(ac, nor), pc));
+    
+    if (sba + scb + sac < 2.0) {
+        // Point projects outside - find closest edge
+        vec3 q;
+        
+        // Edge a-b
+        float t1 = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+        vec3 q1 = a + ba * t1;
+        float d1 = length(p - q1);
+        
+        // Edge b-c
+        float t2 = clamp(dot(pb, cb) / dot(cb, cb), 0.0, 1.0);
+        vec3 q2 = b + cb * t2;
+        float d2 = length(p - q2);
+        
+        // Edge c-a
+        float t3 = clamp(dot(pc, ac) / dot(ac, ac), 0.0, 1.0);
+        vec3 q3 = c + ac * t3;
+        float d3 = length(p - q3);
+        
+        return min(min(d1, d2), d3);
+    } else {
+        // Point projects inside - distance to plane
+        return abs(dot(nor, pa));
+    }
+}
+
+// Compute sign using ray casting
+// Cast ray and count intersections
+float computeSign(vec3 p, VertexBuffer vtx, IndexBuffer idx) {
+    vec3 rayDir = vec3(1.0, 0.0, 0.0);  // X-axis ray
+    int intersections = 0;
+    
+    for (uint i = 0; i < triangleCount; i++) {
+        uint i0 = idx.indices[i * 3 + 0];
+        uint i1 = idx.indices[i * 3 + 1];
+        uint i2 = idx.indices[i * 3 + 2];
+        
+        vec3 a = vec3(vtx.vertices[i0 * 3], vtx.vertices[i0 * 3 + 1], vtx.vertices[i0 * 3 + 2]);
+        vec3 b = vec3(vtx.vertices[i1 * 3], vtx.vertices[i1 * 3 + 1], vtx.vertices[i1 * 3 + 2]);
+        vec3 c = vec3(vtx.vertices[i2 * 3], vtx.vertices[i2 * 3 + 1], vtx.vertices[i2 * 3 + 2]);
+        
+        // Möller-Trumbore intersection
+        vec3 e1 = b - a;
+        vec3 e2 = c - a;
+        vec3 h = cross(rayDir, e2);
+        float det = dot(e1, h);
+        
+        if (abs(det) < 1e-8) continue;
+        
+        float invDet = 1.0 / det;
+        vec3 s = p - a;
+        float u = dot(s, h) * invDet;
+        
+        if (u < 0.0 || u > 1.0) continue;
+        
+        vec3 q = cross(s, e1);
+        float v = dot(rayDir, q) * invDet;
+        
+        if (v < 0.0 || u + v > 1.0) continue;
+        
+        float t = dot(e2, q) * invDet;
+        
+        if (t > 0.001) {  // Intersection in positive ray direction
+            intersections++;
+        }
+    }
+    
+    return (intersections % 2 == 1) ? -1.0 : 1.0;
+}
+
+void main() {
+    ivec3 voxelCoord = ivec3(gl_GlobalInvocationID);
+    
+    if (any(greaterThanEqual(voxelCoord, resolution))) {
+        return;
+    }
+    
+    // Compute voxel center in world space
+    vec3 worldPos = boundsMin + (vec3(voxelCoord) + 0.5) * voxelSize;
+    
+    // Get buffers
+    VertexBuffer vtx = VertexBuffer(vertexAddr);
+    IndexBuffer idx = IndexBuffer(indexAddr);
+    
+    // Find minimum distance to all triangles
+    float minDist = 1e10;
+    
+    for (uint i = 0; i < triangleCount; i++) {
+        uint i0 = idx.indices[i * 3 + 0];
+        uint i1 = idx.indices[i * 3 + 1];
+        uint i2 = idx.indices[i * 3 + 2];
+        
+        vec3 a = vec3(vtx.vertices[i0 * 3], vtx.vertices[i0 * 3 + 1], vtx.vertices[i0 * 3 + 2]);
+        vec3 b = vec3(vtx.vertices[i1 * 3], vtx.vertices[i1 * 3 + 1], vtx.vertices[i1 * 3 + 2]);
+        vec3 c = vec3(vtx.vertices[i2 * 3], vtx.vertices[i2 * 3 + 1], vtx.vertices[i2 * 3 + 2]);
+        
+        float dist = pointTriangleDistance(worldPos, a, b, c);
+        minDist = min(minDist, dist);
+    }
+    
+    // Compute sign
+    float sign = computeSign(worldPos, vtx, idx);
+    
+    // Store signed distance
+    float signedDist = sign * minDist;
+    
+    imageStore(sdfVolume, voxelCoord, vec4(signedDist));
+}

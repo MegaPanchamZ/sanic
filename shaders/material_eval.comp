@@ -1,0 +1,317 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : enable
+
+/**
+ * Deferred Material Evaluation Shader
+ * =====================================
+ * 
+ * Evaluates materials for binned pixels from the visibility buffer.
+ * Uses material-sorted work items for coherent texture access.
+ * 
+ * Features:
+ * - Perspective-correct barycentric interpolation
+ * - Analytic derivatives for texture filtering
+ * - Material-specific shading (PBR, subsurface, etc.)
+ * - Bindless texture sampling
+ */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "cluster_common.glsl"
+
+// Vertex data
+struct Vertex {
+    vec3 position;
+    float pad0;
+    vec3 normal;
+    float pad1;
+    vec2 uv;
+    vec2 pad2;
+};
+
+// Pixel work item
+struct PixelWorkItem {
+    uint packedCoord;       // x | (y << 16)
+    uint triangleId;
+    uint clusterId;
+    uint instanceId;
+};
+
+// Material data
+struct Material {
+    uint albedoTexture;
+    uint normalTexture;
+    uint roughnessMetallicTexture;
+    uint emissiveTexture;
+    
+    vec4 baseColor;
+    float roughness;
+    float metallic;
+    float emissiveStrength;
+    uint flags;
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
+    Cluster clusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer InstanceBuffer {
+    mat4 worldMatrices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VertexBuffer {
+    Vertex vertices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IndexBuffer {
+    uint indices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer PixelWorkBuffer {
+    PixelWorkItem items[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MaterialBuffer {
+    Material materials[];
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    mat4 invViewProj;
+    
+    ClusterBuffer clusterBuffer;
+    InstanceBuffer instanceBuffer;
+    VertexBuffer vertexBuffer;
+    IndexBuffer indexBuffer;
+    PixelWorkBuffer pixelWorkBuffer;
+    MaterialBuffer materialBuffer;
+    
+    uint workItemOffset;
+    uint workItemCount;
+    uint materialId;
+    uint screenWidth;
+    uint screenHeight;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+} pc;
+
+// G-Buffer outputs
+layout(binding = 0, rgba32f) writeonly uniform image2D gbufferPosition;
+layout(binding = 1, rgba16f) writeonly uniform image2D gbufferNormal;
+layout(binding = 2, rgba8) writeonly uniform image2D gbufferAlbedo;
+layout(binding = 3, rgba8) writeonly uniform image2D gbufferMaterial;
+
+// Bindless texture array
+layout(binding = 4) uniform sampler2D textures[];
+
+/**
+ * Transform vertex to clip space, return screen position and clip.w
+ */
+vec4 vertexToClip(vec3 worldPos, mat4 worldMatrix) {
+    return pc.viewProj * worldMatrix * vec4(worldPos, 1.0);
+}
+
+/**
+ * Compute perspective-correct barycentric coordinates
+ * Returns (u, v, w) where u + v + w = 1
+ */
+vec3 computePerspectiveBarycentrics(vec2 p, 
+                                     vec4 clip0, vec4 clip1, vec4 clip2,
+                                     out vec3 ddx, out vec3 ddy) {
+    // Screen-space positions
+    vec2 s0 = (clip0.xy / clip0.w * 0.5 + 0.5) * vec2(pc.screenWidth, pc.screenHeight);
+    vec2 s1 = (clip1.xy / clip1.w * 0.5 + 0.5) * vec2(pc.screenWidth, pc.screenHeight);
+    vec2 s2 = (clip2.xy / clip2.w * 0.5 + 0.5) * vec2(pc.screenWidth, pc.screenHeight);
+    
+    // Compute 2D signed area
+    vec2 v0 = s1 - s0;
+    vec2 v1 = s2 - s0;
+    float area = v0.x * v1.y - v0.y * v1.x;
+    
+    if (abs(area) < 0.0001) {
+        ddx = vec3(0.0);
+        ddy = vec3(0.0);
+        return vec3(1.0, 0.0, 0.0);
+    }
+    
+    float invArea = 1.0 / area;
+    
+    // Barycentric at pixel center
+    vec2 vp = p - s0;
+    float v = (vp.x * v1.y - vp.y * v1.x) * invArea;
+    float w = (v0.x * vp.y - v0.y * vp.x) * invArea;
+    float u = 1.0 - v - w;
+    
+    // 1/w for perspective correction
+    float invW0 = 1.0 / clip0.w;
+    float invW1 = 1.0 / clip1.w;
+    float invW2 = 1.0 / clip2.w;
+    
+    // Perspective-correct interpolation weights
+    float denom = u * invW0 + v * invW1 + w * invW2;
+    float invDenom = 1.0 / denom;
+    
+    vec3 bary;
+    bary.x = u * invW0 * invDenom;
+    bary.y = v * invW1 * invDenom;
+    bary.z = w * invW2 * invDenom;
+    
+    // Compute derivatives for texture filtering
+    // Partial derivatives of barycentric coords w.r.t. screen x and y
+    vec2 dv_ds = vec2(v1.y, -v1.x) * invArea;
+    vec2 dw_ds = vec2(-v0.y, v0.x) * invArea;
+    vec2 du_ds = -dv_ds - dw_ds;
+    
+    // Chain rule for perspective-correct barycentrics
+    float k0 = invW0 * invDenom;
+    float k1 = invW1 * invDenom;
+    float k2 = invW2 * invDenom;
+    
+    ddx = vec3(du_ds.x * k0, dv_ds.x * k1, dw_ds.x * k2);
+    ddy = vec3(du_ds.y * k0, dv_ds.y * k1, dw_ds.y * k2);
+    
+    return bary;
+}
+
+/**
+ * Sample texture with computed gradients
+ */
+vec4 sampleTextureGrad(uint textureIndex, vec2 uv0, vec2 uv1, vec2 uv2,
+                        vec3 bary, vec3 ddx, vec3 ddy) {
+    // Interpolated UV
+    vec2 uv = bary.x * uv0 + bary.y * uv1 + bary.z * uv2;
+    
+    // UV derivatives
+    vec2 duvdx = ddx.x * uv0 + ddx.y * uv1 + ddx.z * uv2;
+    vec2 duvdy = ddy.x * uv0 + ddy.y * uv1 + ddy.z * uv2;
+    
+    return textureGrad(textures[nonuniformEXT(textureIndex)], uv, duvdx, duvdy);
+}
+
+/**
+ * Compute TBN matrix from triangle vertices and UVs
+ * This replaces dFdx/dFdy which aren't available in compute shaders
+ */
+mat3 computeTBNFromTriangle(vec3 p0, vec3 p1, vec3 p2, 
+                            vec2 uv0, vec2 uv1, vec2 uv2,
+                            vec3 worldNormal) {
+    // Edge vectors
+    vec3 e1 = p1 - p0;
+    vec3 e2 = p2 - p0;
+    
+    // UV deltas
+    vec2 duv1 = uv1 - uv0;
+    vec2 duv2 = uv2 - uv0;
+    
+    // Compute tangent and bitangent
+    float r = 1.0 / (duv1.x * duv2.y - duv1.y * duv2.x + 0.0001);
+    
+    vec3 tangent = normalize((e1 * duv2.y - e2 * duv1.y) * r);
+    vec3 bitangent = normalize((e2 * duv1.x - e1 * duv2.x) * r);
+    
+    // Re-orthogonalize with Gram-Schmidt
+    tangent = normalize(tangent - worldNormal * dot(worldNormal, tangent));
+    bitangent = cross(worldNormal, tangent);
+    
+    return mat3(tangent, bitangent, worldNormal);
+}
+
+void main() {
+    uint workIdx = gl_GlobalInvocationID.x;
+    
+    if (workIdx >= pc.workItemCount) {
+        return;
+    }
+    
+    // Load work item
+    PixelWorkItem item = pc.pixelWorkBuffer.items[pc.workItemOffset + workIdx];
+    
+    uvec2 pixelCoord = uvec2(item.packedCoord & 0xFFFF, item.packedCoord >> 16);
+    uint triangleId = item.triangleId;
+    uint clusterId = item.clusterId;
+    uint instanceId = item.instanceId;
+    
+    // Load cluster and instance data
+    Cluster cluster = pc.clusterBuffer.clusters[clusterId];
+    mat4 worldMatrix = pc.instanceBuffer.worldMatrices[instanceId];
+    mat3 normalMatrix = transpose(inverse(mat3(worldMatrix)));
+    
+    // Load triangle vertices
+    uint baseIndex = cluster.geometry.triangleOffset + triangleId * 3;
+    uint i0 = pc.indexBuffer.indices[baseIndex + 0];
+    uint i1 = pc.indexBuffer.indices[baseIndex + 1];
+    uint i2 = pc.indexBuffer.indices[baseIndex + 2];
+    
+    Vertex v0 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i0];
+    Vertex v1 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i1];
+    Vertex v2 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i2];
+    
+    // Transform to clip space
+    vec4 clip0 = vertexToClip(v0.position, worldMatrix);
+    vec4 clip1 = vertexToClip(v1.position, worldMatrix);
+    vec4 clip2 = vertexToClip(v2.position, worldMatrix);
+    
+    // Compute perspective-correct barycentrics with derivatives
+    vec2 pixelCenter = vec2(pixelCoord) + 0.5;
+    vec3 ddx, ddy;
+    vec3 bary = computePerspectiveBarycentrics(pixelCenter, clip0, clip1, clip2, ddx, ddy);
+    
+    // Interpolate world position
+    vec3 worldPos = bary.x * (worldMatrix * vec4(v0.position, 1.0)).xyz +
+                    bary.y * (worldMatrix * vec4(v1.position, 1.0)).xyz +
+                    bary.z * (worldMatrix * vec4(v2.position, 1.0)).xyz;
+    
+    // Interpolate and normalize normal
+    vec3 localNormal = bary.x * v0.normal + bary.y * v1.normal + bary.z * v2.normal;
+    vec3 worldNormal = normalize(normalMatrix * localNormal);
+    
+    // Interpolate UVs
+    vec2 uv = bary.x * v0.uv + bary.y * v1.uv + bary.z * v2.uv;
+    
+    // Load material
+    Material mat = pc.materialBuffer.materials[pc.materialId];
+    
+    // Sample textures with proper filtering
+    vec3 albedo = mat.baseColor.rgb;
+    if (mat.albedoTexture != 0xFFFFFFFF) {
+        vec4 texColor = sampleTextureGrad(mat.albedoTexture, v0.uv, v1.uv, v2.uv, bary, ddx, ddy);
+        albedo *= texColor.rgb;
+    }
+    
+    // Normal mapping
+    if (mat.normalTexture != 0xFFFFFFFF) {
+        // Compute world-space vertex positions
+        vec3 wp0 = (worldMatrix * vec4(v0.position, 1.0)).xyz;
+        vec3 wp1 = (worldMatrix * vec4(v1.position, 1.0)).xyz;
+        vec3 wp2 = (worldMatrix * vec4(v2.position, 1.0)).xyz;
+        
+        mat3 TBN = computeTBNFromTriangle(wp0, wp1, wp2, v0.uv, v1.uv, v2.uv, worldNormal);
+        vec3 tangentNormal = sampleTextureGrad(mat.normalTexture, v0.uv, v1.uv, v2.uv, bary, ddx, ddy).xyz;
+        tangentNormal = tangentNormal * 2.0 - 1.0;
+        worldNormal = normalize(TBN * tangentNormal);
+    }
+    
+    // Roughness/Metallic
+    float roughness = mat.roughness;
+    float metallic = mat.metallic;
+    if (mat.roughnessMetallicTexture != 0xFFFFFFFF) {
+        vec4 rmTex = sampleTextureGrad(mat.roughnessMetallicTexture, v0.uv, v1.uv, v2.uv, bary, ddx, ddy);
+        roughness *= rmTex.g;
+        metallic *= rmTex.b;
+    }
+    
+    // Compute depth from clip position
+    vec4 clipPos = pc.viewProj * vec4(worldPos, 1.0);
+    float depth = clipPos.z / clipPos.w;
+    
+    // Write G-Buffer
+    imageStore(gbufferPosition, ivec2(pixelCoord), vec4(worldPos, depth));
+    imageStore(gbufferNormal, ivec2(pixelCoord), vec4(worldNormal * 0.5 + 0.5, 1.0));
+    imageStore(gbufferAlbedo, ivec2(pixelCoord), vec4(albedo, 1.0));
+    imageStore(gbufferMaterial, ivec2(pixelCoord), vec4(roughness, metallic, 1.0, float(pc.materialId) / 255.0));
+}

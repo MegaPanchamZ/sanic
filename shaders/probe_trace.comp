@@ -1,0 +1,285 @@
+/**
+ * probe_trace.comp
+ * 
+ * Traces rays from screen probes to gather radiance.
+ * Uses importance sampling and SDF acceleration.
+ * 
+ * Turn 25-27: Screen probe ray tracing
+ */
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_EXT_buffer_reference : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct ScreenProbe {
+    vec4 positionDepth;
+    vec4 normalRadius;
+    ivec4 atlasInfo;
+};
+
+struct Light {
+    vec4 positionType;      // xyz = position, w = type
+    vec4 colorIntensity;    // xyz = color, w = intensity
+    vec4 directionRange;    // xyz = direction, w = range
+    vec4 spotParams;        // x = inner cone, y = outer cone
+};
+
+// Probe buffer
+layout(std430, set = 0, binding = 0) readonly buffer ProbeBuffer {
+    ScreenProbe probes[];
+};
+
+// G-Buffer inputs
+layout(set = 0, binding = 1) uniform sampler2D gbufferAlbedo;
+layout(set = 0, binding = 2) uniform sampler2D gbufferNormal;
+layout(set = 0, binding = 3) uniform sampler2D gbufferDepth;
+
+// SDF cascade for tracing
+layout(set = 0, binding = 4) uniform sampler3D sdfCascade0;
+layout(set = 0, binding = 5) uniform sampler3D sdfCascade1;
+layout(set = 0, binding = 6) uniform sampler3D sdfCascade2;
+layout(set = 0, binding = 7) uniform sampler3D sdfCascade3;
+
+// Surface cache for radiance lookup
+layout(set = 0, binding = 8) uniform sampler2D surfaceCacheAtlas;
+
+// Lights
+layout(std430, set = 0, binding = 9) readonly buffer LightBuffer {
+    Light lights[];
+};
+
+// Output radiance atlas
+layout(rgba16f, set = 0, binding = 10) uniform image2D probeAtlas;
+
+// Output depth atlas
+layout(r16f, set = 0, binding = 11) uniform image2D probeDepthAtlas;
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 cascadeExtents[4];
+    uint probeCount;
+    uint lightCount;
+    uint raysPerProbe;
+    uint frameIndex;
+    float maxDistance;
+    float skyIntensity;
+    float padding1;
+    float padding2;
+};
+
+// Octahedral encoding
+vec2 octEncode(vec3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * (step(0.0, n.xy) * 2.0 - 1.0);
+    }
+    return n.xy * 0.5 + 0.5;
+}
+
+vec3 octDecode(vec2 f) {
+    f = f * 2.0 - 1.0;
+    vec3 n = vec3(f.xy, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-n.z, 0.0);
+    n.xy += (step(0.0, n.xy) * 2.0 - 1.0) * -t;
+    return normalize(n);
+}
+
+// Random functions
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+vec2 fibonacci2D(uint i, uint n) {
+    float phi = 1.61803398875;
+    return fract(vec2(float(i) / float(n), float(i) * phi));
+}
+
+// Cosine-weighted hemisphere sampling
+vec3 cosineSampleHemisphere(vec2 u, vec3 normal) {
+    float r = sqrt(u.x);
+    float theta = 2.0 * 3.14159265 * u.y;
+    
+    vec3 tangent = abs(normal.y) < 0.999 
+        ? normalize(cross(normal, vec3(0.0, 1.0, 0.0)))
+        : normalize(cross(normal, vec3(1.0, 0.0, 0.0)));
+    vec3 bitangent = cross(normal, tangent);
+    
+    float x = r * cos(theta);
+    float y = r * sin(theta);
+    float z = sqrt(1.0 - u.x);
+    
+    return normalize(tangent * x + bitangent * y + normal * z);
+}
+
+// Sample SDF cascade
+float sampleSDF(vec3 worldPos, out uint cascadeLevel) {
+    for (uint i = 0; i < 4; i++) {
+        vec3 localPos = (worldPos - cascadeExtents[i].xyz) / cascadeExtents[i].w;
+        if (all(greaterThan(localPos, vec3(-1.0))) && all(lessThan(localPos, vec3(1.0)))) {
+            vec3 uvw = localPos * 0.5 + 0.5;
+            cascadeLevel = i;
+            
+            if (i == 0) return texture(sdfCascade0, uvw).r;
+            if (i == 1) return texture(sdfCascade1, uvw).r;
+            if (i == 2) return texture(sdfCascade2, uvw).r;
+            return texture(sdfCascade3, uvw).r;
+        }
+    }
+    cascadeLevel = 3;
+    return maxDistance;
+}
+
+// Trace ray through SDF
+bool traceRaySDF(vec3 origin, vec3 direction, float maxDist, out vec3 hitPos, out float hitDist) {
+    float t = 0.01;
+    const int maxSteps = 64;
+    const float epsilon = 0.001;
+    
+    for (int i = 0; i < maxSteps && t < maxDist; i++) {
+        vec3 pos = origin + direction * t;
+        
+        uint cascadeLevel;
+        float dist = sampleSDF(pos, cascadeLevel);
+        
+        if (dist < epsilon) {
+            hitPos = pos;
+            hitDist = t;
+            return true;
+        }
+        
+        // Adaptive step size based on cascade
+        float stepScale = 1.0 + float(cascadeLevel) * 0.5;
+        t += dist * 0.9 * stepScale;
+    }
+    
+    hitPos = origin + direction * maxDist;
+    hitDist = maxDist;
+    return false;
+}
+
+// Sample surface cache at hit position
+vec3 sampleSurfaceCache(vec3 worldPos, vec3 normal) {
+    // Simplified - in real implementation, would look up mesh cards
+    // For now, use a fallback based on normal direction
+    vec2 atlasUV = octEncode(normal);
+    return texture(surfaceCacheAtlas, atlasUV).rgb;
+}
+
+// Evaluate direct lighting at hit point
+vec3 evaluateDirectLighting(vec3 hitPos, vec3 normal, vec3 albedo) {
+    vec3 lighting = vec3(0.0);
+    
+    for (uint i = 0; i < min(lightCount, 16u); i++) {
+        Light light = lights[i];
+        
+        vec3 L;
+        float attenuation;
+        
+        if (light.positionType.w < 0.5) {
+            // Directional
+            L = -light.directionRange.xyz;
+            attenuation = 1.0;
+        } else {
+            // Point/spot
+            vec3 toLight = light.positionType.xyz - hitPos;
+            float dist = length(toLight);
+            L = toLight / dist;
+            
+            float range = light.directionRange.w;
+            attenuation = 1.0 - smoothstep(range * 0.7, range, dist);
+            attenuation *= 1.0 / (1.0 + dist * dist * 0.01);
+        }
+        
+        float NdotL = max(dot(normal, L), 0.0);
+        lighting += albedo * light.colorIntensity.rgb * light.colorIntensity.w * NdotL * attenuation;
+    }
+    
+    return lighting;
+}
+
+void main() {
+    uvec2 probeTexel = gl_GlobalInvocationID.xy;
+    
+    // Each 8x8 block is one probe
+    uint probeIndex = probeTexel.x / 8 + (probeTexel.y / 8) * 256; // Assuming 256 probes per row in atlas
+    uvec2 localTexel = probeTexel % 8;
+    
+    if (probeIndex >= probeCount) return;
+    
+    ScreenProbe probe = probes[probeIndex];
+    
+    // Skip invalid probes
+    if (probe.atlasInfo.z == 0) return;
+    
+    vec3 probePos = probe.positionDepth.xyz;
+    vec3 probeNormal = probe.normalRadius.xyz;
+    
+    // Convert texel to direction using octahedral encoding
+    vec2 octUV = (vec2(localTexel) + 0.5) / 8.0;
+    vec3 direction = octDecode(octUV);
+    
+    // Rotate direction to align with probe normal
+    // Build TBN from normal
+    vec3 up = abs(probeNormal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, probeNormal));
+    vec3 bitangent = cross(probeNormal, tangent);
+    
+    // Apply importance sampling jitter
+    vec2 jitter = fibonacci2D(frameIndex % 64, 64);
+    vec3 sampledDir = cosineSampleHemisphere(
+        fract(octUV + jitter * 0.125),
+        probeNormal
+    );
+    
+    // Blend between uniform and importance-sampled direction
+    direction = normalize(mix(direction, sampledDir, 0.5));
+    
+    // Skip directions facing away from surface
+    if (dot(direction, probeNormal) < 0.0) {
+        direction = reflect(direction, probeNormal);
+    }
+    
+    // Trace ray
+    vec3 radiance = vec3(0.0);
+    float hitDepth = maxDistance;
+    
+    vec3 hitPos;
+    float hitDist;
+    
+    if (traceRaySDF(probePos + probeNormal * 0.01, direction, maxDistance, hitPos, hitDist)) {
+        // Hit something - sample surface cache or compute lighting
+        
+        // Approximate normal from SDF gradient
+        uint cascadeLevel;
+        float eps = 0.01;
+        vec3 gradient = vec3(
+            sampleSDF(hitPos + vec3(eps, 0.0, 0.0), cascadeLevel) - sampleSDF(hitPos - vec3(eps, 0.0, 0.0), cascadeLevel),
+            sampleSDF(hitPos + vec3(0.0, eps, 0.0), cascadeLevel) - sampleSDF(hitPos - vec3(0.0, eps, 0.0), cascadeLevel),
+            sampleSDF(hitPos + vec3(0.0, 0.0, eps), cascadeLevel) - sampleSDF(hitPos - vec3(0.0, 0.0, eps), cascadeLevel)
+        );
+        vec3 hitNormal = normalize(gradient);
+        
+        // Get albedo from surface cache
+        vec3 hitAlbedo = sampleSurfaceCache(hitPos, hitNormal);
+        
+        // Evaluate direct lighting
+        radiance = evaluateDirectLighting(hitPos, hitNormal, hitAlbedo);
+        hitDepth = hitDist;
+    } else {
+        // Miss - sample sky
+        float skyGradient = direction.y * 0.5 + 0.5;
+        vec3 skyColor = mix(vec3(0.3, 0.4, 0.5), vec3(0.5, 0.7, 1.0), skyGradient);
+        radiance = skyColor * skyIntensity;
+        hitDepth = maxDistance;
+    }
+    
+    // Store results
+    ivec2 atlasCoord = ivec2(probeTexel);
+    imageStore(probeAtlas, atlasCoord, vec4(radiance, 1.0));
+    imageStore(probeDepthAtlas, atlasCoord, vec4(hitDepth));
+}

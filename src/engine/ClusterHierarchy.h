@@ -61,9 +61,9 @@ struct ClusterGeometry {
     uint32_t vertexOffset;      // Offset into vertex buffer (for attribute fetch)
     uint32_t triangleOffset;    // Offset into triangle buffer
     
-    uint32_t materialId;        // Material index for shading
+    uint32_t triangleCount;     // Number of triangles in this cluster
     uint32_t flags;             // Cluster flags (two-sided, masked, etc.)
-    uint32_t instanceDataOffset;// Per-instance data offset
+    uint32_t materialId;        // Material index for shading
     uint32_t padding;           // Padding to 32 bytes
 };
 static_assert(sizeof(ClusterGeometry) == 32, "ClusterGeometry must be 32 bytes for GPU alignment");

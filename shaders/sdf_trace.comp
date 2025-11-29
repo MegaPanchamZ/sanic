@@ -1,0 +1,253 @@
+/**
+ * sdf_trace.comp
+ * 
+ * SDF sphere tracing for ray tracing fallback.
+ * Used when hardware RT is unavailable or for soft shadows/AO.
+ * 
+ * Turn 22-24: SDF ray tracing
+ */
+
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Global SDF cascades
+layout(set = 0, binding = 0) uniform sampler3D sdfCascade0;
+layout(set = 0, binding = 1) uniform sampler3D sdfCascade1;
+layout(set = 0, binding = 2) uniform sampler3D sdfCascade2;
+layout(set = 0, binding = 3) uniform sampler3D sdfCascade3;
+
+// G-Buffer inputs
+layout(set = 0, binding = 4) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 5) uniform sampler2D normalBuffer;
+
+// Output
+layout(set = 0, binding = 6, rgba16f) writeonly uniform image2D traceOutput;
+
+// Cascade info
+struct CascadeInfo {
+    vec4 centerExtent;  // xyz = center, w = halfExtent
+    float voxelSize;
+    float pad0, pad1, pad2;
+};
+
+layout(std140, set = 1, binding = 0) uniform CascadeBuffer {
+    CascadeInfo cascades[4];
+};
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    mat4 invViewProj;
+    mat4 invView;
+    
+    vec2 screenSize;
+    vec2 invScreenSize;
+    
+    vec3 lightDir;          // For shadow tracing
+    float maxDistance;
+    
+    uint maxSteps;
+    uint traceMode;         // 0 = shadow, 1 = AO, 2 = reflection
+    float shadowSoftness;
+    float aoRadius;
+};
+
+// Sample SDF at world position, using appropriate cascade
+float sampleGlobalSDF(vec3 worldPos) {
+    // Find appropriate cascade
+    for (int i = 0; i < 4; i++) {
+        vec3 center = cascades[i].centerExtent.xyz;
+        float extent = cascades[i].centerExtent.w;
+        
+        vec3 localPos = worldPos - center;
+        
+        if (all(lessThan(abs(localPos), vec3(extent)))) {
+            // Inside this cascade
+            vec3 uvw = (localPos / extent) * 0.5 + 0.5;
+            
+            float dist;
+            if (i == 0) dist = texture(sdfCascade0, uvw).r;
+            else if (i == 1) dist = texture(sdfCascade1, uvw).r;
+            else if (i == 2) dist = texture(sdfCascade2, uvw).r;
+            else dist = texture(sdfCascade3, uvw).r;
+            
+            return dist;
+        }
+    }
+    
+    return maxDistance;  // Outside all cascades
+}
+
+// Reconstruct world position
+vec3 reconstructWorldPos(vec2 uv, float depth) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = invViewProj * clipPos;
+    return worldPos.xyz / worldPos.w;
+}
+
+// Sphere trace for hard shadows
+float traceShadow(vec3 origin, vec3 dir, float maxDist) {
+    float t = 0.01;  // Bias away from surface
+    
+    for (uint i = 0; i < maxSteps && t < maxDist; i++) {
+        vec3 pos = origin + dir * t;
+        float dist = sampleGlobalSDF(pos);
+        
+        if (dist < 0.001) {
+            return 0.0;  // Hit
+        }
+        
+        t += dist;
+    }
+    
+    return 1.0;  // No hit
+}
+
+// Soft shadow using penumbra estimation
+float traceSoftShadow(vec3 origin, vec3 dir, float maxDist, float softness) {
+    float t = 0.01;
+    float shadow = 1.0;
+    float prevDist = 1e10;
+    
+    for (uint i = 0; i < maxSteps && t < maxDist; i++) {
+        vec3 pos = origin + dir * t;
+        float dist = sampleGlobalSDF(pos);
+        
+        if (dist < 0.001) {
+            return 0.0;  // Hard hit
+        }
+        
+        // Penumbra estimation
+        float y = dist * dist / (2.0 * prevDist);
+        float d = sqrt(dist * dist - y * y);
+        shadow = min(shadow, softness * d / max(0.001, t - y));
+        
+        prevDist = dist;
+        t += dist;
+    }
+    
+    return clamp(shadow, 0.0, 1.0);
+}
+
+// Ambient occlusion using multiple directions
+float traceAO(vec3 origin, vec3 normal) {
+    float ao = 0.0;
+    const int numSamples = 8;
+    
+    // Create tangent frame
+    vec3 tangent = abs(normal.y) < 0.999 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    tangent = normalize(tangent - normal * dot(tangent, normal));
+    vec3 bitangent = cross(normal, tangent);
+    
+    // Golden angle for uniform distribution
+    float goldenAngle = 2.39996323;
+    
+    for (int i = 0; i < numSamples; i++) {
+        // Fibonacci spiral on hemisphere
+        float fi = float(i) + 0.5;
+        float theta = fi * goldenAngle;
+        float cosTheta = 1.0 - fi / float(numSamples);
+        float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+        
+        vec3 localDir = vec3(
+            sinTheta * cos(theta),
+            sinTheta * sin(theta),
+            cosTheta
+        );
+        
+        // Transform to world space
+        vec3 worldDir = tangent * localDir.x + bitangent * localDir.y + normal * localDir.z;
+        
+        // Trace
+        float t = 0.01;
+        float sampleAO = 1.0;
+        
+        for (uint j = 0; j < maxSteps / 2 && t < aoRadius; j++) {
+            vec3 pos = origin + worldDir * t;
+            float dist = sampleGlobalSDF(pos);
+            
+            if (dist < 0.001) {
+                sampleAO = t / aoRadius;  // Occluded, fade based on distance
+                break;
+            }
+            
+            t += dist;
+        }
+        
+        ao += sampleAO * cosTheta;  // Cosine weight
+    }
+    
+    ao /= float(numSamples) * 0.5;  // Normalize
+    return ao;
+}
+
+// Reflection trace
+vec4 traceReflection(vec3 origin, vec3 dir, float maxDist) {
+    float t = 0.01;
+    
+    for (uint i = 0; i < maxSteps && t < maxDist; i++) {
+        vec3 pos = origin + dir * t;
+        float dist = sampleGlobalSDF(pos);
+        
+        if (dist < 0.001) {
+            // Hit - estimate normal from SDF gradient
+            float eps = 0.01;
+            vec3 normal = normalize(vec3(
+                sampleGlobalSDF(pos + vec3(eps, 0, 0)) - sampleGlobalSDF(pos - vec3(eps, 0, 0)),
+                sampleGlobalSDF(pos + vec3(0, eps, 0)) - sampleGlobalSDF(pos - vec3(0, eps, 0)),
+                sampleGlobalSDF(pos + vec3(0, 0, eps)) - sampleGlobalSDF(pos - vec3(0, 0, eps))
+            ));
+            
+            // Return hit position and normal (for later shading)
+            return vec4(pos, 1.0);
+        }
+        
+        t += dist;
+    }
+    
+    return vec4(0.0);  // No hit
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) * invScreenSize;
+    
+    float depth = texture(depthBuffer, uv).r;
+    
+    // Skip sky
+    if (depth >= 1.0) {
+        imageStore(traceOutput, pixelCoord, vec4(1.0, 1.0, 0.0, 0.0));
+        return;
+    }
+    
+    vec3 worldPos = reconstructWorldPos(uv, depth);
+    vec3 normal = normalize(texture(normalBuffer, uv).xyz * 2.0 - 1.0);
+    
+    vec4 result = vec4(0.0);
+    
+    if (traceMode == 0) {
+        // Shadow tracing
+        float shadow = traceSoftShadow(worldPos + normal * 0.05, lightDir, maxDistance, shadowSoftness);
+        result = vec4(shadow, shadow, shadow, 1.0);
+    }
+    else if (traceMode == 1) {
+        // Ambient occlusion
+        float ao = traceAO(worldPos + normal * 0.02, normal);
+        result = vec4(ao, ao, ao, 1.0);
+    }
+    else if (traceMode == 2) {
+        // Reflection
+        vec3 viewPos = (invView * vec4(0, 0, 0, 1)).xyz;
+        vec3 viewDir = normalize(worldPos - viewPos);
+        vec3 reflectDir = reflect(viewDir, normal);
+        
+        result = traceReflection(worldPos + normal * 0.05, reflectDir, maxDistance);
+    }
+    
+    imageStore(traceOutput, pixelCoord, result);
+}

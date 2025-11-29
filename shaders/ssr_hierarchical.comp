@@ -1,0 +1,290 @@
+/**
+ * ssr_hierarchical.comp
+ * 
+ * Hierarchical screen-space ray marching for reflections.
+ * Uses Hi-Z buffer for efficient intersection testing.
+ * 
+ * Turn 19-21: Enhanced screen-space tracing
+ */
+
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Input textures
+layout(set = 0, binding = 0) uniform sampler2D colorBuffer;
+layout(set = 0, binding = 1) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 2) uniform sampler2D normalBuffer;
+layout(set = 0, binding = 3) uniform sampler2D materialBuffer;  // roughness in R channel
+layout(set = 0, binding = 4) uniform sampler2D hizBuffer;       // Hierarchical Z
+
+// Output
+layout(set = 0, binding = 5, rgba16f) writeonly uniform image2D reflectionOutput;
+layout(set = 0, binding = 6, rg16f) writeonly uniform image2D hitBuffer;  // xy = hit UV
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    mat4 invViewProj;
+    mat4 view;
+    mat4 invView;
+    mat4 proj;
+    
+    vec2 screenSize;
+    vec2 invScreenSize;
+    
+    float maxDistance;      // Max ray distance in world units
+    float thickness;        // Depth threshold for hit detection
+    float stride;           // Initial step size
+    float jitter;           // Temporal jitter
+    
+    uint maxSteps;
+    uint hizMipLevels;
+    float roughnessThreshold;  // Skip SSR above this roughness
+    float fadeStart;        // Screen edge fade start
+};
+
+// Reconstruct world position from depth
+vec3 reconstructWorldPos(vec2 uv, float depth) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = invViewProj * clipPos;
+    return worldPos.xyz / worldPos.w;
+}
+
+// Project world position to screen UV + depth
+vec3 projectToScreen(vec3 worldPos) {
+    vec4 clipPos = viewProj * vec4(worldPos, 1.0);
+    vec3 ndc = clipPos.xyz / clipPos.w;
+    return vec3(ndc.xy * 0.5 + 0.5, ndc.z);
+}
+
+// Sample Hi-Z at a mip level
+float sampleHiZ(vec2 uv, int mipLevel) {
+    return textureLod(hizBuffer, uv, float(mipLevel)).r;
+}
+
+// Hierarchical ray march
+// Returns: hit = true, hitUV = screen UV of hit point
+bool hierarchicalRayMarch(vec3 rayOrigin, vec3 rayDir, out vec2 hitUV, out float hitDepth) {
+    // Transform ray to screen space
+    vec3 rayEnd = rayOrigin + rayDir * maxDistance;
+    
+    vec3 ssStart = projectToScreen(rayOrigin);
+    vec3 ssEnd = projectToScreen(rayEnd);
+    
+    // Check if ray goes behind camera
+    if (ssEnd.z < 0.0 || ssStart.z > 1.0) {
+        return false;
+    }
+    
+    // Clip ray to screen bounds
+    vec3 ssDir = ssEnd - ssStart;
+    float tMin = 0.0;
+    float tMax = 1.0;
+    
+    // Clip X
+    if (abs(ssDir.x) > 1e-6) {
+        float t0 = (0.0 - ssStart.x) / ssDir.x;
+        float t1 = (1.0 - ssStart.x) / ssDir.x;
+        if (ssDir.x < 0.0) { float tmp = t0; t0 = t1; t1 = tmp; }
+        tMin = max(tMin, t0);
+        tMax = min(tMax, t1);
+    }
+    
+    // Clip Y
+    if (abs(ssDir.y) > 1e-6) {
+        float t0 = (0.0 - ssStart.y) / ssDir.y;
+        float t1 = (1.0 - ssStart.y) / ssDir.y;
+        if (ssDir.y < 0.0) { float tmp = t0; t0 = t1; t1 = tmp; }
+        tMin = max(tMin, t0);
+        tMax = min(tMax, t1);
+    }
+    
+    if (tMin > tMax) {
+        return false;
+    }
+    
+    // Start marching
+    vec3 ssPos = ssStart + ssDir * tMin;
+    vec3 ssStep = ssDir * stride * invScreenSize.x;
+    
+    // Hierarchical stepping
+    int mipLevel = int(hizMipLevels) - 1;
+    float stepScale = 1.0;
+    
+    for (uint i = 0; i < maxSteps; i++) {
+        // Check bounds
+        if (ssPos.x < 0.0 || ssPos.x > 1.0 || 
+            ssPos.y < 0.0 || ssPos.y > 1.0 ||
+            ssPos.z < 0.0 || ssPos.z > 1.0) {
+            return false;
+        }
+        
+        // Sample Hi-Z at current mip
+        float sceneDepth = sampleHiZ(ssPos.xy, mipLevel);
+        
+        // Check intersection
+        float depthDiff = ssPos.z - sceneDepth;
+        
+        if (depthDiff > 0.0 && depthDiff < thickness) {
+            // Potential hit - refine at lower mip
+            if (mipLevel > 0) {
+                mipLevel--;
+                stepScale *= 0.5;
+                ssStep *= 0.5;
+                continue;
+            }
+            
+            // Found hit at mip 0
+            hitUV = ssPos.xy;
+            hitDepth = sceneDepth;
+            return true;
+        }
+        
+        // No intersection - step forward
+        if (depthDiff < 0.0 && mipLevel < int(hizMipLevels) - 1) {
+            // Can step faster with higher mip
+            mipLevel = min(mipLevel + 1, int(hizMipLevels) - 1);
+            stepScale *= 2.0;
+            ssStep *= 2.0;
+        }
+        
+        ssPos += ssStep;
+    }
+    
+    return false;
+}
+
+// Linear ray march fallback for close-range
+bool linearRayMarch(vec3 rayOrigin, vec3 rayDir, out vec2 hitUV, out float hitDepth) {
+    vec3 rayEnd = rayOrigin + rayDir * maxDistance * 0.1;  // Short range
+    
+    vec3 ssStart = projectToScreen(rayOrigin);
+    vec3 ssEnd = projectToScreen(rayEnd);
+    vec3 ssDir = ssEnd - ssStart;
+    
+    float stepCount = max(abs(ssDir.x), abs(ssDir.y)) * max(screenSize.x, screenSize.y);
+    stepCount = min(stepCount, 64.0);
+    
+    if (stepCount < 1.0) return false;
+    
+    vec3 ssStep = ssDir / stepCount;
+    vec3 ssPos = ssStart + ssStep * jitter;
+    
+    for (int i = 0; i < int(stepCount); i++) {
+        if (ssPos.x < 0.0 || ssPos.x > 1.0 || 
+            ssPos.y < 0.0 || ssPos.y > 1.0) {
+            return false;
+        }
+        
+        float sceneDepth = texture(depthBuffer, ssPos.xy).r;
+        float depthDiff = ssPos.z - sceneDepth;
+        
+        if (depthDiff > 0.0 && depthDiff < thickness * 0.5) {
+            hitUV = ssPos.xy;
+            hitDepth = sceneDepth;
+            return true;
+        }
+        
+        ssPos += ssStep;
+    }
+    
+    return false;
+}
+
+// Screen edge fade
+float computeEdgeFade(vec2 uv) {
+    vec2 fadeRange = vec2(fadeStart);
+    vec2 d = min(uv, 1.0 - uv);
+    vec2 fade = smoothstep(vec2(0.0), fadeRange, d);
+    return fade.x * fade.y;
+}
+
+// Fresnel for reflection strength
+float fresnelSchlick(float cosTheta, float F0) {
+    return F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) * invScreenSize;
+    
+    // Read G-Buffer
+    float depth = texture(depthBuffer, uv).r;
+    
+    // Skip sky
+    if (depth >= 1.0) {
+        imageStore(reflectionOutput, pixelCoord, vec4(0.0));
+        imageStore(hitBuffer, pixelCoord, vec4(-1.0));
+        return;
+    }
+    
+    vec4 materialData = texture(materialBuffer, uv);
+    float roughness = materialData.r;
+    float metallic = materialData.g;
+    
+    // Skip rough surfaces
+    if (roughness > roughnessThreshold) {
+        imageStore(reflectionOutput, pixelCoord, vec4(0.0));
+        imageStore(hitBuffer, pixelCoord, vec4(-1.0));
+        return;
+    }
+    
+    // Reconstruct position and normal
+    vec3 worldPos = reconstructWorldPos(uv, depth);
+    vec3 normal = texture(normalBuffer, uv).xyz * 2.0 - 1.0;
+    normal = normalize(normal);
+    
+    // Compute view direction
+    vec3 viewPos = (invView * vec4(0, 0, 0, 1)).xyz;
+    vec3 viewDir = normalize(worldPos - viewPos);
+    
+    // Compute reflection direction
+    vec3 reflectDir = reflect(viewDir, normal);
+    
+    // Ray march
+    vec2 hitUV;
+    float hitDepth;
+    bool hit = false;
+    
+    // Try hierarchical march first
+    hit = hierarchicalRayMarch(worldPos, reflectDir, hitUV, hitDepth);
+    
+    // Fallback to linear for close-range
+    if (!hit) {
+        hit = linearRayMarch(worldPos, reflectDir, hitUV, hitDepth);
+    }
+    
+    vec4 reflection = vec4(0.0);
+    vec2 hitData = vec2(-1.0);
+    
+    if (hit) {
+        // Sample color at hit point
+        reflection.rgb = texture(colorBuffer, hitUV).rgb;
+        reflection.a = 1.0;
+        
+        // Apply edge fade
+        float edgeFade = computeEdgeFade(hitUV);
+        reflection.a *= edgeFade;
+        
+        // Apply roughness fade
+        float roughnessFade = 1.0 - smoothstep(0.0, roughnessThreshold, roughness);
+        reflection.a *= roughnessFade;
+        
+        // Apply Fresnel
+        float NdotV = max(0.0, dot(normal, -viewDir));
+        float F0 = mix(0.04, 1.0, metallic);
+        float fresnel = fresnelSchlick(NdotV, F0);
+        reflection.a *= fresnel;
+        
+        hitData = hitUV;
+    }
+    
+    imageStore(reflectionOutput, pixelCoord, reflection);
+    imageStore(hitBuffer, pixelCoord, vec4(hitData, 0.0, 0.0));
+}

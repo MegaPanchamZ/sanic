@@ -1,0 +1,289 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+
+/**
+ * Triangle Binning Shader
+ * =======================
+ * 
+ * Classifies triangles for software vs hardware rasterization based on
+ * screen-space size. Small triangles (< threshold pixels) go to SW,
+ * larger triangles go to HW mesh shader pipeline.
+ * 
+ * Threshold is typically 16-32 pixels² (4-6 pixels per edge)
+ * where quad overshading becomes expensive.
+ */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#include "cluster_common.glsl"
+
+// Threshold in pixels² for SW vs HW decision
+const float SW_RASTER_THRESHOLD = 32.0;
+
+// Vertex data
+struct Vertex {
+    vec3 position;
+    float pad0;
+    vec3 normal;
+    float pad1;
+    vec2 uv;
+    vec2 pad2;
+};
+
+// SW rasterized triangle output
+struct SWTriangle {
+    uint clusterIndex;      // Index into visible clusters
+    uint triangleIndex;     // Triangle within cluster
+    uint instanceId;        // Instance ID
+    uint pad;
+};
+
+// HW rasterized batch command
+struct HWBatch {
+    uint visibleClusterIdx;
+    uint triangleMask;      // Bitmask of triangles to render (up to 32)
+    uint instanceId;
+    uint pad;
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VisibleClusterBuffer {
+    VisibleCluster visibleClusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
+    Cluster clusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer InstanceBuffer {
+    mat4 worldMatrices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VertexBuffer {
+    Vertex vertices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer IndexBuffer {
+    uint indices[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer SWTriangleBuffer {
+    SWTriangle triangles[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer HWBatchBuffer {
+    HWBatch batches[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer AtomicCounterBuffer {
+    uint swTriangleCount;
+    uint hwBatchCount;
+    uint totalSWPixels;
+    uint totalHWPixels;
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    
+    VisibleClusterBuffer visibleClusterBuffer;
+    ClusterBuffer clusterBuffer;
+    InstanceBuffer instanceBuffer;
+    VertexBuffer vertexBuffer;
+    IndexBuffer indexBuffer;
+    SWTriangleBuffer swTriangleBuffer;
+    HWBatchBuffer hwBatchBuffer;
+    AtomicCounterBuffer counters;
+    
+    uint visibleClusterCount;
+    uint screenWidth;
+    uint screenHeight;
+    float swThreshold;
+} pc;
+
+// Shared memory for subgroup operations
+shared uint sharedSWCount;
+shared uint sharedHWMask;
+shared uint sharedSWOffset;
+shared uint sharedHWOffset;
+
+/**
+ * Compute triangle screen area using cross product
+ */
+float computeScreenArea(vec2 v0, vec2 v1, vec2 v2) {
+    vec2 e0 = v1 - v0;
+    vec2 e1 = v2 - v0;
+    return abs(e0.x * e1.y - e0.y * e1.x) * 0.5;
+}
+
+/**
+ * Transform vertex to screen space
+ */
+vec2 transformToScreen(vec3 worldPos, mat4 worldMatrix, out float depth) {
+    vec4 clipPos = pc.viewProj * worldMatrix * vec4(worldPos, 1.0);
+    
+    // Handle behind-camera case
+    if (clipPos.w <= 0.0) {
+        depth = -1.0;
+        return vec2(-1.0);
+    }
+    
+    // Perspective divide
+    vec3 ndc = clipPos.xyz / clipPos.w;
+    depth = ndc.z;
+    
+    // To screen space
+    vec2 screen;
+    screen.x = (ndc.x * 0.5 + 0.5) * float(pc.screenWidth);
+    screen.y = (ndc.y * 0.5 + 0.5) * float(pc.screenHeight);
+    
+    return screen;
+}
+
+/**
+ * Quick backface culling using signed area
+ */
+bool isBackface(vec2 v0, vec2 v1, vec2 v2) {
+    vec2 e0 = v1 - v0;
+    vec2 e1 = v2 - v0;
+    return (e0.x * e1.y - e0.y * e1.x) <= 0.0;
+}
+
+/**
+ * Check if triangle is completely off-screen
+ */
+bool isOffScreen(vec2 v0, vec2 v1, vec2 v2) {
+    vec2 minBB = min(v0, min(v1, v2));
+    vec2 maxBB = max(v0, max(v1, v2));
+    
+    return maxBB.x < 0.0 || minBB.x > float(pc.screenWidth) ||
+           maxBB.y < 0.0 || minBB.y > float(pc.screenHeight);
+}
+
+void main() {
+    uint globalId = gl_GlobalInvocationID.x;
+    uint localId = gl_LocalInvocationID.x;
+    
+    // Initialize shared memory
+    if (localId == 0) {
+        sharedSWCount = 0;
+        sharedHWMask = 0;
+    }
+    barrier();
+    
+    // Compute which cluster and triangle we're processing
+    // Each thread handles one triangle from visible clusters
+    // We process 64 triangles at a time per workgroup
+    
+    uint clusterIdx = gl_WorkGroupID.x;
+    uint triangleIdx = localId;
+    
+    if (clusterIdx >= pc.visibleClusterCount) {
+        return;
+    }
+    
+    VisibleCluster visible = pc.visibleClusterBuffer.visibleClusters[clusterIdx];
+    Cluster cluster = pc.clusterBuffer.clusters[visible.clusterIndex];
+    uint instanceId = visible.instanceId;
+    mat4 worldMatrix = pc.instanceBuffer.worldMatrices[instanceId];
+    
+    // Check if this triangle exists in the cluster
+    uint triangleCount = cluster.geometry.triangleCount;
+    
+    bool validTriangle = (triangleIdx < triangleCount);
+    bool useSW = false;
+    float screenArea = 0.0;
+    
+    if (validTriangle) {
+        // Load triangle indices
+        uint baseIndex = cluster.geometry.triangleOffset + triangleIdx * 3;
+        uint i0 = pc.indexBuffer.indices[baseIndex + 0];
+        uint i1 = pc.indexBuffer.indices[baseIndex + 1];
+        uint i2 = pc.indexBuffer.indices[baseIndex + 2];
+        
+        // Load vertex positions
+        vec3 p0 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i0].position;
+        vec3 p1 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i1].position;
+        vec3 p2 = pc.vertexBuffer.vertices[cluster.geometry.vertexOffset + i2].position;
+        
+        // Transform to screen
+        float d0, d1, d2;
+        vec2 s0 = transformToScreen(p0, worldMatrix, d0);
+        vec2 s1 = transformToScreen(p1, worldMatrix, d1);
+        vec2 s2 = transformToScreen(p2, worldMatrix, d2);
+        
+        // Skip if behind camera or clipped
+        if (d0 < 0.0 || d1 < 0.0 || d2 < 0.0) {
+            validTriangle = false;
+        }
+        // Backface cull
+        else if (isBackface(s0, s1, s2)) {
+            validTriangle = false;
+        }
+        // Off-screen cull
+        else if (isOffScreen(s0, s1, s2)) {
+            validTriangle = false;
+        }
+        else {
+            // Compute screen area
+            screenArea = computeScreenArea(s0, s1, s2);
+            
+            // Classify: SW for small, HW for large
+            useSW = (screenArea < pc.swThreshold);
+        }
+    }
+    
+    // Use subgroup operations to efficiently collect SW triangles
+    uvec4 swBallot = subgroupBallot(validTriangle && useSW);
+    uint swCountInSubgroup = subgroupBallotBitCount(swBallot);
+    uint swPrefixCount = subgroupBallotExclusiveBitCount(swBallot);
+    
+    // HW triangles use bitmask within cluster
+    uvec4 hwBallot = subgroupBallot(validTriangle && !useSW);
+    uint hwCountInSubgroup = subgroupBallotBitCount(hwBallot);
+    
+    // First thread in subgroup allocates SW triangle slots
+    uint swBaseOffset = 0;
+    if (subgroupElect()) {
+        if (swCountInSubgroup > 0) {
+            swBaseOffset = atomicAdd(pc.counters.swTriangleCount, swCountInSubgroup);
+        }
+    }
+    swBaseOffset = subgroupBroadcastFirst(swBaseOffset);
+    
+    // Write SW triangles
+    if (validTriangle && useSW) {
+        uint swOffset = swBaseOffset + swPrefixCount;
+        SWTriangle swTri;
+        swTri.clusterIndex = clusterIdx;
+        swTri.triangleIndex = triangleIdx;
+        swTri.instanceId = instanceId;
+        swTri.pad = 0;
+        pc.swTriangleBuffer.triangles[swOffset] = swTri;
+        
+        // Track statistics
+        atomicAdd(pc.counters.totalSWPixels, uint(screenArea));
+    }
+    
+    // Build HW batch mask (only first 32 triangles supported per batch)
+    if (validTriangle && !useSW && triangleIdx < 32) {
+        atomicOr(sharedHWMask, 1u << triangleIdx);
+        atomicAdd(pc.counters.totalHWPixels, uint(screenArea));
+    }
+    
+    barrier();
+    
+    // First thread writes HW batch if any triangles passed
+    if (localId == 0 && sharedHWMask != 0) {
+        uint hwOffset = atomicAdd(pc.counters.hwBatchCount, 1);
+        HWBatch batch;
+        batch.visibleClusterIdx = clusterIdx;
+        batch.triangleMask = sharedHWMask;
+        batch.instanceId = instanceId;
+        batch.pad = 0;
+        pc.hwBatchBuffer.batches[hwOffset] = batch;
+    }
+}

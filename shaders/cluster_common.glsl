@@ -46,9 +46,9 @@ struct ClusterGeometry {
     uint vertexOffset;          // Offset into vertex buffer
     uint triangleOffset;        // Offset into triangle buffer
     
-    uint materialId;            // Material index for shading
+    uint triangleCount;         // Number of triangles in this cluster
     uint flags;                 // Cluster flags (two-sided, masked, etc.)
-    uint instanceDataOffset;    // Per-instance data offset
+    uint materialId;            // Material index for shading
     uint padding;               // Padding to 32 bytes
 };
 

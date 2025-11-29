@@ -1,0 +1,93 @@
+/**
+ * gi_composite.comp
+ * 
+ * Composites GI with direct lighting for final HDR output.
+ * Handles energy conservation and exposure.
+ * 
+ * Turn 34-36: GI compositing
+ */
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Direct lighting
+layout(set = 0, binding = 0) uniform sampler2D directLighting;
+
+// GI contributions
+layout(set = 0, binding = 1) uniform sampler2D diffuseGI;
+layout(set = 0, binding = 2) uniform sampler2D specularGI;
+layout(set = 0, binding = 3) uniform sampler2D aoBuffer;
+
+// G-Buffer
+layout(set = 0, binding = 4) uniform sampler2D albedoBuffer;
+layout(set = 0, binding = 5) uniform sampler2D roughnessBuffer;
+layout(set = 0, binding = 6) uniform sampler2D emissiveBuffer;
+
+// Output HDR
+layout(rgba16f, set = 0, binding = 7) uniform image2D outputHDR;
+
+layout(push_constant) uniform PushConstants {
+    vec4 screenSize;
+    float directIntensity;
+    float indirectIntensity;
+    float emissiveIntensity;
+    float exposure;
+    uint debugMode;
+    float padding1;
+    float padding2;
+    float padding3;
+};
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) return;
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) * screenSize.zw;
+    
+    // Sample all inputs
+    vec3 direct = texture(directLighting, uv).rgb;
+    vec3 diffuseIndirect = texture(diffuseGI, uv).rgb;
+    vec3 specularIndirect = texture(specularGI, uv).rgb;
+    float ao = texture(aoBuffer, uv).r;
+    vec3 albedo = texture(albedoBuffer, uv).rgb;
+    float roughness = texture(roughnessBuffer, uv).r;
+    vec3 emissive = texture(emissiveBuffer, uv).rgb;
+    
+    // Energy conservation
+    // Diffuse GI already has albedo applied, but need to ensure we don't double-apply
+    
+    // Apply intensities
+    vec3 directContrib = direct * directIntensity;
+    vec3 diffuseGIContrib = diffuseIndirect * indirectIntensity;
+    vec3 specularGIContrib = specularIndirect * indirectIntensity;
+    vec3 emissiveContrib = emissive * emissiveIntensity;
+    
+    // Combine lighting
+    vec3 totalLighting = directContrib + diffuseGIContrib + specularGIContrib + emissiveContrib;
+    
+    // Apply exposure
+    totalLighting *= exposure;
+    
+    // Debug modes
+    if (debugMode == 1) {
+        // Show only diffuse GI
+        totalLighting = diffuseGIContrib;
+    } else if (debugMode == 2) {
+        // Show only specular GI
+        totalLighting = specularGIContrib;
+    } else if (debugMode == 3) {
+        // Show AO
+        totalLighting = vec3(ao);
+    } else if (debugMode == 4) {
+        // Show direct only
+        totalLighting = directContrib;
+    } else if (debugMode == 5) {
+        // Show emissive
+        totalLighting = emissiveContrib;
+    }
+    
+    imageStore(outputHDR, pixelCoord, vec4(totalLighting, 1.0));
+}

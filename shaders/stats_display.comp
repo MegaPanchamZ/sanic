@@ -1,0 +1,206 @@
+/**
+ * stats_display.comp
+ * 
+ * Performance statistics overlay shader.
+ * Renders frame timings and GPU stats as an on-screen display.
+ * 
+ * Turn 42: Performance profiling display
+ */
+
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Output image to blend stats onto
+layout(set = 0, binding = 0, rgba8) uniform image2D outputImage;
+
+// Stats buffer
+layout(set = 0, binding = 1, scalar) readonly buffer StatsBuffer {
+    // Frame timing (in milliseconds)
+    float gpuTimeTotal;
+    float gpuTimeCulling;
+    float gpuTimeRaster;
+    float gpuTimeShadow;
+    float gpuTimeGI;
+    float gpuTimePostProcess;
+    
+    // Geometry stats
+    uint totalClusters;
+    uint visibleClusters;
+    uint culledClusters;
+    uint swRasterizedClusters;
+    uint hwRasterizedClusters;
+    
+    // Triangle stats
+    uint totalTriangles;
+    uint visibleTriangles;
+    uint rasterizedTriangles;
+    
+    // Shadow stats
+    uint shadowPagesRendered;
+    uint shadowRaysTraced;
+    
+    // GI stats
+    uint screenProbes;
+    uint radianceCacheUpdates;
+    
+    // Memory stats
+    uint vramUsedMB;
+    uint vramTotalMB;
+    
+    // Frame info
+    uint frameIndex;
+    float fps;
+} stats;
+
+// Push constants
+layout(push_constant) uniform DisplayParams {
+    vec4 screenSize;    // xy = size, zw = 1/size
+    vec4 position;      // xy = position, zw = size
+    uint displayFlags;  // Bitfield for what to display
+    float scale;        // Text scale
+    float pad[2];
+} params;
+
+// 8x8 digit font (packed as bits)
+// Each digit is 8 rows of 8 bits
+const uint FONT_DIGITS[10] = uint[10](
+    0x3C666E76663C00u,  // 0
+    0x1818381818187Eu,  // 1
+    0x3C66063C60667Eu,  // 2
+    0x3C66063C06663Cu,  // 3
+    0x060E1E66667F06u,  // 4
+    0x7E607C0606663Cu,  // 5
+    0x3C60607C66663Cu,  // 6
+    0x7E66060C181818u,  // 7
+    0x3C66663C66663Cu,  // 8
+    0x3C66663E06663Cu   // 9
+);
+
+// Simple character lookup
+bool getPixel(uint character, ivec2 pos) {
+    if (pos.x < 0 || pos.x >= 8 || pos.y < 0 || pos.y >= 8) return false;
+    if (character >= 10) return false;
+    
+    uint font = FONT_DIGITS[character];
+    uint row = (font >> ((7 - pos.y) * 8)) & 0xFFu;
+    return ((row >> (7 - pos.x)) & 1u) != 0u;
+}
+
+// Draw a number at position
+bool drawNumber(float value, ivec2 pixelPos, ivec2 startPos, int numDigits, int decimals) {
+    ivec2 localPos = pixelPos - startPos;
+    if (localPos.x < 0 || localPos.y < 0 || localPos.y >= 8) return false;
+    
+    int charWidth = 8;
+    int totalChars = numDigits + (decimals > 0 ? 1 + decimals : 0);
+    if (localPos.x >= totalChars * charWidth) return false;
+    
+    int charIndex = localPos.x / charWidth;
+    ivec2 charPos = ivec2(localPos.x % charWidth, localPos.y);
+    
+    // Convert value to digits
+    int intPart = int(value);
+    int fracPart = int(fract(value) * pow(10.0, float(decimals)));
+    
+    // Determine which digit to draw
+    int digitIndex = charIndex;
+    bool isDecimalPoint = (decimals > 0 && charIndex == numDigits);
+    
+    if (isDecimalPoint) {
+        // Draw decimal point
+        return (charPos.x >= 2 && charPos.x <= 4 && charPos.y >= 6);
+    } else if (charIndex < numDigits) {
+        // Integer part
+        int divisor = int(pow(10.0, float(numDigits - 1 - charIndex)));
+        int digit = (intPart / divisor) % 10;
+        return getPixel(uint(digit), charPos);
+    } else {
+        // Fractional part
+        int fracIndex = charIndex - numDigits - 1;
+        int divisor = int(pow(10.0, float(decimals - 1 - fracIndex)));
+        int digit = (fracPart / divisor) % 10;
+        return getPixel(uint(digit), charPos);
+    }
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 screenSize = params.screenSize.xy;
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) {
+        return;
+    }
+    
+    // Check if pixel is in stats overlay region
+    ivec2 overlayStart = ivec2(params.position.xy);
+    ivec2 overlaySize = ivec2(params.position.zw);
+    ivec2 localPos = pixelCoord - overlayStart;
+    
+    if (localPos.x < 0 || localPos.y < 0 || 
+        localPos.x >= overlaySize.x || localPos.y >= overlaySize.y) {
+        return; // Outside overlay region
+    }
+    
+    vec4 currentColor = imageLoad(outputImage, pixelCoord);
+    
+    // Semi-transparent background
+    vec4 bgColor = vec4(0.0, 0.0, 0.0, 0.7);
+    
+    // Draw stats
+    bool textPixel = false;
+    vec3 textColor = vec3(1.0);
+    
+    int lineHeight = 12;
+    int currentLine = localPos.y / lineHeight;
+    int lineY = localPos.y % lineHeight;
+    
+    // Line offset within the glyph area
+    int glyphY = lineY - 2;
+    if (glyphY < 0 || glyphY >= 8) {
+        // Outside glyph area, just background
+    } else {
+        switch (currentLine) {
+            case 0: // FPS
+                textPixel = drawNumber(stats.fps, localPos, ivec2(4, 2), 4, 1);
+                textColor = stats.fps < 30.0 ? vec3(1.0, 0.3, 0.3) : 
+                           (stats.fps < 60.0 ? vec3(1.0, 1.0, 0.3) : vec3(0.3, 1.0, 0.3));
+                break;
+            case 1: // GPU Time
+                textPixel = drawNumber(stats.gpuTimeTotal, localPos, ivec2(4, 14), 3, 2);
+                textColor = vec3(0.8, 0.8, 1.0);
+                break;
+            case 2: // Visible clusters
+                textPixel = drawNumber(float(stats.visibleClusters), localPos, ivec2(4, 26), 6, 0);
+                textColor = vec3(0.5, 1.0, 0.5);
+                break;
+            case 3: // Culling efficiency
+                float cullPercent = stats.totalClusters > 0 ? 
+                    100.0 * float(stats.culledClusters) / float(stats.totalClusters) : 0.0;
+                textPixel = drawNumber(cullPercent, localPos, ivec2(4, 38), 3, 1);
+                textColor = vec3(1.0, 0.7, 0.3);
+                break;
+            case 4: // Triangles
+                textPixel = drawNumber(float(stats.rasterizedTriangles) / 1000.0, localPos, ivec2(4, 50), 5, 1);
+                textColor = vec3(0.7, 0.7, 1.0);
+                break;
+            case 5: // VRAM
+                textPixel = drawNumber(float(stats.vramUsedMB), localPos, ivec2(4, 62), 4, 0);
+                textColor = vec3(1.0, 0.8, 0.5);
+                break;
+            default:
+                break;
+        }
+    }
+    
+    // Composite
+    vec4 finalColor;
+    if (textPixel) {
+        finalColor = vec4(textColor, 1.0);
+    } else {
+        finalColor = mix(currentColor, bgColor, bgColor.a);
+    }
+    
+    imageStore(outputImage, pixelCoord, finalColor);
+}
