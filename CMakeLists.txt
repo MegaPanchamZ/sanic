@@ -128,12 +128,41 @@ set(SOURCES
     src/engine/RayTracedShadows.cpp
     src/engine/PostProcess.cpp
     src/engine/FinalRenderer.cpp
+    src/engine/AssetCooker.cpp
+    src/engine/AssetLoader.cpp
 )
 
-# --- Executable ---
-add_executable(SanicEngine ${SOURCES})
+# --- Engine Library ---
+# Build engine as a library so it can be shared between targets
+add_library(SanicEngineLib STATIC ${SOURCES})
 
-# --- Include Directories ---
+target_include_directories(SanicEngineLib PRIVATE 
+    src 
+    ${Vulkan_INCLUDE_DIRS}
+    ${glfw_SOURCE_DIR}/include
+    ${glm_SOURCE_DIR}
+    ${VulkanMemoryAllocator_SOURCE_DIR}/include
+    ${JoltPhysics_SOURCE_DIR}
+    ${meshoptimizer_SOURCE_DIR}/src
+)
+
+target_compile_definitions(SanicEngineLib PRIVATE 
+    GLM_FORCE_RADIANS 
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    JPH_PROFILE_ENABLED 
+    JPH_DEBUG_RENDERER
+)
+
+target_link_libraries(SanicEngineLib PRIVATE 
+    Vulkan::Vulkan 
+    glfw 
+    Jolt
+    meshoptimizer
+)
+
+# --- Main Executable ---
+add_executable(SanicEngine src/main.cpp)
+
 target_include_directories(SanicEngine PRIVATE 
     src 
     ${Vulkan_INCLUDE_DIRS}
@@ -144,17 +173,36 @@ target_include_directories(SanicEngine PRIVATE
     ${meshoptimizer_SOURCE_DIR}/src
 )
 
-# --- Linking ---
-add_compile_definitions(GLM_FORCE_RADIANS GLM_FORCE_DEPTH_ZERO_TO_ONE)
-# Jolt defines
-target_compile_definitions(SanicEngine PRIVATE JPH_PROFILE_ENABLED JPH_DEBUG_RENDERER)
-
-target_link_libraries(SanicEngine PRIVATE 
-    Vulkan::Vulkan 
-    glfw 
-    Jolt
-    meshoptimizer
+target_compile_definitions(SanicEngine PRIVATE 
+    GLM_FORCE_RADIANS 
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    JPH_PROFILE_ENABLED 
+    JPH_DEBUG_RENDERER
 )
+
+target_link_libraries(SanicEngine PRIVATE SanicEngineLib)
+
+# --- Asset Cooker Tool ---
+add_executable(sanic_cooker src/AssetCookerTool.cpp)
+
+target_include_directories(sanic_cooker PRIVATE 
+    src 
+    ${Vulkan_INCLUDE_DIRS}
+    ${glfw_SOURCE_DIR}/include
+    ${glm_SOURCE_DIR}
+    ${VulkanMemoryAllocator_SOURCE_DIR}/include
+    ${JoltPhysics_SOURCE_DIR}
+    ${meshoptimizer_SOURCE_DIR}/src
+)
+
+target_compile_definitions(sanic_cooker PRIVATE 
+    GLM_FORCE_RADIANS 
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+    JPH_PROFILE_ENABLED 
+    JPH_DEBUG_RENDERER
+)
+
+target_link_libraries(sanic_cooker PRIVATE SanicEngineLib)
 
 # Copy shaders if we had any (placeholder)
 # file(COPY shaders DESTINATION ${CMAKE_BINARY_DIR})

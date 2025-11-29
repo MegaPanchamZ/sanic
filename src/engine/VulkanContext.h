@@ -32,6 +32,9 @@ public:
     VkSurfaceKHR getSurface() const { return surface; }
     VkQueue getGraphicsQueue() const { return graphicsQueue; }
     VkQueue getPresentQueue() const { return presentQueue; }
+    VkQueue getTransferQueue() const { return graphicsQueue; }  // Use graphics queue for transfers
+    uint32_t getTransferQueueFamily() const { return static_cast<uint32_t>(queueFamilyIndices_.graphicsFamily); }
+    uint32_t getGraphicsQueueFamily() const { return static_cast<uint32_t>(queueFamilyIndices_.graphicsFamily); }
 
     QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device);
     SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device);
@@ -63,6 +66,7 @@ private:
     VkSurfaceKHR surface;
     VkQueue graphicsQueue;
     VkQueue presentQueue;
+    QueueFamilyIndices queueFamilyIndices_;
     
     bool rayTracingSupported = false;
     VkCommandPool commandPool = VK_NULL_HANDLE;

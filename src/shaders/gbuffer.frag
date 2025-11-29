@@ -3,6 +3,7 @@
 // ============================================================================
 // G-BUFFER FRAGMENT SHADER - Deferred Rendering Geometry Pass
 // Outputs surface properties to Multiple Render Targets (MRT)
+// Includes velocity output for temporal effects (TAA, Motion Blur, SSR)
 // ============================================================================
 
 // Uniform buffer - matches gbuffer.vert UBO for camera position access
@@ -16,6 +17,11 @@ layout(binding = 0) uniform UniformBufferObject {
     mat4 cascadeViewProj[4];
     vec4 cascadeSplits;
     vec4 shadowParams;
+    // Motion vector uniforms
+    mat4 prevView;
+    mat4 prevProj;
+    vec2 jitterOffset;   // Current frame jitter (for TAA)
+    vec2 prevJitterOffset; // Previous frame jitter
 } ubo;
 
 // Material textures (matching main descriptor layout)
@@ -30,12 +36,15 @@ layout(location = 2) in vec3 fragNormal;
 layout(location = 3) in vec3 fragPos;
 layout(location = 4) in vec4 fragPosLightSpace;
 layout(location = 5) in float fragViewDepth;
+layout(location = 6) in vec4 currentClipPos;  // Current frame clip position
+layout(location = 7) in vec4 prevClipPos;     // Previous frame clip position
 
 // G-Buffer Outputs (Multiple Render Targets)
 layout(location = 0) out vec4 outPosition;   // RGB: World Position, A: View Depth
 layout(location = 1) out vec4 outNormal;     // RGB: World Normal (encoded), A: unused
 layout(location = 2) out vec4 outAlbedo;     // RGB: Albedo, A: Metallic
 layout(location = 3) out vec4 outPBR;        // R: Roughness, G: AO, B: unused, A: unused
+layout(location = 4) out vec2 outVelocity;   // RG: Screen-space velocity (motion vector)
 
 // ============================================================================
 // NORMAL MAPPING
@@ -69,13 +78,34 @@ vec3 perturbNormal(vec3 N, vec3 V, vec2 texcoord) {
 }
 
 // ============================================================================
+// VELOCITY CALCULATION
+// ============================================================================
+vec2 calculateVelocity() {
+    // Convert clip positions to NDC
+    vec2 currentNDC = currentClipPos.xy / currentClipPos.w;
+    vec2 prevNDC = prevClipPos.xy / prevClipPos.w;
+    
+    // Convert NDC to screen UV space [0, 1]
+    vec2 currentUV = currentNDC * 0.5 + 0.5;
+    vec2 prevUV = prevNDC * 0.5 + 0.5;
+    
+    // Remove jitter for accurate motion (TAA adds sub-pixel jitter)
+    currentUV -= ubo.jitterOffset;
+    prevUV -= ubo.prevJitterOffset;
+    
+    // Velocity = current - previous (in UV space)
+    // This gives us where a pixel moved FROM (for reprojection, use negative)
+    vec2 velocity = currentUV - prevUV;
+    
+    return velocity;
+}
+
+// ============================================================================
 // MAIN - Write to G-Buffer
 // ============================================================================
 void main() {
     // Sample albedo with gamma correction (sRGB to linear)
     vec3 albedo = pow(texture(albedoMap, fragTexCoord).rgb, vec3(2.2));
-    // vec3 albedo = fragColor;
-    // vec3 albedo = vec3(1.0, 0.0, 0.0); // Hardcoded RED
     
     // Sample metallic-roughness map (glTF: R=AO, G=Roughness, B=Metallic)
     vec4 mrSample = texture(metallicRoughnessMap, fragTexCoord);
@@ -120,7 +150,6 @@ void main() {
     outPosition = vec4(fragPos, fragViewDepth);
     
     // Normal: World-space normal (already normalized)
-    // Could use octahedron encoding for better precision in 2 channels
     outNormal = vec4(N * 0.5 + 0.5, 1.0);  // Pack to [0,1] for UNORM format
     
     // Albedo + Metallic
@@ -128,4 +157,7 @@ void main() {
     
     // PBR parameters
     outPBR = vec4(roughness, ao, 0.0, 1.0);
+    
+    // Velocity: Screen-space motion vector for temporal effects
+    outVelocity = calculateVelocity();
 }

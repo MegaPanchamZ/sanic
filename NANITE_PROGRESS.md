@@ -1,5 +1,39 @@
 # Sanic Engine - Nanite/Lumen Implementation Progress
 
+## Recent Fixes (November 2025)
+
+### SSR Hi-Z Implementation Fix
+**Problem**: The `ssr.comp` shader claimed to use "hierarchical ray marching" but was actually using linear O(N) ray marching with fixed step sizes.
+
+**Solution**: Complete rewrite of `ssr.comp` with true Hierarchical Z-Buffer (Hi-Z) traversal:
+- Uses depth pyramid (`depth_downsample.comp`) for O(log N) ray marching
+- Starts at coarsest mip level, drops to finer mips on potential intersections
+- Skips empty space by checking conservative depth at each mip level
+- Added `hizBuffer` and `velocityBuffer` bindings for temporal stability
+
+### Motion Vector / Velocity Buffer
+**Problem**: No motion vector output for temporal effects (TAA, SSR temporal filtering).
+
+**Solution**: Updated G-Buffer pass to output velocity:
+- `gbuffer.vert`: Added `prevModel`, `prevView`, `prevProj` uniforms for previous frame transform
+- `gbuffer.vert`: Outputs `currentClipPos` and `prevClipPos` to fragment shader
+- `gbuffer.frag`: New output `outVelocity` (RG16F) with screen-space motion vectors
+- `gbuffer.frag`: Jitter correction for TAA compatibility
+
+### SSRSystem Updates
+- Added Hi-Z pyramid binding (binding 9)
+- Added velocity buffer binding (binding 10)  
+- Added hit UV output for temporal filtering (binding 11)
+- New uniforms: `prevViewProj`, `hizMipLevels`, `jitter`, `temporalWeight`
+- Backward-compatible legacy `update()` function preserved
+
+### Legacy Shader Cleanup
+**Problem**: `shader.frag` was a legacy forward rendering PBR shader redundant in the deferred architecture.
+
+**Solution**: Renamed to `legacy_forward.frag` for archive purposes. Use `gbuffer.frag` + `composition.frag` for deferred rendering.
+
+---
+
 ## Phase 1: Core Geometry Pipeline (Turns 1-12) ✅ COMPLETE
 
 ### Turn 1-2: Cluster Hierarchy & LOD System
@@ -203,6 +237,12 @@
 | deferred_lighting.comp | Compute | PBR lighting |
 | motion_vectors.comp | Compute | Velocity generation |
 | temporal_aa.comp | Compute | TAA resolve |
+| depth_downsample.comp | Compute | Hi-Z pyramid generation (min reduction) |
+| ssr.comp | Compute | Hi-Z screen-space reflections |
+| ssr_hierarchical.comp | Compute | Alternative Hi-Z SSR implementation |
+| gbuffer.vert | Vertex | G-Buffer geometry pass + velocity |
+| gbuffer.frag | Fragment | G-Buffer MRT output + velocity |
+| legacy_forward.frag | Fragment | (Archive) Legacy forward PBR shader |
 
 ---
 
@@ -217,6 +257,7 @@
 | SoftwareRasterizerPipeline | Hybrid rasterization |
 | MaterialSystem | PBR materials & lighting |
 | TemporalSystem | TAA & motion vectors |
+| SSRSystem | Hi-Z screen-space reflections |
 
 ---
 

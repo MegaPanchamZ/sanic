@@ -81,6 +81,7 @@ void VulkanContext::pickPhysicalDevice() {
 
 void VulkanContext::createLogicalDevice() {
     QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+    queueFamilyIndices_ = indices;  // Store for later use
 
     std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
     std::set<int32_t> uniqueQueueFamilies = {indices.graphicsFamily, indices.presentFamily};
