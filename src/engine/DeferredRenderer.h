@@ -17,7 +17,11 @@ public:
     
     void updateCompositionDescriptorSet(VkBuffer uniformBuffer, VkDeviceSize uboSize,
                                         VkImageView shadowView, VkSampler shadowSampler,
-                                        VkImageView envView, VkSampler envSampler);
+                                        VkImageView envView, VkSampler envSampler,
+                                        VkBuffer ddgiUniformBuffer = VK_NULL_HANDLE, VkDeviceSize ddgiUboSize = 0,
+                                        VkImageView ddgiIrradianceView = VK_NULL_HANDLE, VkSampler ddgiSampler = VK_NULL_HANDLE,
+                                        VkImageView ddgiDepthView = VK_NULL_HANDLE,
+                                        VkImageView ssrReflectionsView = VK_NULL_HANDLE, VkSampler ssrSampler = VK_NULL_HANDLE);
 
     void render(VkCommandBuffer cmd, uint32_t imageIndex, 
                 const std::vector<GameObject>& gameObjects);

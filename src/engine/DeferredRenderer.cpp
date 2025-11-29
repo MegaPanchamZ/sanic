@@ -275,7 +275,7 @@ void DeferredRenderer::createFramebuffers(const std::vector<VkImageView>& swapch
 
 void DeferredRenderer::createCompositionDescriptorSetLayout() {
     VkDevice device = context.getDevice();
-    std::array<VkDescriptorSetLayoutBinding, 7> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 11> bindings{};
     
     // Input attachments
     for(int i = 0; i < 4; ++i) {
@@ -302,6 +302,30 @@ void DeferredRenderer::createCompositionDescriptorSetLayout() {
     bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[6].descriptorCount = 1;
     bindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    
+    // DDGI UBO (binding 7)
+    bindings[7].binding = 7;
+    bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[7].descriptorCount = 1;
+    bindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    
+    // DDGI Irradiance (binding 8)
+    bindings[8].binding = 8;
+    bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[8].descriptorCount = 1;
+    bindings[8].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    
+    // DDGI Depth (binding 9)
+    bindings[9].binding = 9;
+    bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[9].descriptorCount = 1;
+    bindings[9].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    
+    // SSR Reflections (binding 10)
+    bindings[10].binding = 10;
+    bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[10].descriptorCount = 1;
+    bindings[10].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -460,7 +484,11 @@ void DeferredRenderer::createPipelines() {
 
 void DeferredRenderer::updateCompositionDescriptorSet(VkBuffer uniformBuffer, VkDeviceSize uboSize,
                                                       VkImageView shadowView, VkSampler shadowSampler,
-                                                      VkImageView envView, VkSampler envSampler) 
+                                                      VkImageView envView, VkSampler envSampler,
+                                                      VkBuffer ddgiUniformBuffer, VkDeviceSize ddgiUboSize,
+                                                      VkImageView ddgiIrradianceView, VkSampler ddgiSampler,
+                                                      VkImageView ddgiDepthView,
+                                                      VkImageView ssrReflectionsView, VkSampler ssrSampler) 
 {
     VkDevice device = context.getDevice();
     
@@ -482,6 +510,39 @@ void DeferredRenderer::updateCompositionDescriptorSet(VkBuffer uniformBuffer, Vk
     VkDescriptorBufferInfo uboInfo{uniformBuffer, 0, uboSize};
     VkDescriptorImageInfo shadowInfo{shadowSampler, shadowView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo envInfo{envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    
+    // Use environment map as fallback for DDGI textures if not provided
+    VkDescriptorBufferInfo ddgiUboInfo{};
+    if (ddgiUniformBuffer != VK_NULL_HANDLE) {
+        ddgiUboInfo = {ddgiUniformBuffer, 0, ddgiUboSize};
+    } else {
+        // Create a dummy buffer or use the main UBO as placeholder
+        ddgiUboInfo = {uniformBuffer, 0, sizeof(float) * 4}; // Minimal size
+    }
+    
+    VkDescriptorImageInfo ddgiIrradianceInfo{};
+    if (ddgiIrradianceView != VK_NULL_HANDLE && ddgiSampler != VK_NULL_HANDLE) {
+        ddgiIrradianceInfo = {ddgiSampler, ddgiIrradianceView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    } else {
+        // Use environment map as placeholder
+        ddgiIrradianceInfo = {envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    }
+    
+    VkDescriptorImageInfo ddgiDepthInfo{};
+    if (ddgiDepthView != VK_NULL_HANDLE && ddgiSampler != VK_NULL_HANDLE) {
+        ddgiDepthInfo = {ddgiSampler, ddgiDepthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    } else {
+        // Use environment map as placeholder
+        ddgiDepthInfo = {envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    }
+    
+    VkDescriptorImageInfo ssrInfo{};
+    if (ssrReflectionsView != VK_NULL_HANDLE && ssrSampler != VK_NULL_HANDLE) {
+        ssrInfo = {ssrSampler, ssrReflectionsView, VK_IMAGE_LAYOUT_GENERAL};
+    } else {
+        // Use environment map as placeholder
+        ssrInfo = {envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    }
 
     std::vector<VkWriteDescriptorSet> writes;
     for(int i=0; i<4; ++i) {
@@ -494,6 +555,14 @@ void DeferredRenderer::updateCompositionDescriptorSet(VkBuffer uniformBuffer, Vk
                       5, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &shadowInfo, nullptr, nullptr});
     writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
                       6, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &envInfo, nullptr, nullptr});
+    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
+                      7, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &ddgiUboInfo, nullptr});
+    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
+                      8, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ddgiIrradianceInfo, nullptr, nullptr});
+    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
+                      9, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ddgiDepthInfo, nullptr, nullptr});
+    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
+                      10, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ssrInfo, nullptr, nullptr});
 
     vkUpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
 }

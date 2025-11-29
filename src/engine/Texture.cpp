@@ -9,7 +9,9 @@ Texture::Texture(VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool
     createTextureImageView();
     createTextureSampler(physicalDevice);
     
-    textureIndex = DescriptorManager::getInstance().registerTexture(textureImageView, textureSampler);
+    // TEMPORARILY DISABLED - DescriptorManager not initialized
+    // textureIndex = DescriptorManager::getInstance().registerTexture(textureImageView, textureSampler);
+    textureIndex = 0;
 }
 
 Texture::~Texture() {

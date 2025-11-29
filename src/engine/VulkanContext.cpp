@@ -95,12 +95,14 @@ void VulkanContext::createLogicalDevice() {
     // --- Features Chain ---
     VkPhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.samplerAnisotropy = VK_TRUE;
-    // Enable standard features if needed (e.g. geometryShader, etc.)
+    deviceFeatures.geometryShader = VK_TRUE;  // For some shader capabilities
+    deviceFeatures.shaderInt64 = VK_TRUE;  // For 64-bit integers in shaders
 
     // Vulkan 1.3 Features (maintenance4 for LocalSizeId)
     VkPhysicalDeviceVulkan13Features vulkan13Features{};
     vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     vulkan13Features.maintenance4 = VK_TRUE;
+    vulkan13Features.shaderDemoteToHelperInvocation = VK_TRUE;  // For demote to helper invocation
 
     // Vulkan 1.2 Features (Descriptor Indexing, Buffer Device Address)
     VkPhysicalDeviceVulkan12Features vulkan12Features{};
@@ -114,6 +116,9 @@ void VulkanContext::createLogicalDevice() {
     vulkan12Features.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE; // For bindless buffers
     vulkan12Features.shaderInt8 = VK_TRUE;  // For GL_EXT_shader_explicit_arithmetic_types_int8
     vulkan12Features.storageBuffer8BitAccess = VK_TRUE;  // For GL_EXT_shader_8bit_storage
+    vulkan12Features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;  // For update-after-bind samplers
+    vulkan12Features.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;  // For update-after-bind storage buffers
+    vulkan12Features.shaderBufferInt64Atomics = VK_TRUE;  // For 64-bit atomics in buffers
 
     // Mesh Shader Features
     VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{};

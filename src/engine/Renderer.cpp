@@ -99,7 +99,8 @@ Renderer::Renderer(Window& window, PhysicsSystem& physicsSystem)
     createSyncObjects();
     
     // Initialize Global Descriptor Manager
-    DescriptorManager::getInstance().init(device, physicalDevice);
+    // TEMPORARILY DISABLED - may cause heap corruption due to missing features
+    // DescriptorManager::getInstance().init(device, physicalDevice);
     
     loadGameObjects();
     
@@ -335,19 +336,13 @@ void Renderer::drawFrame() {
         // PASS 2: Deferred Rendering (G-Buffer + Composition) via DeferredRenderer
         // DeferredRenderer outputs directly to swapchain (attachment 5) with PRESENT_SRC layout
         // Composition shader now samples DDGI for indirect diffuse lighting
-        // deferredRenderer->render(commandBuffer, imageIndex, gameObjects);
+        deferredRenderer->render(commandBuffer, imageIndex, gameObjects);
         
-        // VISIBILITY BUFFER RENDERER (Replaces DeferredRenderer)
-        
-        // Update Meshlet Streamer (Culling / LOD)
-        meshletStreamer->update(commandBuffer, gameObjects);
-        
-        // Render using VisBufferRenderer
-        // For now, we still use the direct render method which iterates objects.
-        // To use the indirect buffers from MeshletStreamer, we need to add a new method to VisBufferRenderer.
-        // visBufferRenderer->renderIndirect(commandBuffer, meshletStreamer->getIndirectDrawBuffer(), ...);
-        
-        visBufferRenderer->render(commandBuffer, imageIndex, gameObjects);
+        // VISIBILITY BUFFER RENDERER (experimental - currently disabled)
+        // The VisBuffer outputs to R32G32_UINT which can't be directly displayed.
+        // Needs material classification compute shader to shade and output to color buffer.
+        // meshletStreamer->update(commandBuffer, gameObjects);
+        // visBufferRenderer->render(commandBuffer, imageIndex, gameObjects);
     }
 
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
@@ -892,12 +887,12 @@ void Renderer::createGraphicsPipeline() {
     colorBlending.blendConstants[2] = 0.0f;
     colorBlending.blendConstants[3] = 0.0f;
 
-    // Push Constants - still used by standard pipeline (non-mesh)
-    // Size matches what the vertex shader expects (model matrix + normal matrix + mesh shader addresses)
+    // Push Constants - for basic graphics pipeline (non-mesh)
+    // shader.vert only expects model + normalMatrix (2x mat4)
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pushConstantRange.offset = 0;
-    pushConstantRange.size = 2 * sizeof(glm::mat4) + 4 * sizeof(uint64_t) + sizeof(uint32_t); // 128 + 32 + 4 = 164 bytes, aligned to 176
+    pushConstantRange.size = 2 * sizeof(glm::mat4);  // 128 bytes for model + normalMatrix
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1117,8 +1112,14 @@ void Renderer::loadGameObjects() {
     // Physics Body for Terrain (Static)
     {
         JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
+        // Create the shape first, then use it (not the settings object)
         JPH::BoxShapeSettings floorShapeSettings(JPH::Vec3(100.0f, 1.0f, 100.0f));
-        JPH::BodyCreationSettings floorSettings(&floorShapeSettings, JPH::RVec3(0.0f, -1.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
+        auto shapeResult = floorShapeSettings.Create();
+        if (!shapeResult.IsValid()) {
+            std::cerr << "Failed to create floor shape!" << std::endl;
+        }
+        JPH::ShapeRefC floorShape = shapeResult.Get();
+        JPH::BodyCreationSettings floorSettings(floorShape, JPH::RVec3(0.0f, -1.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
         terrain.bodyID = bodyInterface.CreateAndAddBody(floorSettings, JPH::EActivation::DontActivate);
     }
     
@@ -1136,7 +1137,9 @@ void Renderer::loadGameObjects() {
     {
         JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
         JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f)); // Half extents
-        JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(0.0f, 2.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
+        auto shapeResult = boxShapeSettings.Create();
+        JPH::ShapeRefC shape = shapeResult.Get();
+        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(0.0f, 2.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
         shadowCaster.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
     }
     
@@ -1154,7 +1157,9 @@ void Renderer::loadGameObjects() {
     {
         JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
         JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
-        JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(0.0f, 0.5f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
+        auto shapeResult = boxShapeSettings.Create();
+        JPH::ShapeRefC shape = shapeResult.Get();
+        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(0.0f, 0.5f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
         shadowReceiver.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
     }
     
@@ -1174,7 +1179,9 @@ void Renderer::loadGameObjects() {
         {
             JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
             JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
-            JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(x, 0.5f, -3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
+            auto shapeResult = boxShapeSettings.Create();
+            JPH::ShapeRefC shape = shapeResult.Get();
+            JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(x, 0.5f, -3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
             specCube.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
         }
         
@@ -1195,9 +1202,11 @@ void Renderer::loadGameObjects() {
     {
         JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
         JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
+        auto shapeResult = boxShapeSettings.Create();
+        JPH::ShapeRefC shape = shapeResult.Get();
         // Reconstruct rotation for Jolt
         JPH::Quat rotation = JPH::Quat::sRotation(JPH::Vec3(0, 1, 0), glm::radians(45.0f));
-        JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(-4.0f, 0.5f, 0.0f), rotation, JPH::EMotionType::Dynamic, Layers::MOVING);
+        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(-4.0f, 0.5f, 0.0f), rotation, JPH::EMotionType::Dynamic, Layers::MOVING);
         rotatedCube1.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
     }
 
@@ -1217,10 +1226,12 @@ void Renderer::loadGameObjects() {
     {
         JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
         JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
+        auto shapeResult = boxShapeSettings.Create();
+        JPH::ShapeRefC shape = shapeResult.Get();
         // Reconstruct rotation
         JPH::Quat rotX = JPH::Quat::sRotation(JPH::Vec3(1, 0, 0), glm::radians(30.0f));
         JPH::Quat rotY = JPH::Quat::sRotation(JPH::Vec3(0, 1, 0), glm::radians(30.0f));
-        JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(4.0f, 0.5f, 0.0f), rotY * rotX, JPH::EMotionType::Dynamic, Layers::MOVING);
+        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(4.0f, 0.5f, 0.0f), rotY * rotX, JPH::EMotionType::Dynamic, Layers::MOVING);
         rotatedCube2.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
     }
 
@@ -1239,7 +1250,9 @@ void Renderer::loadGameObjects() {
         {
             JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
             JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
-            JPH::BodyCreationSettings boxSettings(&boxShapeSettings, JPH::RVec3(3.0f, 0.5f + i * 1.0f, 3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
+            auto shapeResult = boxShapeSettings.Create();
+            JPH::ShapeRefC shape = shapeResult.Get();
+            JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(3.0f, 0.5f + i * 1.0f, 3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
             stackCube.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
         }
         
@@ -1274,7 +1287,9 @@ void Renderer::loadGameObjects() {
     {
         JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
         JPH::SphereShapeSettings sphereShapeSettings(1.0f);
-        JPH::BodyCreationSettings sphereSettings(&sphereShapeSettings, JPH::RVec3(lightIndicatorPos.x, lightIndicatorPos.y, lightIndicatorPos.z), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
+        auto shapeResult = sphereShapeSettings.Create();
+        JPH::ShapeRefC shape = shapeResult.Get();
+        JPH::BodyCreationSettings sphereSettings(shape, JPH::RVec3(lightIndicatorPos.x, lightIndicatorPos.y, lightIndicatorPos.z), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
         lightIndicator.bodyID = bodyInterface.CreateAndAddBody(sphereSettings, JPH::EActivation::DontActivate);
     }
     

@@ -60,6 +60,8 @@ set RT_SHADER_SRC=..\shaders
 :: Compile Nanite/VisBuffer shaders
 %GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\nanite.task -o %SHADER_OUT%\nanite.task.spv
 %GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\nanite.mesh -o %SHADER_OUT%\nanite.mesh.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\visbuffer.task -o %SHADER_OUT%\visbuffer.task.spv
+%GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\visbuffer.mesh -o %SHADER_OUT%\visbuffer.mesh.spv
 %GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\visbuffer.frag -o %SHADER_OUT%\visbuffer.frag.spv
 %GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\visbuffer.comp -o %SHADER_OUT%\visbuffer.comp.spv
 %GLSLC% --target-env=vulkan1.3 %RT_SHADER_SRC%\material_classify.comp -o %SHADER_OUT%\material_classify.comp.spv

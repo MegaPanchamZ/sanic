@@ -53,9 +53,9 @@ void VisBufferRenderer::loadMeshShaderFunctions() {
 }
 
 void VisBufferRenderer::createVisBufferResources() {
-    // R64_UINT for Visibility Buffer
-    // InstanceID (20) | ClusterID (22) | TriangleID (7) | Depth (15) = 64 bits
-    createVisBufferAttachment(visBuffer, VK_FORMAT_R64_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    // Use R32G32_UINT for Visibility Buffer since R64_UINT is not widely supported as color attachment
+    // InstanceID (16) | ClusterID (22) | TriangleID (7) | Depth (17) = 62 bits packed into 2 x 32-bit
+    createVisBufferAttachment(visBuffer, VK_FORMAT_R32G32_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 }
 
 void VisBufferRenderer::createVisBufferAttachment(VisBufferAttachment& attachment, VkFormat format, VkImageUsageFlags usage) {

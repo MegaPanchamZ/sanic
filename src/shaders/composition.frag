@@ -29,8 +29,11 @@ layout(binding = 5) uniform sampler2DArray shadowMapArray;  // CSM cascade array
 layout(binding = 6) uniform samplerCube environmentMap;
 
 // ============================================================================
-// DDGI Resources
+// DDGI Resources - Using dummy samplers to avoid validation errors
+// The actual DDGI/SSR code paths are disabled via const bools below
 // ============================================================================
+
+// Dummy UBO for DDGI (always present to satisfy shader structure)
 layout(binding = 7) uniform DDGIUniformBlock {
     ivec4 probeCount;           // xyz = count, w = total probes
     vec4 probeSpacing;          // xyz = spacing, w = 1/maxDistance
@@ -41,15 +44,17 @@ layout(binding = 7) uniform DDGIUniformBlock {
     mat4 randomRotation;
 } ddgi;
 
+// DDGI textures - bound to environment map as placeholder when not used
 layout(binding = 8) uniform sampler2D ddgiIrradiance;
 layout(binding = 9) uniform sampler2D ddgiDepth;
 
-// SSR (Screen-Space Reflections) Resources
-layout(binding = 10) uniform sampler2D ssrReflections;  // RGBA16F: rgb=color, a=confidence
+// SSR Reflections texture - bound to a 1x1 black texture when not used
+layout(binding = 10) uniform sampler2D ssrReflections;
 
-// Feature enable flags
-const bool DDGI_ENABLED = true;
-const bool SSR_ENABLED = true;
+// Feature enable flags - DISABLED for now until descriptor bindings are fully implemented
+// Set these to true once the descriptor sets are properly bound in C++
+const bool DDGI_ENABLED = false;
+const bool SSR_ENABLED = false;
 
 layout(location = 0) in vec2 fragTexCoord;
 layout(location = 0) out vec4 outColor;

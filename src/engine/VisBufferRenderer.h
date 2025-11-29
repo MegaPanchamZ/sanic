@@ -24,6 +24,7 @@ public:
     
     // Visibility Buffer Accessor
     VkImageView getVisBufferImageView() const { return visBuffer.view; }
+    VkImage getVisBufferImage() const { return visBuffer.image; }
 
 private:
     struct VisBufferAttachment {
