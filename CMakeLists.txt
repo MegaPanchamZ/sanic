@@ -130,6 +130,13 @@ set(SOURCES
     src/engine/FinalRenderer.cpp
     src/engine/AssetCooker.cpp
     src/engine/AssetLoader.cpp
+    src/engine/Animation.cpp
+    src/engine/ECS.cpp
+    src/engine/AudioSystem.cpp
+    src/engine/UISystem.cpp
+    src/engine/ParticleSystem.cpp
+    src/engine/SceneSerializer.cpp
+    src/engine/VolumetricLighting.cpp
 )
 
 # --- Engine Library ---
