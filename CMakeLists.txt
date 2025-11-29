@@ -142,7 +142,7 @@ target_include_directories(SanicEngineLib PRIVATE
     ${glfw_SOURCE_DIR}/include
     ${glm_SOURCE_DIR}
     ${VulkanMemoryAllocator_SOURCE_DIR}/include
-    ${JoltPhysics_SOURCE_DIR}
+    ${JoltPhysics_SOURCE_DIR}/..
     ${meshoptimizer_SOURCE_DIR}/src
 )
 
@@ -169,7 +169,7 @@ target_include_directories(SanicEngine PRIVATE
     ${glfw_SOURCE_DIR}/include
     ${glm_SOURCE_DIR}
     ${VulkanMemoryAllocator_SOURCE_DIR}/include
-    ${JoltPhysics_SOURCE_DIR}
+    ${JoltPhysics_SOURCE_DIR}/..
     ${meshoptimizer_SOURCE_DIR}/src
 )
 
@@ -191,7 +191,7 @@ target_include_directories(sanic_cooker PRIVATE
     ${glfw_SOURCE_DIR}/include
     ${glm_SOURCE_DIR}
     ${VulkanMemoryAllocator_SOURCE_DIR}/include
-    ${JoltPhysics_SOURCE_DIR}
+    ${JoltPhysics_SOURCE_DIR}/..
     ${meshoptimizer_SOURCE_DIR}/src
 )
 
