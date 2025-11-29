@@ -15,6 +15,7 @@
 #include "ShadowRenderer.h"
 #include "DeferredRenderer.h"
 #include "DDGISystem.h"
+#include "SSRSystem.h"
 
 class Renderer {
 public:
@@ -164,6 +165,12 @@ private:
     // ========================================================================
     std::unique_ptr<DDGISystem> ddgiSystem;
     bool ddgiEnabled = true;
+    
+    // ========================================================================
+    // SSR (Screen-Space Reflections with RT Fallback)
+    // ========================================================================
+    std::unique_ptr<SSRSystem> ssrSystem;
+    bool ssrEnabled = true;
     
     void createDepthResources();
     void createUniformBuffers();

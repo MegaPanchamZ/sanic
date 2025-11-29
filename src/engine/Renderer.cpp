@@ -110,6 +110,23 @@ Renderer::Renderer(Window& window)
         ddgiSystem->initialize(ddgiConfig);
         ddgiSystem->setAccelerationStructure(tlas.handle);
         std::cout << "=== DDGI SYSTEM INITIALIZED ===" << std::endl;
+        
+        // Initialize SSR System (Hybrid Screen-Space + Ray-Traced Reflections)
+        ssrSystem = std::make_unique<SSRSystem>(
+            vulkanContext, 
+            swapchainExtent.width, 
+            swapchainExtent.height,
+            descriptorPool
+        );
+        ssrSystem->setTLAS(tlas.handle);
+        SSRConfig ssrConfig;
+        ssrConfig.maxDistance = 50.0f;
+        ssrConfig.thickness = 0.5f;
+        ssrConfig.maxSteps = 64.0f;
+        ssrConfig.roughnessThreshold = 0.3f;
+        ssrConfig.rtFallbackEnabled = true;
+        ssrSystem->setConfig(ssrConfig);
+        std::cout << "=== SSR SYSTEM INITIALIZED ===" << std::endl;
     }
 
     std::cout << "=== RAY TRACING ACCELERATION STRUCTURES BUILT ===" << std::endl;
@@ -161,7 +178,8 @@ void Renderer::drawFrame() {
         std::cout << "Camera Pos: " << camPos.x << ", " << camPos.y << ", " << camPos.z << std::endl;
         std::cout << "Drawing " << gameObjects.size() << " objects (" 
                   << ((rtPipeline && useRayTracing) ? "RAY TRACING" : "DEFERRED")
-                  << (ddgiEnabled && ddgiSystem ? " + DDGI" : "") << ")." << std::endl;
+                  << (ddgiEnabled && ddgiSystem ? " + DDGI" : "")
+                  << (ssrEnabled && ssrSystem ? " + SSR" : "") << ")." << std::endl;
     }
 
     vkResetCommandBuffer(commandBuffer, 0);
@@ -278,6 +296,22 @@ void Renderer::drawFrame() {
         
         // PASS 1: Cascaded Shadow Maps (via ShadowRenderer)
         shadowRenderer->render(commandBuffer, gameObjects);
+        
+        // PASS 1.5: SSR (Screen-Space Reflections) - needs G-Buffer from previous frame
+        // SSR runs before composition to provide reflection data
+        if (ssrSystem && ssrEnabled) {
+            ssrSystem->update(commandBuffer,
+                              camera.getViewMatrix(),
+                              camera.getProjectionMatrix(),
+                              camera.getPosition(),
+                              deferredRenderer->getPositionImageView(),
+                              deferredRenderer->getNormalImageView(),
+                              deferredRenderer->getAlbedoImageView(),
+                              deferredRenderer->getPBRImageView(),
+                              deferredRenderer->getDepthImageView(),
+                              deferredRenderer->getSceneColorImageView(),
+                              deferredRenderer->getGBufferSampler());
+        }
 
         // PASS 2: Deferred Rendering (G-Buffer + Composition) via DeferredRenderer
         // DeferredRenderer outputs directly to swapchain (attachment 5) with PRESENT_SRC layout
@@ -688,6 +722,15 @@ void Renderer::processInput(float deltaTime) {
         std::cout << "DDGI: " << (ddgiEnabled ? "ENABLED" : "DISABLED") << std::endl;
     }
     gKeyWasPressed = gKeyPressed;
+    
+    // Toggle SSR with F key
+    static bool fKeyWasPressed = false;
+    bool fKeyPressed = input.isKeyDown(GLFW_KEY_F);
+    if (fKeyPressed && !fKeyWasPressed) {
+        ssrEnabled = !ssrEnabled;
+        std::cout << "SSR: " << (ssrEnabled ? "ENABLED" : "DISABLED") << std::endl;
+    }
+    fKeyWasPressed = fKeyPressed;
     
     // ESC to close window
     if (input.isKeyDown(GLFW_KEY_ESCAPE)) {
@@ -1537,6 +1580,7 @@ Renderer::~Renderer() {
     
     rtPipeline.reset();
     asBuilder.reset();
+    ssrSystem.reset();   // Cleanup SSR before DDGI
     ddgiSystem.reset();  // Cleanup DDGI before shadow/deferred renderers
     shadowRenderer.reset();
     deferredRenderer.reset();

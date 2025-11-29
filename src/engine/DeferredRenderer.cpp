@@ -41,6 +41,11 @@ DeferredRenderer::~DeferredRenderer() {
         vkDestroyFramebuffer(device, framebuffer, nullptr);
     }
     
+    // Cleanup sampler
+    if (gBufferSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(device, gBufferSampler, nullptr);
+    }
+    
     // Cleanup G-Buffer resources
     vkDestroyImageView(device, position.view, nullptr);
     vkDestroyImage(device, position.image, nullptr);
@@ -66,10 +71,25 @@ void DeferredRenderer::createGBufferAttachment(GBufferAttachment& attachment, Vk
 }
 
 void DeferredRenderer::createGBufferResources() {
-    createGBufferAttachment(position, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
-    createGBufferAttachment(normal, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
-    createGBufferAttachment(albedo, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
-    createGBufferAttachment(pbr, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
+    createGBufferAttachment(position, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    createGBufferAttachment(normal, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    createGBufferAttachment(albedo, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    createGBufferAttachment(pbr, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    
+    // Create G-Buffer sampler for SSR
+    VkSamplerCreateInfo samplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.maxAnisotropy = 1.0f;
+    samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    
+    if (vkCreateSampler(context.getDevice(), &samplerInfo, nullptr, &gBufferSampler) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create G-Buffer sampler!");
+    }
     
     std::cout << "G-Buffer resources created at " << width << "x" << height << std::endl;
 }
@@ -215,9 +235,17 @@ void DeferredRenderer::createRenderPass() {
     }
 }
 
-void DeferredRenderer::createFramebuffers(const std::vector<VkImageView>& swapchainImageViews, VkImageView depthImageView) {
+void DeferredRenderer::createFramebuffers(const std::vector<VkImageView>& swapchainImageViews, VkImageView depthImageViewIn) {
     VkDevice device = context.getDevice();
     framebuffers.resize(swapchainImageViews.size());
+    
+    // Store depth view for SSR access
+    depthView = depthImageViewIn;
+    
+    // Also store the first swapchain view as scene color (for SSR - previous frame approximation)
+    if (!swapchainImageViews.empty()) {
+        sceneColorView = swapchainImageViews[0];
+    }
     
     for (size_t i = 0; i < swapchainImageViews.size(); i++) {
         std::array<VkImageView, 6> attachments = {
@@ -225,7 +253,7 @@ void DeferredRenderer::createFramebuffers(const std::vector<VkImageView>& swapch
             normal.view,
             albedo.view,
             pbr.view,
-            depthImageView,
+            depthImageViewIn,
             swapchainImageViews[i]
         };
         

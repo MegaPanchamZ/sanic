@@ -23,6 +23,15 @@ public:
                 const std::vector<GameObject>& gameObjects);
 
     VkRenderPass getRenderPass() const { return renderPass; }
+    
+    // G-Buffer accessors for SSR
+    VkImageView getPositionImageView() const { return position.view; }
+    VkImageView getNormalImageView() const { return normal.view; }
+    VkImageView getAlbedoImageView() const { return albedo.view; }
+    VkImageView getPBRImageView() const { return pbr.view; }
+    VkImageView getDepthImageView() const { return depthView; }
+    VkImageView getSceneColorImageView() const { return sceneColorView; }
+    VkSampler getGBufferSampler() const { return gBufferSampler; }
 
 private:
     struct GBufferAttachment {
@@ -50,6 +59,9 @@ private:
 
     // Resources
     GBufferAttachment position, normal, albedo, pbr;
+    VkImageView depthView = VK_NULL_HANDLE;  // External reference (not owned)
+    VkImageView sceneColorView = VK_NULL_HANDLE;  // Previous frame color for SSR
+    VkSampler gBufferSampler = VK_NULL_HANDLE;
     
     VkRenderPass renderPass;
     std::vector<VkFramebuffer> framebuffers;

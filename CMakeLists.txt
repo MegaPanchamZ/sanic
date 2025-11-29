@@ -107,6 +107,7 @@ set(SOURCES
     src/engine/ShadowRenderer.cpp
     src/engine/DeferredRenderer.cpp
     src/engine/DDGISystem.cpp
+    src/engine/SSRSystem.cpp
 )
 
 # --- Executable ---

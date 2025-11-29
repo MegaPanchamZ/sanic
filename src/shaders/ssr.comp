@@ -1,0 +1,305 @@
+#version 460
+#extension GL_EXT_ray_query : enable
+
+// Hybrid Screen-Space Reflections with Ray-Traced Fallback
+// Uses hierarchical ray marching in screen space, falls back to RT for misses
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Helper functions
+float saturate(float x) {
+    return clamp(x, 0.0, 1.0);
+}
+
+// G-Buffer inputs
+layout(set = 0, binding = 0) uniform sampler2D gPosition;
+layout(set = 0, binding = 1) uniform sampler2D gNormal;
+layout(set = 0, binding = 2) uniform sampler2D gAlbedo;
+layout(set = 0, binding = 3) uniform sampler2D gPBR;      // R=metallic, G=roughness
+layout(set = 0, binding = 4) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 5) uniform sampler2D sceneColor; // Previous frame or current lit scene
+
+// Output
+layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D reflectionOutput;
+
+// Acceleration structure for RT fallback
+layout(set = 0, binding = 7) uniform accelerationStructureEXT tlas;
+
+// Uniforms
+layout(set = 0, binding = 8) uniform SSRUniforms {
+    mat4 view;
+    mat4 projection;
+    mat4 invView;
+    mat4 invProjection;
+    vec4 cameraPos;
+    vec2 screenSize;
+    float maxDistance;
+    float thickness;
+    float maxSteps;
+    float roughnessThreshold;  // Above this, use RT
+    float rtFallbackEnabled;
+    float _padding;
+} ubo;
+
+// Importance sampling for GGX
+vec3 importanceSampleGGX(vec2 xi, vec3 N, float roughness) {
+    float a = roughness * roughness;
+    float phi = 2.0 * 3.14159265 * xi.x;
+    float cosTheta = sqrt((1.0 - xi.y) / (1.0 + (a*a - 1.0) * xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    
+    vec3 H;
+    H.x = cos(phi) * sinTheta;
+    H.y = sin(phi) * sinTheta;
+    H.z = cosTheta;
+    
+    vec3 up = abs(N.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
+    vec3 tangent = normalize(cross(up, N));
+    vec3 bitangent = cross(N, tangent);
+    
+    return normalize(tangent * H.x + bitangent * H.y + N * H.z);
+}
+
+// Hash function for noise
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+vec2 hash2(vec2 p) {
+    return vec2(hash(p), hash(p + vec2(1.0, 0.0)));
+}
+
+// Project world position to screen UV
+vec3 projectToScreen(vec3 worldPos) {
+    vec4 clipPos = ubo.projection * ubo.view * vec4(worldPos, 1.0);
+    clipPos.xyz /= clipPos.w;
+    return vec3(clipPos.xy * 0.5 + 0.5, clipPos.z);
+}
+
+// Reconstruct world position from depth
+vec3 reconstructWorldPos(vec2 uv, float depth) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 viewPos = ubo.invProjection * clipPos;
+    viewPos /= viewPos.w;
+    vec4 worldPos = ubo.invView * viewPos;
+    return worldPos.xyz;
+}
+
+// Binary search refinement
+vec3 binarySearch(vec3 rayOrigin, vec3 rayDir, float hitT) {
+    float lo = 0.0;
+    float hi = hitT;
+    
+    for (int i = 0; i < 8; i++) {
+        float mid = (lo + hi) * 0.5;
+        vec3 midPoint = rayOrigin + rayDir * mid;
+        vec3 screenPos = projectToScreen(midPoint);
+        
+        if (screenPos.x < 0.0 || screenPos.x > 1.0 || screenPos.y < 0.0 || screenPos.y > 1.0) {
+            hi = mid;
+            continue;
+        }
+        
+        float sceneDepth = texture(depthBuffer, screenPos.xy).r;
+        vec3 sceneWorldPos = reconstructWorldPos(screenPos.xy, sceneDepth);
+        float diff = midPoint.z - sceneWorldPos.z;
+        
+        if (abs(diff) < ubo.thickness * 0.5) {
+            return screenPos;
+        }
+        
+        if (diff > 0.0) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    
+    return vec3(-1.0);
+}
+
+// Hierarchical ray march in screen space
+vec4 screenSpaceRayMarch(vec3 worldPos, vec3 reflectDir, float roughness) {
+    vec3 rayOrigin = worldPos;
+    vec3 rayEnd = worldPos + reflectDir * ubo.maxDistance;
+    
+    vec3 screenStart = projectToScreen(rayOrigin);
+    vec3 screenEnd = projectToScreen(rayEnd);
+    
+    // Check if ray goes behind camera
+    if (screenEnd.z < 0.0) {
+        return vec4(0.0);
+    }
+    
+    vec3 screenDir = screenEnd - screenStart;
+    float screenDist = length(screenDir.xy * ubo.screenSize);
+    
+    if (screenDist < 1.0) {
+        return vec4(0.0);
+    }
+    
+    // Adaptive step count based on distance
+    int numSteps = int(min(ubo.maxSteps, screenDist));
+    vec3 stepSize = screenDir / float(numSteps);
+    
+    vec3 currentPos = screenStart;
+    float lastDepthDiff = 0.0;
+    
+    for (int i = 1; i <= numSteps; i++) {
+        currentPos += stepSize;
+        
+        // Check bounds
+        if (currentPos.x < 0.0 || currentPos.x > 1.0 || 
+            currentPos.y < 0.0 || currentPos.y > 1.0 ||
+            currentPos.z < 0.0 || currentPos.z > 1.0) {
+            return vec4(0.0); // Out of screen
+        }
+        
+        float sceneDepth = texture(depthBuffer, currentPos.xy).r;
+        
+        // Skip sky pixels
+        if (sceneDepth >= 1.0) {
+            continue;
+        }
+        
+        vec3 sceneWorldPos = reconstructWorldPos(currentPos.xy, sceneDepth);
+        float rayDepth = length(sceneWorldPos - ubo.cameraPos.xyz);
+        
+        // Compute ray depth at this point
+        vec3 rayWorldPos = reconstructWorldPos(currentPos.xy, currentPos.z);
+        float marchDepth = length(rayWorldPos - ubo.cameraPos.xyz);
+        
+        float depthDiff = marchDepth - rayDepth;
+        
+        // Check for intersection
+        if (depthDiff > 0.0 && depthDiff < ubo.thickness) {
+            // Binary search refinement
+            vec3 refinedPos = binarySearch(worldPos, reflectDir, float(i) / float(numSteps) * ubo.maxDistance);
+            
+            if (refinedPos.x >= 0.0) {
+                // Calculate fade based on edge proximity and roughness
+                vec2 edgeFade = smoothstep(0.0, 0.1, refinedPos.xy) * smoothstep(1.0, 0.9, refinedPos.xy);
+                float fade = edgeFade.x * edgeFade.y;
+                
+                // Roughness-based fade
+                fade *= 1.0 - roughness;
+                
+                vec3 hitColor = texture(sceneColor, refinedPos.xy).rgb;
+                return vec4(hitColor, fade);
+            }
+        }
+        
+        lastDepthDiff = depthDiff;
+    }
+    
+    return vec4(0.0); // No hit
+}
+
+// Ray-traced reflection for fallback
+vec3 rayTraceReflection(vec3 worldPos, vec3 reflectDir) {
+    rayQueryEXT rayQuery;
+    
+    rayQueryInitializeEXT(rayQuery, tlas,
+                          gl_RayFlagsOpaqueEXT,
+                          0xFF,
+                          worldPos + reflectDir * 0.01, // Offset to avoid self-intersection
+                          0.01,
+                          reflectDir,
+                          ubo.maxDistance);
+    
+    while (rayQueryProceedEXT(rayQuery)) {
+        if (rayQueryGetIntersectionTypeEXT(rayQuery, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
+            rayQueryConfirmIntersectionEXT(rayQuery);
+        }
+    }
+    
+    if (rayQueryGetIntersectionTypeEXT(rayQuery, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        float hitT = rayQueryGetIntersectionTEXT(rayQuery, true);
+        vec3 hitPos = worldPos + reflectDir * hitT;
+        
+        // Project hit to screen to sample color
+        vec3 screenHit = projectToScreen(hitPos);
+        
+        if (screenHit.x >= 0.0 && screenHit.x <= 1.0 && 
+            screenHit.y >= 0.0 && screenHit.y <= 1.0) {
+            return texture(sceneColor, screenHit.xy).rgb;
+        }
+        
+        // Off-screen hit - return approximation based on distance
+        float distFade = 1.0 - saturate(hitT / ubo.maxDistance);
+        return vec3(0.1) * distFade; // Dark fallback
+    }
+    
+    // Sky reflection
+    vec3 skyColor = vec3(0.4, 0.6, 0.9) * max(0.0, reflectDir.y);
+    skyColor += vec3(0.8, 0.6, 0.4) * pow(max(0.0, dot(reflectDir, normalize(vec3(1, 0.5, 0)))), 32.0);
+    return skyColor;
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 screenSize = ubo.screenSize;
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) / screenSize;
+    
+    // Sample G-Buffer
+    vec3 worldPos = texture(gPosition, uv).xyz;
+    vec3 normal = normalize(texture(gNormal, uv).xyz * 2.0 - 1.0);
+    vec4 pbrData = texture(gPBR, uv);
+    float metallic = pbrData.r;
+    float roughness = pbrData.g;
+    
+    // Skip non-reflective surfaces
+    if (metallic < 0.01 && roughness > 0.9) {
+        imageStore(reflectionOutput, pixelCoord, vec4(0.0));
+        return;
+    }
+    
+    // Calculate view direction
+    vec3 viewDir = normalize(ubo.cameraPos.xyz - worldPos);
+    
+    // Generate random values for importance sampling
+    vec2 noise = hash2(vec2(pixelCoord) + ubo.cameraPos.xy);
+    
+    // Importance sample reflection direction based on roughness
+    vec3 H = importanceSampleGGX(noise, normal, max(roughness, 0.04));
+    vec3 reflectDir = reflect(-viewDir, H);
+    
+    // For very smooth surfaces, use perfect reflection
+    if (roughness < 0.1) {
+        reflectDir = reflect(-viewDir, normal);
+    }
+    
+    vec4 reflection = vec4(0.0);
+    
+    // Try SSR first
+    vec4 ssrResult = screenSpaceRayMarch(worldPos, reflectDir, roughness);
+    
+    if (ssrResult.a > 0.1) {
+        // SSR hit
+        reflection = ssrResult;
+    } else if (ubo.rtFallbackEnabled > 0.5 && (roughness > ubo.roughnessThreshold || ssrResult.a < 0.1)) {
+        // RT fallback for rough surfaces or SSR misses
+        vec3 rtColor = rayTraceReflection(worldPos, reflectDir);
+        float rtWeight = 1.0 - roughness * 0.5;
+        reflection = vec4(rtColor, rtWeight);
+    } else {
+        // No RT - use environment approximation
+        vec3 skyColor = vec3(0.4, 0.6, 0.9) * max(0.0, reflectDir.y);
+        reflection = vec4(skyColor, 0.3);
+    }
+    
+    // Apply Fresnel
+    float NdotV = max(dot(normal, viewDir), 0.0);
+    vec3 F0 = mix(vec3(0.04), texture(gAlbedo, uv).rgb, metallic);
+    vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
+    
+    reflection.rgb *= fresnel;
+    reflection.a *= (metallic * 0.8 + 0.2); // More reflective for metals
+    
+    imageStore(reflectionOutput, pixelCoord, reflection);
+}

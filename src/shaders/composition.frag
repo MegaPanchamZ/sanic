@@ -44,8 +44,12 @@ layout(binding = 7) uniform DDGIUniformBlock {
 layout(binding = 8) uniform sampler2D ddgiIrradiance;
 layout(binding = 9) uniform sampler2D ddgiDepth;
 
-// DDGI enable flag (set via push constant or uniform)
+// SSR (Screen-Space Reflections) Resources
+layout(binding = 10) uniform sampler2D ssrReflections;  // RGBA16F: rgb=color, a=confidence
+
+// Feature enable flags
 const bool DDGI_ENABLED = true;
+const bool SSR_ENABLED = true;
 
 layout(location = 0) in vec2 fragTexCoord;
 layout(location = 0) out vec4 outColor;
@@ -466,16 +470,53 @@ void main() {
         vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
         indirectDiffuse *= kD * albedo;
         
-        // Still use IBL for specular reflections (DDGI is diffuse-only)
-        vec3 prefilteredColor = textureLod(environmentMap, R, roughness * MAX_REFLECTION_LOD).rgb;
-        vec2 envBRDF = IntegrateBRDF_Approx(NdotV, roughness);
-        indirectSpecular = prefilteredColor * (F * envBRDF.x + envBRDF.y);
+        // === SSR for specular reflections ===
+        if (SSR_ENABLED) {
+            // Sample SSR result
+            vec4 ssrData = texture(ssrReflections, fragTexCoord);
+            float ssrConfidence = ssrData.a;
+            
+            // Blend SSR with environment map fallback
+            vec3 prefilteredColor = textureLod(environmentMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+            vec2 envBRDF = IntegrateBRDF_Approx(NdotV, roughness);
+            vec3 envSpecular = prefilteredColor * (F * envBRDF.x + envBRDF.y);
+            
+            // SSR provides better local reflections, blend based on confidence
+            vec3 ssrSpecular = ssrData.rgb;
+            indirectSpecular = mix(envSpecular, ssrSpecular, ssrConfidence);
+        } else {
+            // Fallback to pure IBL for specular
+            vec3 prefilteredColor = textureLod(environmentMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+            vec2 envBRDF = IntegrateBRDF_Approx(NdotV, roughness);
+            indirectSpecular = prefilteredColor * (F * envBRDF.x + envBRDF.y);
+        }
         
         ambient = (indirectDiffuse + indirectSpecular) * ao;
     } else {
-        // Fallback to pure IBL
-        ambient = calculateIBL(N, V, R, albedo, metallic, roughness, F0, ao);
-        ambient *= 0.5;
+        // Fallback to pure IBL (with optional SSR)
+        float NdotV = max(dot(N, V), 0.0);
+        vec3 F = FresnelSchlickRoughness(NdotV, F0, roughness);
+        
+        if (SSR_ENABLED) {
+            vec4 ssrData = texture(ssrReflections, fragTexCoord);
+            float ssrConfidence = ssrData.a;
+            
+            vec3 prefilteredColor = textureLod(environmentMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+            vec2 envBRDF = IntegrateBRDF_Approx(NdotV, roughness);
+            vec3 envSpecular = prefilteredColor * (F * envBRDF.x + envBRDF.y);
+            
+            vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+            vec3 irradiance = textureLod(environmentMap, N, MAX_REFLECTION_LOD).rgb;
+            indirectDiffuse = kD * irradiance * albedo;
+            
+            vec3 ssrSpecular = ssrData.rgb;
+            indirectSpecular = mix(envSpecular, ssrSpecular, ssrConfidence);
+            
+            ambient = (indirectDiffuse + indirectSpecular) * ao * 0.5;
+        } else {
+            ambient = calculateIBL(N, V, R, albedo, metallic, roughness, F0, ao);
+            ambient *= 0.5;
+        }
     }
     
     // ========================================================================
