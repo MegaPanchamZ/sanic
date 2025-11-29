@@ -40,6 +40,11 @@ public:
     VkFormat findDepthFormat();
     
     bool isRayTracingSupported() const { return rayTracingSupported; }
+    
+    // Command pool for single-time commands (created lazily)
+    VkCommandPool getCommandPool();
+    VkCommandBuffer beginSingleTimeCommands();
+    void endSingleTimeCommands(VkCommandBuffer commandBuffer);
 
 private:
     void createInstance();
@@ -60,4 +65,5 @@ private:
     VkQueue presentQueue;
     
     bool rayTracingSupported = false;
+    VkCommandPool commandPool = VK_NULL_HANDLE;
 };

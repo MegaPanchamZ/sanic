@@ -1,7 +1,12 @@
 #pragma once
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <memory>
 #include "Vertex.h"
+
+// Forward declaration
+class ClusterHierarchy;
+class VulkanContext;
 
 struct Meshlet {
     float center[3];
@@ -36,6 +41,15 @@ public:
     VkDeviceAddress getMeshletTrianglesBufferAddress() const { return meshletTrianglesBufferAddress; }
     VkDeviceAddress getIndexBufferAddress() const { return indexBufferAddress; }
     uint32_t getIndexCount() const { return indexCount; }
+    
+    // Get raw vertex data for cluster hierarchy building
+    const std::vector<Vertex>& getVertices() const { return cachedVertices; }
+    const std::vector<uint32_t>& getIndices() const { return cachedIndices; }
+    
+    // Cluster hierarchy (Nanite-style LOD system)
+    void buildClusterHierarchy(VulkanContext& context, uint32_t maxLodLevels = 8);
+    ClusterHierarchy* getClusterHierarchy() const { return clusterHierarchy.get(); }
+    bool hasClusterHierarchy() const { return clusterHierarchy != nullptr; }
 
 private:
     VkDevice device;
@@ -58,6 +72,13 @@ private:
     VkDeviceMemory meshletTrianglesBufferMemory;
     VkDeviceAddress meshletTrianglesBufferAddress;
     uint32_t meshletCount = 0;
+    
+    // Cached mesh data for cluster hierarchy building
+    std::vector<Vertex> cachedVertices;
+    std::vector<uint32_t> cachedIndices;
+    
+    // Nanite-style cluster hierarchy
+    std::unique_ptr<ClusterHierarchy> clusterHierarchy;
 
     VkDeviceAddress getBufferAddress(VkBuffer buffer);
 

@@ -111,6 +111,8 @@ set(SOURCES
     src/engine/SurfaceCacheManager.cpp
     src/engine/PhysicsSystem.cpp
     src/engine/VirtualShadowMap.cpp
+    src/engine/ClusterHierarchy.cpp
+    src/engine/ClusterCullingPipeline.cpp
 )
 
 # --- Executable ---

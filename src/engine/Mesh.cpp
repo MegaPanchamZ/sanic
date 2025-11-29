@@ -1,4 +1,6 @@
 #include "Mesh.h"
+#include "ClusterHierarchy.h"
+#include "VulkanContext.h"
 #include <cstring>
 #include <iostream>
 #include <cstdint>
@@ -7,6 +9,10 @@
 
 Mesh::Mesh(VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
     : device(device) {
+    // Cache vertex and index data for later cluster hierarchy building
+    cachedVertices = vertices;
+    cachedIndices = indices;
+    
     createVertexBuffer(physicalDevice, commandPool, graphicsQueue, vertices);
     createIndexBuffer(physicalDevice, commandPool, graphicsQueue, indices);
     buildMeshlets(physicalDevice, commandPool, graphicsQueue, vertices, indices);
@@ -264,4 +270,27 @@ uint32_t Mesh::findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilt
     }
 
     throw std::runtime_error("failed to find suitable memory type!");
+}
+
+void Mesh::buildClusterHierarchy(VulkanContext& context, uint32_t maxLodLevels) {
+    if (cachedVertices.empty() || cachedIndices.empty()) {
+        std::cerr << "Cannot build cluster hierarchy: no cached mesh data" << std::endl;
+        return;
+    }
+    
+    // Extract positions from vertices for ClusterHierarchy
+    std::vector<glm::vec3> positions;
+    positions.reserve(cachedVertices.size());
+    for (const auto& v : cachedVertices) {
+        positions.push_back(v.pos);
+    }
+    
+    // Create cluster hierarchy with LOD levels
+    clusterHierarchy = std::make_unique<ClusterHierarchy>(context);
+    
+    // Build using LOD-based approach (more sophisticated than simple meshlet-based)
+    clusterHierarchy->buildWithLOD(positions, cachedIndices, maxLodLevels);
+    
+    std::cout << "Built cluster hierarchy with " << clusterHierarchy->getClusterCount() 
+              << " clusters across " << clusterHierarchy->getLODLevels().size() << " LOD levels" << std::endl;
 }

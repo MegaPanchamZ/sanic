@@ -1,0 +1,226 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_GOOGLE_include_directive : require
+
+/*
+ * Hierarchical Cluster Culling (Persistent Threads)
+ * ==================================================
+ * Nanite-style GPU BVH traversal for cluster selection.
+ * 
+ * Uses persistent threads pattern:
+ * 1. Initialize with root nodes in candidate queue
+ * 2. Each iteration, threads grab candidates from queue
+ * 3. Process node: cull, check LOD, expand children or emit visible
+ * 4. Continue until queue is empty
+ * 
+ * This shader handles the complete hierarchy traversal in a single dispatch.
+ */
+
+#include "cluster_common.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewProj;
+    vec4 frustumPlanes[6];
+    vec4 cameraPosition;        // xyz = position, w = near plane
+    vec4 screenParams;          // x = width, y = height, z = lodScale, w = errorThreshold
+    uint maxIterations;         // Maximum iterations to prevent infinite loops
+    uint flags;                 // Culling flags
+} pc;
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBufferRef {
+    Cluster clusters[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer HierarchyNodeBufferRef {
+    HierarchyNode nodes[];
+};
+
+// Work queues (ping-pong between A and B)
+layout(set = 0, binding = 0, std430) buffer CandidateQueueA {
+    CandidateNode candidatesA[];
+};
+
+layout(set = 0, binding = 1, std430) buffer CandidateQueueB {
+    CandidateNode candidatesB[];
+};
+
+layout(set = 0, binding = 2, std430) buffer VisibleClusterBuffer {
+    VisibleCluster visibleClusters[];
+};
+
+layout(set = 0, binding = 3, std430) buffer QueueStateBuffer {
+    QueueState state;
+};
+
+layout(set = 0, binding = 4) uniform BufferAddresses {
+    uint64_t clusterBufferAddress;
+    uint64_t hierarchyNodeBufferAddress;
+} addresses;
+
+// Shared memory for workgroup coordination
+shared uint sh_workCount;
+shared uint sh_candidateCount;
+shared uint sh_visibleCount;
+
+/**
+ * Frustum test for bounding sphere
+ */
+bool frustumCullSphere(vec3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        float dist = dot(pc.frustumPlanes[i].xyz, center) + pc.frustumPlanes[i].w;
+        if (dist < -radius) return true;
+    }
+    return false;
+}
+
+/**
+ * Conservative frustum test for AABB (using center + extent)
+ */
+bool frustumCullAABB(vec3 boxCenter, vec3 boxExtent) {
+    vec3 aabbMin = boxCenter - boxExtent;
+    vec3 aabbMax = boxCenter + boxExtent;
+    for (int i = 0; i < 6; i++) {
+        vec3 pVertex = mix(aabbMin, aabbMax, greaterThan(pc.frustumPlanes[i].xyz, vec3(0.0)));
+        if (dot(pc.frustumPlanes[i].xyz, pVertex) + pc.frustumPlanes[i].w < 0.0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Calculate screen-space projected error
+ */
+float projectError(vec3 center, float worldError) {
+    float dist = max(distance(center, pc.cameraPosition.xyz), pc.cameraPosition.w);
+    float projFactor = pc.screenParams.y / (dist * pc.screenParams.z);
+    return worldError * projFactor;
+}
+
+/**
+ * Process a hierarchy node
+ * Returns: 0 = culled, 1 = expand children, 2 = emit clusters
+ */
+uint processNode(HierarchyNode node, out float projectedError) {
+    // Frustum culling using box center and extents
+    vec3 boxExtent = vec3(node.boxExtentX, node.boxExtentY, node.boxExtentZ);
+    if (frustumCullAABB(node.boxCenter, boxExtent)) {
+        return 0; // Culled
+    }
+    
+    // Calculate projected error for LOD decision
+    projectedError = projectError(node.boxCenter, node.lodError);
+    float threshold = pc.screenParams.w;
+    
+    // If error is small enough, we can draw these clusters
+    if (projectedError <= threshold) {
+        return 2; // Emit clusters
+    }
+    
+    // If node has children (not a leaf), expand them
+    if ((node.flags & NODE_FLAG_LEAF) == 0 && node.childCount > 0) {
+        return 1; // Expand children
+    }
+    
+    // Leaf node with high error - draw anyway
+    return 2;
+}
+
+void main() {
+    uint threadId = gl_GlobalInvocationID.x;
+    uint localId = gl_LocalInvocationID.x;
+    
+    // Get buffer references
+    ClusterBufferRef clusterBuf = ClusterBufferRef(addresses.clusterBufferAddress);
+    HierarchyNodeBufferRef nodeBuf = HierarchyNodeBufferRef(addresses.hierarchyNodeBufferAddress);
+    
+    // Determine which queue is input and which is output
+    bool useQueueA = (state.currentIteration & 1) == 0;
+    
+    // Get current work count
+    uint workCount = useQueueA ? state.candidateCountA : state.candidateCountB;
+    
+    // Initialize shared counters
+    if (localId == 0) {
+        sh_candidateCount = 0;
+        sh_visibleCount = 0;
+    }
+    barrier();
+    
+    // Process candidates
+    if (threadId < workCount) {
+        CandidateNode candidate = useQueueA ? candidatesA[threadId] : candidatesB[threadId];
+        
+        HierarchyNode node = nodeBuf.nodes[candidate.nodeIndex];
+        float projectedError;
+        uint action = processNode(node, projectedError);
+        
+        if (action == 1) {
+            // Expand children - add to output queue
+            for (uint i = 0; i < node.childCount; i++) {
+                uint childIndex = node.childOffset + i;
+                uint slot = atomicAdd(sh_candidateCount, 1);
+                
+                CandidateNode child;
+                child.nodeIndex = childIndex;
+                child.instanceId = candidate.instanceId;
+                child.flags = candidate.flags;
+                child.padding = 0;
+                
+                // Write to output queue
+                if (!useQueueA) {
+                    candidatesA[slot] = child;
+                } else {
+                    candidatesB[slot] = child;
+                }
+            }
+        }
+        else if (action == 2) {
+            // Emit visible clusters - for leaf nodes, childOffset points to clusters
+            uint clusterStart = node.childOffset;
+            uint clusterCount = node.childCount;
+            
+            for (uint i = 0; i < clusterCount; i++) {
+                uint clusterIdx = clusterStart + i;
+                Cluster cluster = clusterBuf.clusters[clusterIdx];
+                
+                // Additional cluster-level frustum test
+                bool visible = true;
+                
+                vec3 boxExtent = vec3(cluster.bounds.boxExtentX, cluster.bounds.boxExtentY, cluster.bounds.boxExtentZ);
+                if (frustumCullAABB(cluster.bounds.boxCenter, boxExtent)) {
+                    visible = false;
+                }
+                
+                if (visible) {
+                    uint slot = atomicAdd(sh_visibleCount, 1);
+                    VisibleCluster vc;
+                    vc.clusterIndex = clusterIdx;
+                    vc.instanceId = candidate.instanceId;
+                    vc.flags = VISIBLE_FLAG_HW_RASTER;
+                    vc.pageIndex = 0;
+                    visibleClusters[slot] = vc;
+                }
+            }
+        }
+    }
+    
+    barrier();
+    
+    // First thread updates global state
+    if (localId == 0) {
+        if (!useQueueA) {
+            atomicAdd(state.candidateCountA, sh_candidateCount);
+        } else {
+            atomicAdd(state.candidateCountB, sh_candidateCount);
+        }
+        atomicAdd(state.visibleClusterCount, sh_visibleCount);
+    }
+}
