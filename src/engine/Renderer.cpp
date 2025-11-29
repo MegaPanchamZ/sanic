@@ -1147,7 +1147,12 @@ void Renderer::loadGameObjects() {
             std::cerr << "Failed to create floor shape!" << std::endl;
         }
         JPH::ShapeRefC floorShape = shapeResult.Get();
-        JPH::BodyCreationSettings floorSettings(floorShape, JPH::RVec3(0.0f, -1.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
+        // Position at Y=0 to match visual transform, with box half-extent of 1.0 in Y
+        // The box extends from Y=-1 to Y=+1, so center at Y=0 places top surface at Y=+1
+        // But our visual plane is at Y=0, so we need center at Y=-1 for top surface at Y=0
+        // Actually the terrain mesh is a flat plane at Y=0, and box is for collision
+        // Set physics body center to Y=0 to match visual
+        JPH::BodyCreationSettings floorSettings(floorShape, JPH::RVec3(0.0f, 0.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
         terrain.bodyID = bodyInterface.CreateAndAddBody(floorSettings, JPH::EActivation::DontActivate);
     }
     
@@ -1167,8 +1172,8 @@ void Renderer::loadGameObjects() {
         JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f)); // Half extents
         auto shapeResult = boxShapeSettings.Create();
         JPH::ShapeRefC shape = shapeResult.Get();
-        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(0.0f, 2.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
-        shadowCaster.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(0.0f, 2.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Kinematic, Layers::MOVING);
+        shadowCaster.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
     }
     
     gameObjects.push_back(shadowCaster);
@@ -1187,8 +1192,8 @@ void Renderer::loadGameObjects() {
         JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
         auto shapeResult = boxShapeSettings.Create();
         JPH::ShapeRefC shape = shapeResult.Get();
-        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(0.0f, 0.5f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
-        shadowReceiver.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(0.0f, 0.5f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Kinematic, Layers::MOVING);
+        shadowReceiver.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
     }
     
     gameObjects.push_back(shadowReceiver);
@@ -1209,8 +1214,8 @@ void Renderer::loadGameObjects() {
             JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
             auto shapeResult = boxShapeSettings.Create();
             JPH::ShapeRefC shape = shapeResult.Get();
-            JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(x, 0.5f, -3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
-            specCube.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+            JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(x, 0.5f, -3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Kinematic, Layers::MOVING);
+            specCube.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
         }
         
         gameObjects.push_back(specCube);
@@ -1234,8 +1239,8 @@ void Renderer::loadGameObjects() {
         JPH::ShapeRefC shape = shapeResult.Get();
         // Reconstruct rotation for Jolt
         JPH::Quat rotation = JPH::Quat::sRotation(JPH::Vec3(0, 1, 0), glm::radians(45.0f));
-        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(-4.0f, 0.5f, 0.0f), rotation, JPH::EMotionType::Dynamic, Layers::MOVING);
-        rotatedCube1.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(-4.0f, 0.5f, 0.0f), rotation, JPH::EMotionType::Kinematic, Layers::MOVING);
+        rotatedCube1.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
     }
 
     gameObjects.push_back(rotatedCube1);
@@ -1259,8 +1264,8 @@ void Renderer::loadGameObjects() {
         // Reconstruct rotation
         JPH::Quat rotX = JPH::Quat::sRotation(JPH::Vec3(1, 0, 0), glm::radians(30.0f));
         JPH::Quat rotY = JPH::Quat::sRotation(JPH::Vec3(0, 1, 0), glm::radians(30.0f));
-        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(4.0f, 0.5f, 0.0f), rotY * rotX, JPH::EMotionType::Dynamic, Layers::MOVING);
-        rotatedCube2.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(4.0f, 0.5f, 0.0f), rotY * rotX, JPH::EMotionType::Kinematic, Layers::MOVING);
+        rotatedCube2.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
     }
 
     gameObjects.push_back(rotatedCube2);
@@ -1280,8 +1285,8 @@ void Renderer::loadGameObjects() {
             JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
             auto shapeResult = boxShapeSettings.Create();
             JPH::ShapeRefC shape = shapeResult.Get();
-            JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(3.0f, 0.5f + i * 1.0f, 3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic, Layers::MOVING);
-            stackCube.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::Activate);
+            JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(3.0f, 0.5f + i * 1.0f, 3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Kinematic, Layers::MOVING);
+            stackCube.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
         }
         
         gameObjects.push_back(stackCube);

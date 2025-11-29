@@ -51,8 +51,8 @@ layout(binding = 9) uniform sampler2D ddgiDepth;
 // SSR Reflections texture - bound to a 1x1 black texture when not used
 layout(binding = 10) uniform sampler2D ssrReflections;
 
-// Feature enable flags - enabled now that descriptors are properly bound with DDGI/SSR resources
-const bool DDGI_ENABLED = true;
+// Feature enable flags - testing SSR alone
+const bool DDGI_ENABLED = false;
 const bool SSR_ENABLED = true;
 
 layout(location = 0) in vec2 fragTexCoord;
@@ -476,8 +476,9 @@ void main() {
         
         // === SSR for specular reflections ===
         if (SSR_ENABLED) {
-            // Sample SSR result
-            vec4 ssrData = texture(ssrReflections, fragTexCoord);
+            // Sample SSR result - flip Y back since SSR compute uses non-flipped coords
+            vec2 ssrUV = vec2(fragTexCoord.x, 1.0 - fragTexCoord.y);
+            vec4 ssrData = texture(ssrReflections, ssrUV);
             float ssrConfidence = ssrData.a;
             
             // Blend SSR with environment map fallback
@@ -502,7 +503,9 @@ void main() {
         vec3 F = FresnelSchlickRoughness(NdotV, F0, roughness);
         
         if (SSR_ENABLED) {
-            vec4 ssrData = texture(ssrReflections, fragTexCoord);
+            // Flip Y back since SSR compute uses non-flipped coords
+            vec2 ssrUV = vec2(fragTexCoord.x, 1.0 - fragTexCoord.y);
+            vec4 ssrData = texture(ssrReflections, ssrUV);
             float ssrConfidence = ssrData.a;
             
             vec3 prefilteredColor = textureLod(environmentMap, R, roughness * MAX_REFLECTION_LOD).rgb;

@@ -73,11 +73,13 @@ vec2 hash2(vec2 p) {
 vec3 projectToScreen(vec3 worldPos) {
     vec4 clipPos = ubo.projection * ubo.view * vec4(worldPos, 1.0);
     clipPos.xyz /= clipPos.w;
+    // Projection matrix already has Y flipped for Vulkan (proj[1][1] *= -1)
     return vec3(clipPos.xy * 0.5 + 0.5, clipPos.z);
 }
 
 // Reconstruct world position from depth
 vec3 reconstructWorldPos(vec2 uv, float depth) {
+    // Projection matrix already has Y flipped for Vulkan, so just convert UV to NDC directly
     vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
     vec4 viewPos = ubo.invProjection * clipPos;
     viewPos /= viewPos.w;
@@ -249,9 +251,10 @@ void main() {
     // Sample G-Buffer
     vec3 worldPos = texture(gPosition, uv).xyz;
     vec3 normal = normalize(texture(gNormal, uv).xyz * 2.0 - 1.0);
+    vec4 albedoData = texture(gAlbedo, uv);
     vec4 pbrData = texture(gPBR, uv);
-    float metallic = pbrData.r;
-    float roughness = pbrData.g;
+    float metallic = albedoData.a;  // Metallic is in albedo alpha channel
+    float roughness = pbrData.r;    // Roughness is in PBR red channel
     
     // Skip non-reflective surfaces
     if (metallic < 0.01 && roughness > 0.9) {

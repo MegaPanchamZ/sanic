@@ -146,6 +146,12 @@ void PhysicsSystem::updateGameObjects(std::vector<GameObject>& gameObjects) {
     
     for (auto& obj : gameObjects) {
         if (!obj.bodyID.IsInvalid()) {
+            // Only update dynamic bodies - static and kinematic bodies don't move from physics
+            JPH::EMotionType motionType = bodyInterface.GetMotionType(obj.bodyID);
+            if (motionType != JPH::EMotionType::Dynamic) {
+                continue;  // Skip static and kinematic bodies
+            }
+            
             JPH::RVec3 position = bodyInterface.GetCenterOfMassPosition(obj.bodyID);
             JPH::Quat rotation = bodyInterface.GetRotation(obj.bodyID);
             

@@ -46,12 +46,14 @@ vec3 fibonacciSphereDirection(int rayIndex, int totalRays) {
     // Longitude: 2*PI*i/goldenRatio
     float theta = TWO_PI * i / goldenRatio;
     
-    // Convert to Cartesian (spherical coordinates)
+    // Convert to Cartesian with Y as up axis (standard for game engines)
+    // phi=0 -> Y=1 (up), phi=PI -> Y=-1 (down)
     float sinPhi = sin(phi);
+    float cosPhi = cos(phi);
     return vec3(
-        sinPhi * cos(theta),
-        sinPhi * sin(theta),
-        cos(phi)
+        sinPhi * cos(theta),  // X
+        cosPhi,               // Y (up/down axis)
+        sinPhi * sin(theta)   // Z
     );
 }
 
