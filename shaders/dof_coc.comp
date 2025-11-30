@@ -1,0 +1,123 @@
+#version 460
+
+/**
+ * dof_coc.comp
+ * 
+ * Circle of Confusion calculation for depth of field.
+ * Uses physically-based camera model.
+ * 
+ * Outputs signed CoC where:
+ * - Negative = foreground (near) blur
+ * - Positive = background (far) blur
+ */
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// ============================================================================
+// INPUT/OUTPUT
+// ============================================================================
+
+layout(set = 0, binding = 0) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 1, r16f) uniform writeonly image2D cocOutput;
+
+// ============================================================================
+// UNIFORMS
+// ============================================================================
+
+layout(push_constant) uniform PushConstants {
+    vec4 screenSize;          // xy = size, zw = 1/size
+    vec4 dofParams;           // x = focusDist, y = focalLength, z = fStop, w = sensorWidth
+    vec4 cameraParams;        // x = nearPlane, y = farPlane, z = cocScale, w = maxCoC
+} pc;
+
+// ============================================================================
+// DEPTH RECONSTRUCTION
+// ============================================================================
+
+float linearizeDepth(float depth) {
+    float near = pc.cameraParams.x;
+    float far = pc.cameraParams.y;
+    
+    // Reverse-Z: near = 1, far = 0
+    return near * far / (far + depth * (near - far));
+}
+
+// ============================================================================
+// CIRCLE OF CONFUSION
+// ============================================================================
+
+/**
+ * Calculate physically-based circle of confusion.
+ * 
+ * CoC diameter formula:
+ * CoC = |A * f * (S - P) / (P * (S - f))|
+ * 
+ * Where:
+ * A = aperture diameter (f / N, where N is f-stop)
+ * f = focal length (in meters)
+ * S = focus distance (in meters)
+ * P = object distance (in meters)
+ */
+float calculateCoC(float objectDistance) {
+    float focusDistance = pc.dofParams.x;
+    float focalLength = pc.dofParams.y;
+    float fStop = pc.dofParams.z;
+    float sensorWidth = pc.dofParams.w;
+    float cocScale = pc.cameraParams.z;
+    
+    // Aperture diameter
+    float aperture = focalLength / fStop;
+    
+    // Handle edge cases
+    if (objectDistance < 0.001) objectDistance = 0.001;
+    if (focusDistance < 0.001) focusDistance = 0.001;
+    
+    // Calculate raw CoC in meters
+    float focalLengthSq = focalLength * focalLength;
+    float numerator = aperture * focalLength * (focusDistance - objectDistance);
+    float denominator = objectDistance * (focusDistance - focalLength);
+    
+    float cocMeters = numerator / (denominator + 0.0001);
+    
+    // Convert to sensor-space (as fraction of sensor width)
+    float cocSensor = cocMeters / sensorWidth;
+    
+    // Convert to pixels
+    float cocPixels = cocSensor * pc.screenSize.x * cocScale;
+    
+    // Sign indicates near/far: negative = near (foreground), positive = far (background)
+    // Sign is naturally correct from the formula
+    
+    return cocPixels;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    ivec2 pixelPos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = ivec2(pc.screenSize.xy);
+    
+    if (pixelPos.x >= screenSize.x || pixelPos.y >= screenSize.y) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelPos) + 0.5) * pc.screenSize.zw;
+    
+    // Read depth
+    float depth = texture(depthBuffer, uv).r;
+    
+    // Linearize depth to world distance
+    float worldDistance = linearizeDepth(depth);
+    
+    // Calculate circle of confusion
+    float coc = calculateCoC(worldDistance);
+    
+    // Clamp to maximum CoC
+    float maxCoC = pc.cameraParams.w;
+    coc = clamp(coc, -maxCoC, maxCoC);
+    
+    // Output signed CoC
+    imageStore(cocOutput, pixelPos, vec4(coc, 0.0, 0.0, 0.0));
+}

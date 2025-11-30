@@ -1,0 +1,154 @@
+/**
+ * radiosity_sh.comp
+ * 
+ * Convert traced radiance to spherical harmonics (L2).
+ * Projects hemisphere radiance onto SH basis functions.
+ */
+
+#version 460
+#extension GL_EXT_buffer_reference : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Input: traced radiance atlas
+layout(set = 0, binding = 0) uniform sampler2D traceRadiance;
+
+// Output: SH coefficient atlases (one per channel, 3 rows per probe for 9 coefficients)
+layout(rgba32f, set = 0, binding = 1) uniform image2D shRedAtlas;
+layout(rgba32f, set = 0, binding = 2) uniform image2D shGreenAtlas;
+layout(rgba32f, set = 0, binding = 3) uniform image2D shBlueAtlas;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint probeCount;
+    uint hemisphereRes;
+    uint probeCountX;
+    uint probeCountY;
+};
+
+// SH basis functions (L2)
+// Y_0^0 = 0.282095
+// Y_1^{-1} = 0.488603 * y
+// Y_1^0 = 0.488603 * z
+// Y_1^1 = 0.488603 * x
+// Y_2^{-2} = 1.092548 * xy
+// Y_2^{-1} = 1.092548 * yz
+// Y_2^0 = 0.315392 * (3z² - 1)
+// Y_2^1 = 1.092548 * xz
+// Y_2^2 = 0.546274 * (x² - y²)
+
+const float SH_C0 = 0.282095;
+const float SH_C1 = 0.488603;
+const float SH_C2_0 = 1.092548;
+const float SH_C2_1 = 0.315392;
+const float SH_C2_2 = 0.546274;
+
+float evaluateSHBasis(uint index, vec3 dir) {
+    switch (index) {
+        case 0: return SH_C0;
+        case 1: return SH_C1 * dir.y;
+        case 2: return SH_C1 * dir.z;
+        case 3: return SH_C1 * dir.x;
+        case 4: return SH_C2_0 * dir.x * dir.y;
+        case 5: return SH_C2_0 * dir.y * dir.z;
+        case 6: return SH_C2_1 * (3.0 * dir.z * dir.z - 1.0);
+        case 7: return SH_C2_0 * dir.x * dir.z;
+        case 8: return SH_C2_2 * (dir.x * dir.x - dir.y * dir.y);
+        default: return 0.0;
+    }
+}
+
+const float PI = 3.14159265359;
+const float TWO_PI = 6.28318530718;
+
+// Reconstruct direction from hemisphere sample index
+vec3 reconstructDirection(uint rx, uint ry, uint res, vec3 normal) {
+    // Uniform hemisphere sample
+    float u = (float(rx) + 0.5) / float(res);
+    float v = (float(ry) + 0.5) / float(res);
+    
+    float phi = TWO_PI * u;
+    float cosTheta = sqrt(1.0 - v);
+    float sinTheta = sqrt(v);
+    
+    vec3 H = vec3(
+        cos(phi) * sinTheta,
+        sin(phi) * sinTheta,
+        cosTheta
+    );
+    
+    // Transform to world space
+    vec3 up = abs(normal.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
+    
+    return tangent * H.x + bitangent * H.y + normal * H.z;
+}
+
+void main() {
+    uint probeIdx = gl_GlobalInvocationID.x;
+    
+    if (probeIdx >= probeCount) return;
+    
+    uint probeX = probeIdx % probeCountX;
+    uint probeY = probeIdx / probeCountX;
+    
+    // Accumulate SH coefficients
+    vec3 shCoeffs[9];
+    for (int i = 0; i < 9; i++) shCoeffs[i] = vec3(0.0);
+    
+    float weightSum = 0.0;
+    
+    // Sample all rays for this probe
+    for (uint ry = 0; ry < hemisphereRes; ry++) {
+        for (uint rx = 0; rx < hemisphereRes; rx++) {
+            // Read traced radiance
+            ivec2 atlasCoord = ivec2(probeX * hemisphereRes + rx, probeY * hemisphereRes + ry);
+            vec3 radiance = texelFetch(traceRadiance, atlasCoord, 0).rgb;
+            
+            // Reconstruct direction (assuming up = Y)
+            vec3 normal = vec3(0, 1, 0);  // TODO: Load actual probe normal
+            vec3 dir = reconstructDirection(rx, ry, hemisphereRes, normal);
+            
+            // Cosine weight (importance sampling correction)
+            float cosTheta = max(0.0, dir.y);
+            float weight = 1.0;  // Already cosine-weighted in sampling
+            
+            // Project onto SH basis
+            for (int i = 0; i < 9; i++) {
+                float basis = evaluateSHBasis(uint(i), dir);
+                shCoeffs[i] += radiance * basis * weight;
+            }
+            
+            weightSum += weight;
+        }
+    }
+    
+    // Normalize
+    float normFactor = 4.0 * PI / weightSum;
+    for (int i = 0; i < 9; i++) {
+        shCoeffs[i] *= normFactor;
+    }
+    
+    // Store SH coefficients in atlases
+    // Each channel gets one atlas, 3 rows per probe (3 vec4 = 12 floats, we use 9)
+    for (int row = 0; row < 3; row++) {
+        ivec2 atlasCoord = ivec2(probeX, probeY * 3 + row);
+        
+        vec4 redCoeffs = vec4(0.0);
+        vec4 greenCoeffs = vec4(0.0);
+        vec4 blueCoeffs = vec4(0.0);
+        
+        for (int c = 0; c < 3 && row * 3 + c < 9; c++) {
+            int idx = row * 3 + c;
+            redCoeffs[c] = shCoeffs[idx].r;
+            greenCoeffs[c] = shCoeffs[idx].g;
+            blueCoeffs[c] = shCoeffs[idx].b;
+        }
+        
+        imageStore(shRedAtlas, atlasCoord, redCoeffs);
+        imageStore(shGreenAtlas, atlasCoord, greenCoeffs);
+        imageStore(shBlueAtlas, atlasCoord, blueCoeffs);
+    }
+}
+

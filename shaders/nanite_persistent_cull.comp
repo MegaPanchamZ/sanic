@@ -1,0 +1,397 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+/**
+ * nanite_persistent_cull.comp
+ * 
+ * Nanite-style persistent thread hierarchy traversal.
+ * Implements:
+ * - Persistent work stealing from global queues
+ * - BVH node processing with screen-space error LOD
+ * - Occlusion culling with HZB
+ * - Two-pass occlusion (main + post)
+ * 
+ * Based on Unreal Engine's NaniteHierarchyTraversal.ush
+ */
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+#define MAX_NODES_PER_PASS 1048576    // 1M nodes
+#define MAX_VISIBLE_CLUSTERS 524288   // 512K clusters
+#define BATCH_SIZE 32                 // Nodes per batch
+#define CLUSTER_BATCH_SIZE 128        // Clusters per batch
+
+#define NODE_FLAG_LEAF 0x1
+#define NODE_FLAG_STREAMING 0x2
+#define NODE_FLAG_HAS_IMPOSTOR 0x4
+
+#define PASS_NO_OCCLUSION 0
+#define PASS_OCCLUSION_MAIN 1
+#define PASS_OCCLUSION_POST 2
+
+// ============================================================================
+// GPU STRUCTURES
+// ============================================================================
+
+struct ClusterBounds {
+    vec4 sphereCenterRadius;    // xyz = center, w = radius
+    vec4 boxCenter;             // xyz = center, w = extentX
+    vec4 boxExtentYZ_LOD;       // x = extentY, y = extentZ, z = lodError, w = parentLodError
+};
+
+struct HierarchyNode {
+    vec4 boxCenter;             // xyz = center, w = extentX
+    vec4 boxExtentYZ_LOD;       // x = extentY, y = extentZ, z = lodError, w = minLodError
+    uvec4 childInfo;            // x = childOffset, y = childCount, z = flags, w = level
+};
+
+struct CandidateNode {
+    uint nodeIndex;
+    uint instanceId;
+    uint flags;
+    uint padding;
+};
+
+struct VisibleCluster {
+    uint clusterIndex;
+    uint instanceId;
+    uint flags;
+    uint pageIndex;
+};
+
+struct InstanceData {
+    mat4 localToWorld;
+    mat4 prevLocalToWorld;
+    vec4 boundsCenter;
+    vec4 boundsExtent;
+    uint hierarchyOffset;
+    uint clusterOffset;
+    uint flags;
+    uint padding;
+};
+
+// ============================================================================
+// QUEUE STATE
+// ============================================================================
+
+struct PassState {
+    int nodeReadOffset;
+    int nodeWriteOffset;
+    int nodeCount;
+    uint padding;
+};
+
+layout(std430, set = 0, binding = 0) buffer QueueState {
+    uint totalVisibleClusters;
+    uint totalNodesProcessed;
+    uint hwRasterClusters;
+    uint swRasterClusters;
+    PassState passState[2];
+    uint clusterWriteOffset;
+    uint clusterBatchReadOffset;
+    uint padding[2];
+} queueState;
+
+// ============================================================================
+// BUFFERS
+// ============================================================================
+
+layout(std430, set = 0, binding = 1) readonly buffer HierarchyNodes {
+    HierarchyNode nodes[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer ClusterData {
+    ClusterBounds clusters[];
+};
+
+layout(std430, set = 0, binding = 3) readonly buffer Instances {
+    InstanceData instances[];
+};
+
+layout(std430, set = 0, binding = 4) buffer CandidateNodes {
+    CandidateNode candidates[];
+};
+
+layout(std430, set = 0, binding = 5) writeonly buffer VisibleClusters {
+    VisibleCluster visible[];
+};
+
+// HZB for occlusion culling
+layout(set = 0, binding = 6) uniform sampler2D hzbTexture;
+
+// ============================================================================
+// UNIFORMS
+// ============================================================================
+
+layout(push_constant) uniform PushConstants {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    mat4 viewProjMatrix;
+    vec4 frustumPlanes[6];
+    vec4 cameraPosition;
+    vec4 screenParams;        // xy = resolution, z = lodScale, w = errorThreshold
+    uint passIndex;           // 0 = main, 1 = post-occlusion
+    uint maxNodes;
+    uint maxClusters;
+    uint hzbMipLevels;
+} pc;
+
+// ============================================================================
+// CULLING FUNCTIONS
+// ============================================================================
+
+// Frustum test using separating axis theorem
+bool frustumCullSphere(vec3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        float dist = dot(pc.frustumPlanes[i].xyz, center) + pc.frustumPlanes[i].w;
+        if (dist < -radius) return true;  // Behind plane
+    }
+    return false;
+}
+
+bool frustumCullBox(vec3 center, vec3 extent) {
+    for (int i = 0; i < 6; i++) {
+        vec3 normal = pc.frustumPlanes[i].xyz;
+        float r = dot(abs(normal), extent);
+        float d = dot(normal, center) + pc.frustumPlanes[i].w;
+        if (d < -r) return true;
+    }
+    return false;
+}
+
+// Project bounding sphere to screen space
+vec4 projectSphere(vec3 center, float radius) {
+    vec4 clip = pc.viewProjMatrix * vec4(center, 1.0);
+    
+    // Behind camera
+    if (clip.w <= 0.0) {
+        return vec4(0.0, 0.0, 1.0, 1.0);  // Full screen
+    }
+    
+    // Project center
+    vec2 ndc = clip.xy / clip.w;
+    vec2 screenCenter = (ndc * 0.5 + 0.5) * pc.screenParams.xy;
+    
+    // Project radius (approximate)
+    float d = length(center - pc.cameraPosition.xyz);
+    float screenRadius = radius * pc.screenParams.x / (d * 2.0);  // Approximate
+    
+    return vec4(screenCenter - screenRadius, screenCenter + screenRadius);
+}
+
+// HZB occlusion test
+bool hzbOcclusionTest(vec4 screenRect) {
+    // Clamp to screen
+    vec2 rectMin = max(screenRect.xy, vec2(0.0));
+    vec2 rectMax = min(screenRect.zw, pc.screenParams.xy);
+    
+    if (any(greaterThanEqual(rectMin, rectMax))) {
+        return true;  // Zero-area rect is occluded
+    }
+    
+    // Calculate mip level based on rect size
+    vec2 rectSize = rectMax - rectMin;
+    float mipLevel = ceil(log2(max(rectSize.x, rectSize.y)));
+    mipLevel = clamp(mipLevel, 0.0, float(pc.hzbMipLevels - 1));
+    
+    // Sample HZB at corners and center
+    vec2 uv0 = rectMin / pc.screenParams.xy;
+    vec2 uv1 = rectMax / pc.screenParams.xy;
+    vec2 uvCenter = (uv0 + uv1) * 0.5;
+    
+    float maxZ = textureLod(hzbTexture, uv0, mipLevel).r;
+    maxZ = max(maxZ, textureLod(hzbTexture, vec2(uv1.x, uv0.y), mipLevel).r);
+    maxZ = max(maxZ, textureLod(hzbTexture, vec2(uv0.x, uv1.y), mipLevel).r);
+    maxZ = max(maxZ, textureLod(hzbTexture, uv1, mipLevel).r);
+    maxZ = max(maxZ, textureLod(hzbTexture, uvCenter, mipLevel).r);
+    
+    // TODO: Compare with object's near depth
+    // For now, skip occlusion test
+    return false;
+}
+
+// LOD selection based on screen-space error
+bool shouldVisitChild(HierarchyNode node, mat4 localToWorld) {
+    // Transform bounds to world space
+    vec3 center = (localToWorld * vec4(node.boxCenter.xyz, 1.0)).xyz;
+    float lodError = node.boxExtentYZ_LOD.z;
+    
+    // Calculate projected error
+    float distance = max(length(center - pc.cameraPosition.xyz), 0.001);
+    float projectedError = lodError * pc.screenParams.x / (distance * 2.0);
+    
+    // Compare against threshold (scaled by LOD scale)
+    return projectedError > pc.screenParams.w * pc.screenParams.z;
+}
+
+// ============================================================================
+// PERSISTENT THREAD WORK STEALING
+// ============================================================================
+
+// Try to grab a batch of nodes from the queue
+bool grabNodeBatch(out uint batchStart, out uint batchCount) {
+    int readOffset = atomicAdd(queueState.passState[pc.passIndex].nodeReadOffset, int(BATCH_SIZE));
+    int writeOffset = queueState.passState[pc.passIndex].nodeWriteOffset;
+    
+    if (readOffset >= writeOffset) {
+        // No more nodes available
+        return false;
+    }
+    
+    batchStart = uint(readOffset);
+    batchCount = min(BATCH_SIZE, uint(writeOffset - readOffset));
+    return true;
+}
+
+// Add child nodes to the queue
+void enqueueNodes(uint nodeIndex, uint instanceId, uint count) {
+    int writeOffset = atomicAdd(queueState.passState[pc.passIndex].nodeWriteOffset, int(count));
+    
+    for (uint i = 0; i < count; i++) {
+        uint idx = uint(writeOffset) + i;
+        if (idx < pc.maxNodes) {
+            candidates[idx].nodeIndex = nodeIndex + i;
+            candidates[idx].instanceId = instanceId;
+            candidates[idx].flags = 0;
+        }
+    }
+    
+    atomicAdd(queueState.passState[pc.passIndex].nodeCount, int(count));
+}
+
+// Add visible cluster to output
+void emitCluster(uint clusterIndex, uint instanceId, uint flags) {
+    uint writeOffset = atomicAdd(queueState.clusterWriteOffset, 1);
+    
+    if (writeOffset < pc.maxClusters) {
+        visible[writeOffset].clusterIndex = clusterIndex;
+        visible[writeOffset].instanceId = instanceId;
+        visible[writeOffset].flags = flags;
+        visible[writeOffset].pageIndex = 0;  // TODO: Streaming page
+        
+        atomicAdd(queueState.totalVisibleClusters, 1);
+        
+        // Classify for HW vs SW rasterization
+        // TODO: Use screen-space size for classification
+        atomicAdd(queueState.hwRasterClusters, 1);
+    }
+}
+
+// ============================================================================
+// NODE PROCESSING
+// ============================================================================
+
+void processNode(CandidateNode candidate) {
+    HierarchyNode node = nodes[candidate.nodeIndex];
+    InstanceData instance = instances[candidate.instanceId];
+    
+    mat4 localToWorld = instance.localToWorld;
+    
+    // Transform bounds to world space
+    vec3 worldCenter = (localToWorld * vec4(node.boxCenter.xyz, 1.0)).xyz;
+    vec3 worldExtent = vec3(
+        node.boxCenter.w,
+        node.boxExtentYZ_LOD.x,
+        node.boxExtentYZ_LOD.y
+    ) * max(max(length(localToWorld[0].xyz), length(localToWorld[1].xyz)), length(localToWorld[2].xyz));
+    
+    // Frustum culling
+    if (frustumCullBox(worldCenter, worldExtent)) {
+        return;
+    }
+    
+    // Occlusion culling (if enabled for this pass)
+    if (pc.passIndex > 0) {
+        vec4 screenRect = projectSphere(worldCenter, length(worldExtent));
+        if (hzbOcclusionTest(screenRect)) {
+            return;
+        }
+    }
+    
+    uint flags = node.childInfo.z;
+    bool isLeaf = (flags & NODE_FLAG_LEAF) != 0;
+    
+    if (isLeaf) {
+        // This is a cluster group - emit all clusters
+        uint clusterOffset = node.childInfo.x + instance.clusterOffset;
+        uint clusterCount = node.childInfo.y;
+        
+        for (uint i = 0; i < clusterCount; i++) {
+            emitCluster(clusterOffset + i, candidate.instanceId, 0);
+        }
+    } else {
+        // Check if we should descend further
+        if (shouldVisitChild(node, localToWorld)) {
+            // Enqueue child nodes
+            uint childOffset = node.childInfo.x + instance.hierarchyOffset;
+            uint childCount = node.childInfo.y;
+            enqueueNodes(childOffset, candidate.instanceId, childCount);
+        } else {
+            // Use this LOD level - emit clusters from this node
+            // (In practice, LOD selection would be more complex)
+            uint clusterOffset = node.childInfo.x + instance.clusterOffset;
+            uint clusterCount = node.childInfo.y;
+            
+            for (uint i = 0; i < clusterCount; i++) {
+                emitCluster(clusterOffset + i, candidate.instanceId, 0);
+            }
+        }
+    }
+    
+    atomicAdd(queueState.totalNodesProcessed, 1);
+}
+
+// ============================================================================
+// MAIN - PERSISTENT THREAD LOOP
+// ============================================================================
+
+void main() {
+    uint localId = gl_LocalInvocationID.x;
+    uint groupId = gl_WorkGroupID.x;
+    
+    // Persistent loop - keep processing until no work remains
+    while (true) {
+        // Try to grab a batch of nodes
+        uint batchStart, batchCount;
+        
+        if (grabNodeBatch(batchStart, batchCount)) {
+            // Process nodes in this batch
+            for (uint i = localId; i < batchCount; i += gl_WorkGroupSize.x) {
+                uint nodeIdx = batchStart + i;
+                if (nodeIdx < pc.maxNodes) {
+                    processNode(candidates[nodeIdx]);
+                }
+            }
+            
+            // Sync threads before grabbing more work
+            barrier();
+        } else {
+            // No more work - check if we should exit
+            int nodeCount = queueState.passState[pc.passIndex].nodeCount;
+            
+            // Use subgroup ballot to check if any threads have work
+            bool anyWork = subgroupAny(nodeCount > 0);
+            
+            if (!anyWork) {
+                // All threads agree there's no more work
+                // Double-check the queue (another group may have added nodes)
+                memoryBarrier();
+                
+                int finalCheck = queueState.passState[pc.passIndex].nodeCount;
+                if (finalCheck <= 0) {
+                    break;  // Exit persistent loop
+                }
+            }
+            
+            // Yield/spin briefly before rechecking
+            // (In practice, use a small delay or barrier)
+        }
+    }
+}

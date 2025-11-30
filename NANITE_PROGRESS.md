@@ -288,8 +288,236 @@ GL_EXT_shader_explicit_arithmetic_types_int64
 
 ---
 
+## Phase 5: Gameplay & Runtime Systems (NEW - November 2025) ✅ COMPLETE
+
+### Reflection System (Unreal-style)
+- **Reflection.h/cpp**: Compile-time/runtime property reflection
+  - `SCLASS()` / `SPROPERTY()` / `SFUNCTION()` macros
+  - PropertyFlags: EditAnywhere, VisibleOnly, Serialize, Replicate
+  - PropertyMeta with Category, Tooltip, UIMin/UIMax
+  - TypeDescriptor for runtime type introspection
+  - TypeRegistry singleton for type lookup
+  - Built-in type registrations (primitives, GLM vectors, quaternions)
+
+### Advanced Animation System
+- **AnimationAdvanced.h/cpp**: Production-quality animation features
+  - **RootMotionExtractor**: Root bone motion extraction for gameplay
+    - XY (ground), XZ (ground+vertical), Full extraction modes
+    - Capsule warping for animation blending
+  - **AnimationCompressor**: ACL-style compression
+    - Keyframe reduction with error thresholds
+    - Curve fitting with B-splines
+    - Quantization (16-bit normalized, variable bit depth)
+    - Constant track optimization
+  - **AnimationRetargeter**: Skeleton-to-skeleton retargeting
+    - Bone name mapping (direct, regex-based)
+    - Scale compensation for different skeleton sizes
+    - Pose-space vs Local-space retargeting
+    - IK chain preservation
+  - **AnimationLayerMixer**: Additive/Override layer blending
+    - Per-bone weight masks
+    - Reference pose subtraction for additive
+
+### Advanced Audio System
+- **AudioAdvanced.h/cpp**: AAA audio features
+  - **Plugin Architecture**: FMOD/Wwise-style interfaces
+    - `IAudioPlugin`, `ISpatializationPlugin`, `IReverbPlugin`, `IOcclusionPlugin`
+    - `IAudioPluginFactory` for runtime plugin discovery
+  - **ConvolutionReverb**: FFT-based impulse response reverb
+    - Partitioned convolution for low latency
+    - WAV IR loading, preset management
+  - **FMODIntegration** / **WwiseIntegration**: Middleware interfaces
+    - Bank loading, event playback
+    - 3D positioning, RTPC/global parameters
+    - State/Switch groups (Wwise)
+  - **GPUAudioOcclusion**: Vulkan compute audio occlusion
+    - SDF marching or RT-based methods
+    - Batch calculation for multiple sources
+  - **AmbisonicsEncoder**: First/Second/Third order ambisonics
+    - Binaural decode with HRTF
+    - Speaker array decode
+  - **DSP Effects Chain**: LowPass, HighPass, Compressor, Limiter, Delay, Chorus
+
+### Scripting Inspector UI
+- **ScriptingInspector.h/cpp**: Unity-style inspector for C# scripts
+  - **FSerializedField**: Field metadata with `[SerializeField]` support
+    - PropertyType detection, Range constraints
+    - Custom widget types (Slider, ColorPicker, Curve, etc.)
+  - **InspectorWidgetFactory**: Widget creation for property types
+  - **ScriptFieldExtractor**: C# reflection-based field extraction
+  - **InspectorPanel**: Full inspector UI with component grouping
+  - **Built-in Widgets**: Bool, Int, Float, String, Vector2/3/4, Quaternion, Color, Enum, Object/Asset Reference, Array, Button, Curve, Gradient
+  - **ScriptDebugger**: Visual debugging support
+    - DrawGizmo, DrawLine, DrawWireSphere/Box/Capsule
+    - DrawArrow, DrawPath, DrawRay, DrawText
+  - **PropertyDrawerRegistry**: Custom drawer registration
+  - **InspectorUndoStack**: Undo/redo for inspector changes
+
+### Enhanced Scene Serialization
+- **SceneSerializerAdvanced.h/cpp**: Reflection-integrated serialization
+  - **ReflectionComponentSerializer**: Auto-serialize using SPROPERTY metadata
+  - **JSONWriter/JSONReader**: Streaming JSON serialization
+    - Pretty printing, escape handling
+    - Compound type support (vec2/3/4, quat, mat4)
+  - **EnhancedSceneSerializer**: Full scene serialization
+    - JSON and Binary formats
+    - Entity hierarchy support
+    - Delta compression for networking
+  - **AssetReferenceSerializer**: GUID-based asset references
+    - Path-to-GUID mapping for stable references
+    - Handles asset renames/moves
+  - **SceneGraph Utilities**: Parent/child traversal, path lookup
+  - **StreamingSceneLoader**: Async loading for large scenes
+  - **SceneDiff**: Collaborative editing support
+    - Three-way merge for concurrent edits
+
+---
+
+## C++ Class Inventory (Updated)
+
+| Class | Purpose |
+|-------|---------|
+| ClusterHierarchy | Mesh cluster DAG |
+| ClusterCullingPipeline | GPU culling management |
+| HZBPipeline | Hierarchical Z-buffer |
+| IndirectDrawPipeline | Mesh shader dispatch |
+| SoftwareRasterizerPipeline | Hybrid rasterization |
+| MaterialSystem | PBR materials & lighting |
+| TemporalSystem | TAA & motion vectors |
+| SSRSystem | Hi-Z screen-space reflections |
+| **Reflection** | SPROPERTY/SCLASS macro system |
+| **RootMotionExtractor** | Animation root motion |
+| **AnimationCompressor** | ACL-style compression |
+| **AnimationRetargeter** | Skeleton retargeting |
+| **AnimationLayerMixer** | Additive/override blending |
+| **ConvolutionReverb** | FFT impulse response reverb |
+| **FMODIntegration** | FMOD middleware interface |
+| **WwiseIntegration** | Wwise middleware interface |
+| **GPUAudioOcclusion** | GPU audio occlusion |
+| **AmbisonicsEncoder** | Spatial audio encoding |
+| **InspectorPanel** | Script property inspector |
+| **ScriptDebugger** | Visual debugging |
+| **EnhancedSceneSerializer** | Reflection-based serialization |
+
+---
+
+## Phase 6: Advanced Rendering Systems (November 2025) ✅ IN PROGRESS
+
+### Render Graph System (FRDGBuilder Equivalent)
+- **RenderGraph.h/cpp**: UE5-style Render Dependency Graph
+  - `RDGResource`: Base class for GPU resources with state tracking
+  - `RDGTexture` / `RDGBuffer`: Typed resource wrappers
+  - `RDGPass`: Render pass with read/write dependencies
+  - `RDGBuilder`: Graph construction and execution
+    - Topological sort-based compilation
+    - Automatic barrier insertion
+    - Resource lifecycle management
+    - Transient resource aliasing
+  - VK_KHR_synchronization2 integration
+
+### Nanite Streaming System
+- **NaniteStreaming.h/cpp**: Geometry streaming for Nanite
+  - `NaniteStreamingPage`: 128KB streaming units
+    - Page states: Loading, Resident, PendingEviction, Evicted
+    - Refcount for in-flight references
+  - `NanitePagePool`: Physical memory pool with LRU eviction
+    - 512MB default pool size
+    - GPU buffer management
+    - Async upload queue
+  - `NaniteStreamingManager`: Orchestrates streaming
+    - Priority queue for page requests
+    - Mip bias calculation based on memory pressure
+    - Fixup mechanism for BVH parent/child patching
+  - **nanite_persistent_cull.comp**: Persistent thread culling shader
+    - MPMC job queue for hierarchy traversal
+    - LOD selection with screen-space error
+    - Subgroup operations for work distribution
+
+### Virtual Shadow Maps Advanced
+- **VirtualShadowMapsAdvanced.h/cpp**: Enhanced VSM system
+  - `VSMPageState`: Page lifecycle (Free, Rendering, Cached, Evicting)
+  - `VSMClipmapLevel`: Directional light cascades
+  - `VSMLight`: Multi-light support (Directional, Point, Spot)
+  - `VSMPagePool`: LRU-sorted page allocation
+  - Features:
+    - GPU-driven page feedback and allocation
+    - Clipmap support for directional lights
+    - Per-page HZB for efficient culling
+    - Dynamic/static page separation
+    - Cube map faces for point lights
+
+### Advanced Post-Processing
+- **PostProcessAdvanced.h/cpp**: UE5-quality post-processing
+  - **Temporal Upscaling Integration**:
+    - FSR 2.0 (AMD FidelityFX)
+    - XeSS (Intel)
+    - DLSS (NVIDIA) - interface ready
+    - Quality modes: Quality/Balanced/Performance/Ultra
+    - Auto mip bias calculation
+  - **Bokeh Depth of Field**:
+    - Physically-based CoC calculation
+    - Shaped bokeh (n-sided polygon aperture)
+    - Chromatic aberration in bokeh
+    - Cat's eye optical vignetting
+    - Vogel disk sampling
+  - **LUT Color Grading**:
+    - .cube LUT file loading
+    - 3D texture with trilinear filtering
+    - Tetrahedral interpolation option
+    - Shadow/Midtone/Highlight controls
+    - Saturation, contrast, gamma, gain
+  - **Auto-Exposure**:
+    - Histogram-based exposure
+    - Percentile-based luminance selection
+    - Smooth temporal adaptation
+
+### New Shaders
+| Shader | Type | Purpose |
+|--------|------|---------|
+| nanite_persistent_cull.comp | Compute | Persistent thread Nanite culling |
+| bokeh_dof.comp | Compute | Physically-based bokeh blur |
+| dof_coc.comp | Compute | Circle of confusion calculation |
+| lut_color_grading.comp | Compute | 3D LUT color grading |
+
+---
+
+## C++ Class Inventory (Updated)
+
+| Class | Purpose |
+|-------|---------|
+| ClusterHierarchy | Mesh cluster DAG |
+| ClusterCullingPipeline | GPU culling management |
+| HZBPipeline | Hierarchical Z-buffer |
+| IndirectDrawPipeline | Mesh shader dispatch |
+| SoftwareRasterizerPipeline | Hybrid rasterization |
+| MaterialSystem | PBR materials & lighting |
+| TemporalSystem | TAA & motion vectors |
+| SSRSystem | Hi-Z screen-space reflections |
+| **RDGBuilder** | Render Dependency Graph |
+| **NaniteStreamingManager** | Geometry streaming |
+| **NanitePagePool** | Page pool with LRU eviction |
+| **VirtualShadowMapsAdvanced** | Enhanced VSM system |
+| **AdvancedPostProcess** | FSR2/XeSS/DOF/LUT |
+| Reflection | SPROPERTY/SCLASS macro system |
+| RootMotionExtractor | Animation root motion |
+| AnimationCompressor | ACL-style compression |
+| AnimationRetargeter | Skeleton retargeting |
+| AnimationLayerMixer | Additive/override blending |
+| ConvolutionReverb | FFT impulse response reverb |
+| FMODIntegration | FMOD middleware interface |
+| WwiseIntegration | Wwise middleware interface |
+| GPUAudioOcclusion | GPU audio occlusion |
+| AmbisonicsEncoder | Spatial audio encoding |
+| InspectorPanel | Script property inspector |
+| ScriptDebugger | Visual debugging |
+| EnhancedSceneSerializer | Reflection-based serialization |
+
+---
+
 ## Build Status
 
 ✅ All shaders compile with `glslangValidator -V --target-env vulkan1.3`
 ✅ All C++ classes build successfully with Ninja/CMake
 ✅ Engine links against: Vulkan, GLFW, GLM, Jolt Physics, meshoptimizer
+✅ .NET 8 CoreCLR C# scripting integration
+✅ Optional: FSR 2.0 SDK, XeSS SDK, DLSS SDK for upscaling

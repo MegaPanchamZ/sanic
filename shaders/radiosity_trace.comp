@@ -1,0 +1,223 @@
+/**
+ * radiosity_trace.comp
+ * 
+ * Hemisphere tracing for Lumen radiosity probes.
+ * Traces rays from each probe to sample surface cache.
+ * 
+ * Uses cosine-weighted hemisphere sampling for diffuse lighting.
+ */
+
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Probe data structure
+struct RadiosityProbe {
+    vec4 positionValidity;      // xyz = position, w = validity
+    vec4 normalCardIndex;       // xyz = normal, w = cardIndex
+    vec4 atlasCoordAge;         // xy = atlasCoord, z = age, w = flags
+};
+
+// Buffer references
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ProbeBuffer {
+    RadiosityProbe probes[];
+};
+
+// Surface cache
+layout(set = 0, binding = 0) uniform sampler2D surfaceCache;
+layout(set = 0, binding = 1) uniform sampler2D surfaceNormal;
+layout(set = 0, binding = 2) uniform sampler2D surfaceDepth;
+
+// Global SDF for far-field
+layout(set = 0, binding = 3) uniform sampler3D globalSDF;
+
+// Output trace radiance
+layout(rgba16f, set = 0, binding = 4) uniform image2D traceRadiance;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint64_t probeAddr;
+    
+    vec4 sdfBoundsMin;
+    vec4 sdfBoundsMax;
+    
+    uint probeCount;
+    uint hemisphereRes;
+    uint maxTraceDistance;
+    float traceBias;
+    
+    uint frameIndex;
+    uint surfaceWidth;
+    uint surfaceHeight;
+    uint pad;
+};
+
+// Constants
+const float PI = 3.14159265359;
+const float TWO_PI = 6.28318530718;
+
+// Random number generation
+uint pcg(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+vec2 randomVec2(uint seed) {
+    return vec2(
+        float(pcg(seed)) / 4294967295.0,
+        float(pcg(seed + 1u)) / 4294967295.0
+    );
+}
+
+// Cosine-weighted hemisphere sampling
+vec3 cosineSampleHemisphere(vec2 xi, vec3 N) {
+    float phi = TWO_PI * xi.x;
+    float cosTheta = sqrt(1.0 - xi.y);
+    float sinTheta = sqrt(xi.y);
+    
+    vec3 H = vec3(
+        cos(phi) * sinTheta,
+        sin(phi) * sinTheta,
+        cosTheta
+    );
+    
+    // Transform to world space using normal
+    vec3 up = abs(N.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
+    vec3 tangent = normalize(cross(up, N));
+    vec3 bitangent = cross(N, tangent);
+    
+    return tangent * H.x + bitangent * H.y + N * H.z;
+}
+
+// SDF ray marching
+struct TraceResult {
+    vec3 position;
+    vec3 normal;
+    float distance;
+    bool hit;
+};
+
+TraceResult traceSDF(vec3 origin, vec3 direction, float maxDist) {
+    TraceResult result;
+    result.hit = false;
+    result.distance = maxDist;
+    
+    vec3 sdfSize = sdfBoundsMax.xyz - sdfBoundsMin.xyz;
+    
+    float t = 0.0;
+    for (int i = 0; i < 64 && t < maxDist; i++) {
+        vec3 pos = origin + direction * t;
+        
+        // Convert to SDF UV
+        vec3 uvw = (pos - sdfBoundsMin.xyz) / sdfSize;
+        
+        if (any(lessThan(uvw, vec3(0))) || any(greaterThan(uvw, vec3(1)))) {
+            break;  // Outside SDF bounds
+        }
+        
+        float dist = texture(globalSDF, uvw).r;
+        
+        if (dist < 0.01) {
+            result.hit = true;
+            result.position = pos;
+            result.distance = t;
+            
+            // Compute normal from SDF gradient
+            float eps = 0.01;
+            result.normal = normalize(vec3(
+                texture(globalSDF, uvw + vec3(eps, 0, 0) / sdfSize).r - texture(globalSDF, uvw - vec3(eps, 0, 0) / sdfSize).r,
+                texture(globalSDF, uvw + vec3(0, eps, 0) / sdfSize).r - texture(globalSDF, uvw - vec3(0, eps, 0) / sdfSize).r,
+                texture(globalSDF, uvw + vec3(0, 0, eps) / sdfSize).r - texture(globalSDF, uvw - vec3(0, 0, eps) / sdfSize).r
+            ));
+            
+            break;
+        }
+        
+        t += max(dist, 0.01);
+    }
+    
+    return result;
+}
+
+// Sample surface cache at hit point
+vec3 sampleSurfaceCache(vec3 position, vec3 normal) {
+    // Project position onto surface cache (simplified - real implementation uses card lookup)
+    // This is a placeholder - real implementation would find the appropriate card and sample
+    
+    // For now, sample based on position hash
+    vec2 uv = fract(position.xz * 0.1);
+    return texture(surfaceCache, uv).rgb;
+}
+
+void main() {
+    uint probeX = gl_GlobalInvocationID.x;
+    uint probeY = gl_GlobalInvocationID.y;
+    
+    uint probeIdx = probeX + probeY * (surfaceWidth / 4);  // Assuming spacing of 4
+    
+    if (probeIdx >= probeCount) return;
+    
+    // Load probe data
+    ProbeBuffer probes = ProbeBuffer(probeAddr);
+    RadiosityProbe probe = probes.probes[probeIdx];
+    
+    vec3 probePos = probe.positionValidity.xyz;
+    vec3 probeNormal = probe.normalCardIndex.xyz;
+    float validity = probe.positionValidity.w;
+    
+    if (validity <= 0.0) return;
+    
+    // Trace hemisphere
+    uint raysX = hemisphereRes;
+    uint raysY = hemisphereRes;
+    
+    vec3 totalRadiance = vec3(0.0);
+    float totalWeight = 0.0;
+    
+    for (uint ry = 0; ry < raysY; ry++) {
+        for (uint rx = 0; rx < raysX; rx++) {
+            // Stratified random offset
+            uint seed = probeIdx * 1000 + (rx + ry * raysX) + frameIndex * 65536;
+            vec2 xi = (vec2(rx, ry) + randomVec2(seed)) / vec2(raysX, raysY);
+            
+            // Cosine-weighted direction
+            vec3 rayDir = cosineSampleHemisphere(xi, probeNormal);
+            
+            // Offset origin to avoid self-intersection
+            vec3 rayOrigin = probePos + probeNormal * traceBias;
+            
+            // Trace SDF
+            TraceResult trace = traceSDF(rayOrigin, rayDir, float(maxTraceDistance));
+            
+            vec3 radiance = vec3(0.0);
+            
+            if (trace.hit) {
+                // Sample surface cache at hit point
+                radiance = sampleSurfaceCache(trace.position, trace.normal);
+            } else {
+                // Sky contribution
+                float skyWeight = max(0.0, rayDir.y);
+                radiance = vec3(0.5, 0.7, 1.0) * skyWeight * 0.5;  // Simple sky color
+            }
+            
+            // Cosine weight already in sampling, so weight is 1.0
+            totalRadiance += radiance;
+            totalWeight += 1.0;
+            
+            // Store per-ray result in atlas
+            ivec2 atlasCoord = ivec2(probeX * raysX + rx, probeY * raysY + ry);
+            imageStore(traceRadiance, atlasCoord, vec4(radiance, 1.0));
+        }
+    }
+    
+    // Average is stored in first texel
+    if (totalWeight > 0.0) {
+        ivec2 atlasCoord = ivec2(probeX * raysX, probeY * raysY);
+        imageStore(traceRadiance, atlasCoord, vec4(totalRadiance / totalWeight, 1.0));
+    }
+}
+

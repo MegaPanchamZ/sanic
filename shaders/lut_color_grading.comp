@@ -1,0 +1,274 @@
+#version 460
+
+/**
+ * lut_color_grading.comp
+ * 
+ * 3D LUT-based color grading shader.
+ * Features:
+ * - 3D LUT lookup with trilinear filtering
+ * - Multiple LUT blending
+ * - Adjustable intensity
+ * - Optional tetrahedral interpolation for quality
+ * 
+ * Based on Unreal Engine's PostProcessTonemap.usf
+ */
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// ============================================================================
+// INPUT/OUTPUT
+// ============================================================================
+
+layout(set = 0, binding = 0) uniform sampler2D colorInput;
+layout(set = 0, binding = 1) uniform sampler3D colorLUT;         // Primary LUT
+layout(set = 0, binding = 2) uniform sampler3D colorLUT2;        // Secondary LUT (for blending)
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D colorOutput;
+
+// ============================================================================
+// UNIFORMS
+// ============================================================================
+
+layout(push_constant) uniform PushConstants {
+    vec4 screenSize;      // xy = size, zw = 1/size
+    vec4 lutParams;       // x = lutSize, y = intensity, z = blendFactor, w = useSecondLUT
+    vec4 colorAdjust;     // x = saturation, y = contrast, z = gamma, w = gain
+    vec4 colorOffset;     // xyz = offset, w = unused
+    vec4 shadowsMidtonesHighlights; // x = shadows, y = midtones, z = highlights, w = shadowsWidth
+} pc;
+
+// ============================================================================
+// COLOR SPACE UTILITIES
+// ============================================================================
+
+// sRGB to Linear
+vec3 sRGBToLinear(vec3 srgb) {
+    vec3 linearLow = srgb / 12.92;
+    vec3 linearHigh = pow((srgb + 0.055) / 1.055, vec3(2.4));
+    return mix(linearLow, linearHigh, step(vec3(0.04045), srgb));
+}
+
+// Linear to sRGB
+vec3 linearToSRGB(vec3 linear) {
+    vec3 srgbLow = linear * 12.92;
+    vec3 srgbHigh = 1.055 * pow(linear, vec3(1.0/2.4)) - 0.055;
+    return mix(srgbLow, srgbHigh, step(vec3(0.0031308), linear));
+}
+
+// Luminance
+float luminance(vec3 color) {
+    return dot(color, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// ============================================================================
+// LUT SAMPLING
+// ============================================================================
+
+/**
+ * Standard trilinear 3D LUT lookup
+ */
+vec3 applyLUT(sampler3D lut, vec3 color, float lutSize) {
+    // Scale and offset for proper LUT sampling
+    // LUT is typically 32x32x32 or 64x64x64
+    float scale = (lutSize - 1.0) / lutSize;
+    float offset = 0.5 / lutSize;
+    
+    // Clamp input to valid range
+    vec3 lutCoord = clamp(color, 0.0, 1.0) * scale + offset;
+    
+    // Sample LUT with trilinear filtering
+    return texture(lut, lutCoord).rgb;
+}
+
+/**
+ * Tetrahedral interpolation for higher quality LUT lookup
+ * More accurate than trilinear but slower
+ */
+vec3 applyLUTTetrahedral(sampler3D lut, vec3 color, float lutSize) {
+    float size = lutSize;
+    vec3 scaled = clamp(color, 0.0, 1.0) * (size - 1.0);
+    
+    vec3 base = floor(scaled);
+    vec3 frac = scaled - base;
+    
+    // Texel offset
+    float texelSize = 1.0 / size;
+    vec3 texelOffset = (base + 0.5) * texelSize;
+    
+    // Sort fractions to determine tetrahedron
+    vec3 c0, c1, c2, c3;
+    vec3 v0, v1, v2, v3;
+    
+    // Sample base vertex
+    c0 = texture(lut, texelOffset).rgb;
+    
+    // Determine which tetrahedron we're in based on fraction ordering
+    if (frac.r >= frac.g) {
+        if (frac.g >= frac.b) {
+            // R >= G >= B
+            c1 = texture(lut, texelOffset + vec3(texelSize, 0, 0)).rgb;
+            c2 = texture(lut, texelOffset + vec3(texelSize, texelSize, 0)).rgb;
+            c3 = texture(lut, texelOffset + vec3(texelSize, texelSize, texelSize)).rgb;
+            v1 = vec3(1, 0, 0);
+            v2 = vec3(1, 1, 0);
+            v3 = vec3(1, 1, 1);
+        } else if (frac.r >= frac.b) {
+            // R >= B > G
+            c1 = texture(lut, texelOffset + vec3(texelSize, 0, 0)).rgb;
+            c2 = texture(lut, texelOffset + vec3(texelSize, 0, texelSize)).rgb;
+            c3 = texture(lut, texelOffset + vec3(texelSize, texelSize, texelSize)).rgb;
+            v1 = vec3(1, 0, 0);
+            v2 = vec3(1, 0, 1);
+            v3 = vec3(1, 1, 1);
+        } else {
+            // B > R >= G
+            c1 = texture(lut, texelOffset + vec3(0, 0, texelSize)).rgb;
+            c2 = texture(lut, texelOffset + vec3(texelSize, 0, texelSize)).rgb;
+            c3 = texture(lut, texelOffset + vec3(texelSize, texelSize, texelSize)).rgb;
+            v1 = vec3(0, 0, 1);
+            v2 = vec3(1, 0, 1);
+            v3 = vec3(1, 1, 1);
+        }
+    } else {
+        if (frac.b >= frac.g) {
+            // B >= G > R
+            c1 = texture(lut, texelOffset + vec3(0, 0, texelSize)).rgb;
+            c2 = texture(lut, texelOffset + vec3(0, texelSize, texelSize)).rgb;
+            c3 = texture(lut, texelOffset + vec3(texelSize, texelSize, texelSize)).rgb;
+            v1 = vec3(0, 0, 1);
+            v2 = vec3(0, 1, 1);
+            v3 = vec3(1, 1, 1);
+        } else if (frac.r >= frac.b) {
+            // G > R >= B
+            c1 = texture(lut, texelOffset + vec3(0, texelSize, 0)).rgb;
+            c2 = texture(lut, texelOffset + vec3(texelSize, texelSize, 0)).rgb;
+            c3 = texture(lut, texelOffset + vec3(texelSize, texelSize, texelSize)).rgb;
+            v1 = vec3(0, 1, 0);
+            v2 = vec3(1, 1, 0);
+            v3 = vec3(1, 1, 1);
+        } else {
+            // G >= B > R
+            c1 = texture(lut, texelOffset + vec3(0, texelSize, 0)).rgb;
+            c2 = texture(lut, texelOffset + vec3(0, texelSize, texelSize)).rgb;
+            c3 = texture(lut, texelOffset + vec3(texelSize, texelSize, texelSize)).rgb;
+            v1 = vec3(0, 1, 0);
+            v2 = vec3(0, 1, 1);
+            v3 = vec3(1, 1, 1);
+        }
+    }
+    
+    // Calculate barycentric weights
+    vec3 d1 = v1;
+    vec3 d2 = v2 - v1;
+    vec3 d3 = v3 - v2;
+    
+    float w1 = frac.r * d1.r + frac.g * d1.g + frac.b * d1.b;
+    float w2 = frac.r * d2.r + frac.g * d2.g + frac.b * d2.b;
+    float w3 = frac.r * d3.r + frac.g * d3.g + frac.b * d3.b;
+    float w0 = 1.0 - w1 - w2 - w3;
+    
+    // Interpolate
+    return c0 * w0 + c1 * w1 + c2 * w2 + c3 * w3;
+}
+
+// ============================================================================
+// COLOR ADJUSTMENTS
+// ============================================================================
+
+/**
+ * Apply basic color adjustments (saturation, contrast, gamma, gain)
+ */
+vec3 applyColorAdjustments(vec3 color, vec4 adjust, vec3 offset) {
+    float saturation = adjust.x;
+    float contrast = adjust.y;
+    float gamma = adjust.z;
+    float gain = adjust.w;
+    
+    // Gain
+    color *= gain;
+    
+    // Gamma
+    color = pow(max(color, vec3(0.0)), vec3(1.0 / gamma));
+    
+    // Contrast (pivot at 0.5)
+    color = (color - 0.5) * contrast + 0.5;
+    
+    // Saturation
+    float lum = luminance(color);
+    color = mix(vec3(lum), color, saturation);
+    
+    // Offset
+    color += offset;
+    
+    return color;
+}
+
+/**
+ * Apply shadows/midtones/highlights adjustment
+ */
+vec3 applyShadowsMidtonesHighlights(vec3 color, vec4 smh) {
+    float shadows = smh.x;
+    float midtones = smh.y;
+    float highlights = smh.z;
+    float shadowsWidth = smh.w;
+    
+    float lum = luminance(color);
+    
+    // Calculate shadow/highlight weights using smooth curves
+    float shadowWeight = 1.0 - smoothstep(0.0, shadowsWidth, lum);
+    float highlightWeight = smoothstep(1.0 - shadowsWidth, 1.0, lum);
+    float midtoneWeight = 1.0 - shadowWeight - highlightWeight;
+    
+    // Apply adjustments
+    vec3 shadowColor = color * shadows;
+    vec3 midtoneColor = color * midtones;
+    vec3 highlightColor = color * highlights;
+    
+    return shadowColor * shadowWeight + 
+           midtoneColor * midtoneWeight + 
+           highlightColor * highlightWeight;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    ivec2 pixelPos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = ivec2(pc.screenSize.xy);
+    
+    if (pixelPos.x >= screenSize.x || pixelPos.y >= screenSize.y) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelPos) + 0.5) * pc.screenSize.zw;
+    
+    // Read input color (assumed to be in linear space after tonemapping)
+    vec3 color = texture(colorInput, uv).rgb;
+    
+    // Apply pre-LUT color adjustments
+    color = applyColorAdjustments(color, pc.colorAdjust, pc.colorOffset.xyz);
+    color = applyShadowsMidtonesHighlights(color, pc.shadowsMidtonesHighlights);
+    
+    // Clamp to [0,1] for LUT lookup
+    color = clamp(color, 0.0, 1.0);
+    
+    // Apply primary LUT
+    float lutSize = pc.lutParams.x;
+    float intensity = pc.lutParams.y;
+    float blendFactor = pc.lutParams.z;
+    bool useSecondLUT = pc.lutParams.w > 0.5;
+    
+    vec3 lutColor = applyLUT(colorLUT, color, lutSize);
+    
+    // Blend with secondary LUT if enabled
+    if (useSecondLUT) {
+        vec3 lutColor2 = applyLUT(colorLUT2, color, lutSize);
+        lutColor = mix(lutColor, lutColor2, blendFactor);
+    }
+    
+    // Blend LUT result with original based on intensity
+    vec3 finalColor = mix(color, lutColor, intensity);
+    
+    // Output
+    imageStore(colorOutput, pixelPos, vec4(finalColor, 1.0));
+}

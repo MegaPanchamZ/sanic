@@ -1,0 +1,246 @@
+#version 460
+
+/**
+ * bokeh_dof.comp
+ * 
+ * Physically-based bokeh depth of field shader.
+ * Features:
+ * - Accurate circle of confusion calculation
+ * - Shaped bokeh (hexagonal/circular aperture)
+ * - Chromatic aberration in bokeh
+ * - Cat's eye effect for wide apertures
+ * 
+ * Based on Unreal Engine's BokehDOF.usf
+ */
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// ============================================================================
+// INPUT/OUTPUT
+// ============================================================================
+
+layout(set = 0, binding = 0) uniform sampler2D colorInput;
+layout(set = 0, binding = 1) uniform sampler2D cocBuffer;    // R = CoC in pixels
+layout(set = 0, binding = 2) uniform sampler2D nearField;    // Downsampled near field
+layout(set = 0, binding = 3) uniform sampler2D farField;     // Downsampled far field
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D bokehOutput;
+
+// ============================================================================
+// UNIFORMS
+// ============================================================================
+
+layout(push_constant) uniform PushConstants {
+    vec4 screenSize;          // xy = size, zw = 1/size
+    vec4 dofParams;           // x = focusDist, y = focalLength, z = fStop, w = sensorWidth
+    vec4 dofParams2;          // x = cocScale, y = nearTrans, z = farTrans, w = maxCoC
+    vec4 bokehParams;         // x = bladeCount, y = bladeRotation, z = bladeCurvature, w = maxSamples
+    vec4 effectParams;        // x = catsEyeAmount, y = catsEyeAngle, z = chromatic, w = chromaticAmount
+} pc;
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+#define PI 3.14159265359
+#define TWO_PI 6.28318530718
+#define GOLDEN_ANGLE 2.39996323
+
+// ============================================================================
+// BOKEH SHAPE FUNCTIONS
+// ============================================================================
+
+// Generate n-sided polygon aperture shape
+float polygonalBokeh(vec2 uv, float bladeCount, float rotation, float curvature) {
+    float angle = atan(uv.y, uv.x) + rotation;
+    float r = length(uv);
+    
+    // Calculate distance to polygon edge
+    float segmentAngle = TWO_PI / bladeCount;
+    float halfAngle = segmentAngle * 0.5;
+    
+    // Find angle within current segment
+    float a = mod(angle + halfAngle, segmentAngle) - halfAngle;
+    
+    // Distance to edge
+    float edgeDist = cos(halfAngle) / cos(a);
+    
+    // Apply curvature (0 = flat edges, 1 = circular)
+    edgeDist = mix(edgeDist, 1.0, curvature);
+    
+    return smoothstep(edgeDist, edgeDist - 0.1, r);
+}
+
+// Cat's eye vignetting (optical vignetting for wide aperture)
+float catsEyeVignetting(vec2 uv, vec2 screenUV, float amount, float angle) {
+    if (amount <= 0.0) return 1.0;
+    
+    // Calculate vignetting based on position from center
+    vec2 centerOffset = screenUV - 0.5;
+    float distFromCenter = length(centerOffset);
+    
+    // Elliptical vignetting
+    vec2 vignetteDir = normalize(centerOffset);
+    float vignetteAngle = atan(vignetteDir.y, vignetteDir.x);
+    
+    // Calculate ellipse ratio based on distance from center
+    float ratio = 1.0 - amount * distFromCenter * 2.0;
+    ratio = max(ratio, 0.1);
+    
+    // Apply elliptical mask to bokeh
+    vec2 scaledUV = uv;
+    scaledUV.x /= ratio;
+    
+    return smoothstep(1.0, 0.8, length(scaledUV));
+}
+
+// ============================================================================
+// SAMPLING FUNCTIONS
+// ============================================================================
+
+// Vogel disk sampling (uniform distribution)
+vec2 vogelDiskSample(uint sampleIndex, uint numSamples, float rotation) {
+    float angle = float(sampleIndex) * GOLDEN_ANGLE + rotation;
+    float r = sqrt((float(sampleIndex) + 0.5) / float(numSamples));
+    return vec2(cos(angle), sin(angle)) * r;
+}
+
+// Sample with chromatic aberration
+vec3 sampleWithChromatic(sampler2D tex, vec2 uv, vec2 offset, float chromaticAmount) {
+    if (chromaticAmount <= 0.0) {
+        return texture(tex, uv + offset).rgb;
+    }
+    
+    // Shift RGB channels radially
+    vec2 redOffset = offset * (1.0 + chromaticAmount * 0.02);
+    vec2 greenOffset = offset;
+    vec2 blueOffset = offset * (1.0 - chromaticAmount * 0.02);
+    
+    float r = texture(tex, uv + redOffset).r;
+    float g = texture(tex, uv + greenOffset).g;
+    float b = texture(tex, uv + blueOffset).b;
+    
+    return vec3(r, g, b);
+}
+
+// ============================================================================
+// MAIN BOKEH GATHERING
+// ============================================================================
+
+vec4 gatherBokeh(vec2 uv, float coc) {
+    if (abs(coc) < 0.5) {
+        // Sharp pixel, no blur needed
+        return texture(colorInput, uv);
+    }
+    
+    float absCoc = abs(coc);
+    bool isForeground = coc < 0.0;
+    
+    // Adaptive sample count based on CoC
+    uint numSamples = uint(min(pc.bokehParams.w, absCoc * 2.0));
+    numSamples = max(numSamples, 4u);
+    
+    vec4 accumColor = vec4(0.0);
+    float accumWeight = 0.0;
+    
+    // Bokeh shape parameters
+    float bladeCount = pc.bokehParams.x;
+    float rotation = pc.bokehParams.y;
+    float curvature = pc.bokehParams.z;
+    float chromaticAmount = pc.effectParams.w;
+    float catsEyeAmount = pc.effectParams.x;
+    
+    // Sample offset scale
+    vec2 texelSize = pc.screenSize.zw;
+    float sampleRadius = absCoc * texelSize.x;
+    
+    // Random rotation per pixel for temporal stability
+    float pixelRotation = fract(sin(dot(uv * 1000.0, vec2(12.9898, 78.233))) * 43758.5453);
+    
+    for (uint i = 0; i < numSamples; i++) {
+        // Get sample position on unit disk
+        vec2 diskPos = vogelDiskSample(i, numSamples, pixelRotation * TWO_PI);
+        
+        // Apply bokeh shape
+        float shapeWeight = polygonalBokeh(diskPos, bladeCount, rotation, curvature);
+        
+        // Apply cat's eye vignetting
+        shapeWeight *= catsEyeVignetting(diskPos, uv, catsEyeAmount, pc.effectParams.y);
+        
+        if (shapeWeight <= 0.01) continue;
+        
+        // Calculate sample UV
+        vec2 sampleOffset = diskPos * sampleRadius;
+        vec2 sampleUV = uv + sampleOffset;
+        
+        // Bounds check
+        if (any(lessThan(sampleUV, vec2(0.0))) || any(greaterThan(sampleUV, vec2(1.0)))) {
+            continue;
+        }
+        
+        // Get sample CoC
+        float sampleCoc = texture(cocBuffer, sampleUV).r;
+        bool sampleIsForeground = sampleCoc < 0.0;
+        float sampleAbsCoc = abs(sampleCoc);
+        
+        // Depth-aware weighting
+        float depthWeight = 1.0;
+        
+        if (isForeground) {
+            // Foreground: accept samples with similar or larger foreground CoC
+            if (sampleIsForeground) {
+                depthWeight = smoothstep(0.0, 1.0, sampleAbsCoc / (absCoc + 0.01));
+            } else {
+                // Background samples contribute less to foreground blur
+                depthWeight = 0.1;
+            }
+        } else {
+            // Background: use standard CoC-based weighting
+            float cocDiff = sampleAbsCoc - absCoc;
+            depthWeight = smoothstep(-2.0, 2.0, cocDiff);
+        }
+        
+        // Sample color with optional chromatic aberration
+        vec3 sampleColor = sampleWithChromatic(colorInput, uv, sampleOffset, chromaticAmount);
+        
+        // Combine weights
+        float weight = shapeWeight * depthWeight;
+        
+        accumColor += vec4(sampleColor, 1.0) * weight;
+        accumWeight += weight;
+    }
+    
+    if (accumWeight > 0.0) {
+        accumColor /= accumWeight;
+    } else {
+        accumColor = texture(colorInput, uv);
+    }
+    
+    return accumColor;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    ivec2 pixelPos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = ivec2(pc.screenSize.xy);
+    
+    if (pixelPos.x >= screenSize.x || pixelPos.y >= screenSize.y) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelPos) + 0.5) * pc.screenSize.zw;
+    
+    // Read circle of confusion
+    float coc = texture(cocBuffer, uv).r;
+    float maxCoC = pc.dofParams2.w;
+    
+    // Clamp CoC to maximum
+    coc = clamp(coc, -maxCoC, maxCoC);
+    
+    // Gather bokeh samples
+    vec4 bokehColor = gatherBokeh(uv, coc);
+    
+    imageStore(bokehOutput, pixelPos, bokehColor);
+}

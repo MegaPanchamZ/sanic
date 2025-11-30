@@ -1,0 +1,129 @@
+/**
+ * radiosity_integrate.comp
+ * 
+ * Integrate SH probes to surface cache pixels.
+ * Interpolates nearby probe SH and evaluates in pixel's normal direction.
+ */
+
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// SH coefficient atlases
+layout(set = 0, binding = 0) uniform sampler2D shRedAtlas;
+layout(set = 0, binding = 1) uniform sampler2D shGreenAtlas;
+layout(set = 0, binding = 2) uniform sampler2D shBlueAtlas;
+
+// Surface cache normal
+layout(set = 0, binding = 3) uniform sampler2D surfaceNormal;
+
+// Output indirect lighting
+layout(rgba16f, set = 0, binding = 4) uniform image2D indirectLighting;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint surfaceWidth;
+    uint surfaceHeight;
+    uint probeSpacing;
+    uint probeCountX;
+    uint probeCountY;
+    float indirectIntensity;
+    uint pad0, pad1;
+};
+
+// SH evaluation constants
+const float SH_C0 = 0.282095;
+const float SH_C1 = 0.488603;
+const float SH_C2_0 = 1.092548;
+const float SH_C2_1 = 0.315392;
+const float SH_C2_2 = 0.546274;
+
+// Evaluate SH irradiance in direction
+vec3 evaluateSH(vec3 shCoeffs[9], vec3 dir) {
+    vec3 result = vec3(0.0);
+    
+    // L0
+    result += shCoeffs[0] * SH_C0;
+    
+    // L1
+    result += shCoeffs[1] * SH_C1 * dir.y;
+    result += shCoeffs[2] * SH_C1 * dir.z;
+    result += shCoeffs[3] * SH_C1 * dir.x;
+    
+    // L2
+    result += shCoeffs[4] * SH_C2_0 * dir.x * dir.y;
+    result += shCoeffs[5] * SH_C2_0 * dir.y * dir.z;
+    result += shCoeffs[6] * SH_C2_1 * (3.0 * dir.z * dir.z - 1.0);
+    result += shCoeffs[7] * SH_C2_0 * dir.x * dir.z;
+    result += shCoeffs[8] * SH_C2_2 * (dir.x * dir.x - dir.y * dir.y);
+    
+    return max(result, vec3(0.0));
+}
+
+// Load SH coefficients for a probe
+void loadProbeSH(ivec2 probeCoord, out vec3 shCoeffs[9]) {
+    probeCoord = clamp(probeCoord, ivec2(0), ivec2(probeCountX - 1, probeCountY - 1));
+    
+    // Read from 3 rows per probe
+    for (int row = 0; row < 3; row++) {
+        ivec2 atlasCoord = ivec2(probeCoord.x, probeCoord.y * 3 + row);
+        
+        vec4 r = texelFetch(shRedAtlas, atlasCoord, 0);
+        vec4 g = texelFetch(shGreenAtlas, atlasCoord, 0);
+        vec4 b = texelFetch(shBlueAtlas, atlasCoord, 0);
+        
+        for (int c = 0; c < 3 && row * 3 + c < 9; c++) {
+            int idx = row * 3 + c;
+            shCoeffs[idx] = vec3(r[c], g[c], b[c]);
+        }
+    }
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixelCoord.x >= int(surfaceWidth) || pixelCoord.y >= int(surfaceHeight)) return;
+    
+    // Load surface normal
+    vec2 uv = (vec2(pixelCoord) + 0.5) / vec2(surfaceWidth, surfaceHeight);
+    vec3 normal = texture(surfaceNormal, uv).xyz * 2.0 - 1.0;
+    
+    if (length(normal) < 0.1) {
+        imageStore(indirectLighting, pixelCoord, vec4(0.0));
+        return;
+    }
+    
+    normal = normalize(normal);
+    
+    // Find surrounding probes
+    vec2 probeF = vec2(pixelCoord) / float(probeSpacing);
+    ivec2 probe00 = ivec2(floor(probeF));
+    vec2 frac = fract(probeF);
+    
+    // Bilinear interpolation of SH
+    vec3 shCoeffs00[9], shCoeffs10[9], shCoeffs01[9], shCoeffs11[9];
+    loadProbeSH(probe00, shCoeffs00);
+    loadProbeSH(probe00 + ivec2(1, 0), shCoeffs10);
+    loadProbeSH(probe00 + ivec2(0, 1), shCoeffs01);
+    loadProbeSH(probe00 + ivec2(1, 1), shCoeffs11);
+    
+    // Interpolate SH coefficients
+    vec3 shCoeffs[9];
+    for (int i = 0; i < 9; i++) {
+        shCoeffs[i] = mix(
+            mix(shCoeffs00[i], shCoeffs10[i], frac.x),
+            mix(shCoeffs01[i], shCoeffs11[i], frac.x),
+            frac.y
+        );
+    }
+    
+    // Evaluate SH in normal direction for irradiance
+    vec3 irradiance = evaluateSH(shCoeffs, normal);
+    
+    // Apply intensity
+    irradiance *= indirectIntensity;
+    
+    // Output
+    imageStore(indirectLighting, pixelCoord, vec4(irradiance, 1.0));
+}
+
