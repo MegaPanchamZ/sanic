@@ -4,6 +4,7 @@
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <iostream>
 #include <cstdarg>
+#include <algorithm>
 
 // Callback for traces
 static void TraceImpl(const char *inFMT, ...) {
@@ -106,8 +107,10 @@ PhysicsSystem::PhysicsSystem() {
     // Init temp allocator
     tempAllocator = new JPH::TempAllocatorImpl(10 * 1024 * 1024);
 
-    // Init job system
-    jobSystem = new JPH::JobSystemThreadPool(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1);
+    // Init job system - use single thread for debugging
+    unsigned int numThreads = 1;  // Single-threaded for debugging
+    std::cout << "Physics Job System: " << numThreads << " thread(s)" << std::endl;
+    jobSystem = new JPH::JobSystemThreadPool(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, numThreads);
 
     // Create layer interfaces
     bpLayerInterface = std::make_unique<BPLayerInterfaceImpl>();
@@ -134,11 +137,27 @@ PhysicsSystem::~PhysicsSystem() {
 }
 
 void PhysicsSystem::update(float deltaTime) {
+    // Skip update with very small delta time (can cause numerical issues)
+    // Minimum is 1/240 seconds (4.16ms) to avoid instability
+    const float minDeltaTime = 1.0f / 240.0f;
+    if (deltaTime < minDeltaTime) {
+        return;  // Skip this update, accumulate time for next frame
+    }
+    
+    // Clamp delta time to avoid physics explosion with large time steps
+    const float maxDeltaTime = 1.0f / 30.0f;  // Max ~33ms per step
+    deltaTime = std::min(deltaTime, maxDeltaTime);
+    
     const int cCollisionSteps = 1;
-    // physicsSystem.Update(deltaTime, cCollisionSteps, cIntegrationSubSteps, tempAllocator, jobSystem);
-    // Update takes 4 arguments in Jolt 5.0.0?
-    // Based on header: Update(float inDeltaTime, int inCollisionSteps, TempAllocator *inTempAllocator, JobSystem *inJobSystem)
-    physicsSystem.Update(deltaTime, cCollisionSteps, tempAllocator, jobSystem);
+    try {
+        physicsSystem.Update(deltaTime, cCollisionSteps, tempAllocator, jobSystem);
+    } catch (const std::exception& e) {
+        std::cerr << "Physics Update Exception: " << e.what() << std::endl;
+        throw;
+    } catch (...) {
+        std::cerr << "Physics Update Unknown Exception!" << std::endl;
+        throw;
+    }
 }
 
 void PhysicsSystem::updateGameObjects(std::vector<GameObject>& gameObjects) {

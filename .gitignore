@@ -1,5 +1,6 @@
 # Build directory
 build/
+build_msvc/
 
 # IDE files
 .vs/

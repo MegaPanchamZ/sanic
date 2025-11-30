@@ -9,8 +9,23 @@ include(FetchContent)
 
 # --- Build Options ---
 option(SANIC_BUILD_EDITOR "Build the editor" OFF)  # Disabled - needs material/shader system fixes
-option(SANIC_ENABLE_D3D12 "Enable DirectX 12 backend" OFF)  # Disabled by default due to MinGW compat issues
+option(SANIC_ENABLE_D3D12 "Enable DirectX 12 backend" OFF)  # Can enable with MSVC
 option(SANIC_ENABLE_VULKAN "Enable Vulkan backend" ON)
+
+# --- Compiler Detection ---
+if(MSVC)
+    message(STATUS "Compiler: MSVC - Full compatibility with Jolt Physics and D3D12")
+    set(SANIC_USING_MSVC TRUE)
+    # MSVC-specific flags for better performance
+    add_compile_options(/MP)  # Multi-processor compilation
+    add_compile_options(/W3)  # Warning level 3
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    message(STATUS "Compiler: GCC/MinGW - Some features may have compatibility issues")
+    set(SANIC_USING_MINGW TRUE)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(STATUS "Compiler: Clang")
+    set(SANIC_USING_CLANG TRUE)
+endif()
 
 # --- Platform Detection ---
 if(WIN32)
@@ -90,7 +105,13 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(VulkanMemoryAllocator)
 
 # Jolt Physics
-set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON) # Fix MinGW ICE
+# Note: MinGW has ICE (Internal Compiler Error) issues with precompiled headers
+# This is only needed for MinGW builds
+if(SANIC_USING_MINGW)
+    set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
+    message(STATUS "Jolt: Disabling precompiled headers for MinGW compatibility")
+endif()
+
 FetchContent_Declare(
     JoltPhysics
     GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git

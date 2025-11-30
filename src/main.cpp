@@ -79,28 +79,50 @@ int main() {
 
         Window window(800, 600, "Sanic Engine");
         PhysicsSystem physicsSystem;
+        std::cout << "Physics system created" << std::endl;
         Renderer renderer(window, physicsSystem);
+        std::cout << "Renderer created" << std::endl;
         
         Input& input = Input::getInstance();
         input.init(window.getHandle());
         
+        std::cout << "Starting main loop..." << std::endl;
+        std::cout.flush();
+        
         auto lastTime = std::chrono::high_resolution_clock::now();
+        int frameCount = 0;
         
         while (!window.shouldClose()) {
+            if (frameCount < 5) { std::cout << "Frame " << frameCount << " starting..." << std::endl; std::cout.flush(); }
             auto currentTime = std::chrono::high_resolution_clock::now();
             float deltaTime = std::chrono::duration<float>(currentTime - lastTime).count();
             lastTime = currentTime;
             
+            if (frameCount < 5) { std::cout << "  deltaTime=" << deltaTime << std::endl; std::cout.flush(); }
+            
             input.update();
             window.pollEvents();
             
-            // Physics update - now with proper delta time clamping
-            physicsSystem.update(deltaTime);
+            // Physics update - DISABLED due to crash in Jolt JobSystem
+            // Issue: Second physics Update() call crashes - likely MinGW/Jolt compatibility issue
+            // physicsSystem.update(deltaTime);
+            if (frameCount < 5) { std::cout << "  physics SKIPPED (crash workaround)" << std::endl; std::cout.flush(); }
             
+            if (frameCount == 0) { std::cout << "renderer.update()..." << std::endl; std::cout.flush(); }
             renderer.update(deltaTime); // Syncs physics transforms to game objects
+            if (frameCount == 0) { std::cout << "renderer.processInput()..." << std::endl; std::cout.flush(); }
             renderer.processInput(deltaTime);
+            if (frameCount == 0) { std::cout << "renderer.drawFrame()..." << std::endl; std::cout.flush(); }
             renderer.drawFrame();
+            if (frameCount == 0) { std::cout << "Frame complete!" << std::endl; std::cout.flush(); }
+            
+            frameCount++;
+            if (frameCount % 1000 == 0) {
+                std::cout << "Frames: " << frameCount << std::endl;
+            }
         }
+        
+        std::cout << "Exited main loop after " << frameCount << " frames" << std::endl;
         
         renderer.waitIdle();
     } catch (const std::exception& e) {
