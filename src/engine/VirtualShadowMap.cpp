@@ -1,4 +1,5 @@
 #include "VirtualShadowMap.h"
+#include "ShaderManager.h"
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
@@ -343,13 +344,9 @@ void VirtualShadowMap::createShadowPipeline() {
     }
 
     // Shaders
-    auto taskCode = readFile("shaders/vsm.task.spv");
-    auto meshCode = readFile("shaders/vsm.mesh.spv");
-    auto fragCode = readFile("shaders/vsm.frag.spv");
-
-    VkShaderModule taskModule = createShaderModule(taskCode);
-    VkShaderModule meshModule = createShaderModule(meshCode);
-    VkShaderModule fragModule = createShaderModule(fragCode);
+    VkShaderModule taskModule = ShaderManager::loadShader("shaders/vsm.task");
+    VkShaderModule meshModule = ShaderManager::loadShader("shaders/vsm.mesh");
+    VkShaderModule fragModule = ShaderManager::loadShader("shaders/vsm.frag");
 
     VkPipelineShaderStageCreateInfo taskStage{};
     taskStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -430,10 +427,6 @@ void VirtualShadowMap::createShadowPipeline() {
     if (vkCreateGraphicsPipelines(context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &shadowPipeline) != VK_SUCCESS) {
         throw std::runtime_error("failed to create VSM shadow pipeline!");
     }
-
-    vkDestroyShaderModule(context.getDevice(), taskModule, nullptr);
-    vkDestroyShaderModule(context.getDevice(), meshModule, nullptr);
-    vkDestroyShaderModule(context.getDevice(), fragModule, nullptr);
 }
 
 void VirtualShadowMap::createShadowDescriptorSet() {
@@ -628,8 +621,7 @@ void VirtualShadowMap::createPipelines() {
     }
     
     // Pipeline
-    auto computeShaderCode = readFile("shaders/vsm_marking.comp.spv");
-    VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
+    VkShaderModule computeShaderModule = ShaderManager::loadShader("shaders/vsm_marking.comp");
     
     VkPipelineShaderStageCreateInfo shaderStageInfo{};
     shaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -645,8 +637,6 @@ void VirtualShadowMap::createPipelines() {
     if (vkCreateComputePipelines(context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &markingPipeline) != VK_SUCCESS) {
         throw std::runtime_error("failed to create VSM compute pipeline!");
     }
-    
-    vkDestroyShaderModule(context.getDevice(), computeShaderModule, nullptr);
     
     // Create Sampler
     VkSamplerCreateInfo samplerInfo{};

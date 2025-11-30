@@ -1,4 +1,5 @@
 #include "MeshletStreamer.h"
+#include "ShaderManager.h"
 #include <stdexcept>
 #include <array>
 #include <fstream>
@@ -115,8 +116,7 @@ void MeshletStreamer::createDescriptorSet() {
 }
 
 void MeshletStreamer::createPipeline() {
-    auto code = readFile("shaders/cull_meshlets.comp.spv");
-    VkShaderModule shaderModule = createShaderModule(code);
+    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/cull_meshlets.comp");
     
     VkPipelineShaderStageCreateInfo shaderStageInfo{};
     shaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -141,8 +141,6 @@ void MeshletStreamer::createPipeline() {
     if (vkCreateComputePipelines(context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
         throw std::runtime_error("failed to create meshlet streamer pipeline!");
     }
-    
-    vkDestroyShaderModule(context.getDevice(), shaderModule, nullptr);
 }
 
 void MeshletStreamer::update(VkCommandBuffer cmd, const std::vector<GameObject>& gameObjects) {

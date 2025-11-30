@@ -1,4 +1,5 @@
 #include "HiZBuffer.h"
+#include "ShaderManager.h"
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -172,8 +173,7 @@ void HiZBuffer::createDescriptorSetLayout() {
 }
 
 void HiZBuffer::createComputePipeline() {
-    auto shaderCode = readFile("shaders/depth_downsample.comp.spv");
-    VkShaderModule shaderModule = createShaderModule(shaderCode);
+    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/depth_downsample.comp");
     
     VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -202,8 +202,6 @@ void HiZBuffer::createComputePipeline() {
     if (vkCreateComputePipelines(context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Hi-Z compute pipeline");
     }
-    
-    vkDestroyShaderModule(context.getDevice(), shaderModule, nullptr);
 }
 
 void HiZBuffer::createDescriptorSets() {

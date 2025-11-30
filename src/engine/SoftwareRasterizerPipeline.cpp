@@ -5,6 +5,7 @@
  */
 
 #include "SoftwareRasterizerPipeline.h"
+#include "ShaderManager.h"
 #include <fstream>
 #include <stdexcept>
 #include <cstring>
@@ -239,25 +240,6 @@ bool SoftwareRasterizerPipeline::createBuffers() {
     return true;
 }
 
-bool SoftwareRasterizerPipeline::loadShader(const std::string& path, VkShaderModule& outModule) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        return false;
-    }
-    
-    size_t fileSize = static_cast<size_t>(file.tellg());
-    std::vector<char> code(fileSize);
-    file.seekg(0);
-    file.read(code.data(), fileSize);
-    file.close();
-    
-    VkShaderModuleCreateInfo createInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    createInfo.codeSize = code.size();
-    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
-    
-    return vkCreateShaderModule(context_->getDevice(), &createInfo, nullptr, &outModule) == VK_SUCCESS;
-}
-
 bool SoftwareRasterizerPipeline::createPipelines() {
     VkDevice device = context_->getDevice();
     
@@ -278,10 +260,7 @@ bool SoftwareRasterizerPipeline::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule;
-        if (!loadShader("shaders/triangle_bin.comp.spv", shaderModule)) {
-            return false;
-        }
+        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/triangle_bin.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -293,7 +272,6 @@ bool SoftwareRasterizerPipeline::createPipelines() {
         pipelineInfo.layout = triangleBinLayout_;
         
         VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &triangleBinPipeline_);
-        vkDestroyShaderModule(device, shaderModule, nullptr);
         
         if (result != VK_SUCCESS) {
             return false;
@@ -317,10 +295,7 @@ bool SoftwareRasterizerPipeline::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule;
-        if (!loadShader("shaders/sw_rasterize.comp.spv", shaderModule)) {
-            return false;
-        }
+        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/sw_rasterize.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -332,7 +307,6 @@ bool SoftwareRasterizerPipeline::createPipelines() {
         pipelineInfo.layout = swRasterLayout_;
         
         VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &swRasterPipeline_);
-        vkDestroyShaderModule(device, shaderModule, nullptr);
         
         if (result != VK_SUCCESS) {
             return false;
@@ -400,10 +374,7 @@ bool SoftwareRasterizerPipeline::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule;
-        if (!loadShader("shaders/visbuffer_resolve.comp.spv", shaderModule)) {
-            return false;
-        }
+        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/visbuffer_resolve.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -415,7 +386,6 @@ bool SoftwareRasterizerPipeline::createPipelines() {
         pipelineInfo.layout = resolveLayout_;
         
         VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &resolveVisbufferPipeline_);
-        vkDestroyShaderModule(device, shaderModule, nullptr);
         
         if (result != VK_SUCCESS) {
             return false;

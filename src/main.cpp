@@ -31,12 +31,11 @@ int main() {
         ShaderCompiler compiler;
         std::cout << "Compiling Nanite shaders..." << std::endl;
         
-        // Assuming running from build directory, source is in ../shaders
-        // But we need to handle src/shaders for gbuffer.frag
+        // All shaders are now in the unified ../shaders directory
         auto taskSource = readShaderSource("../shaders/nanite.task");
         auto meshSource = readShaderSource("../shaders/nanite.mesh");
-        auto gbufferFragSource = readShaderSource("../src/shaders/gbuffer.frag");
-        auto compositionFragSource = readShaderSource("../src/shaders/composition.frag");
+        auto gbufferFragSource = readShaderSource("../shaders/gbuffer.frag");
+        auto compositionFragSource = readShaderSource("../shaders/composition.frag");
         
         auto taskSpirv = compiler.compileShader(taskSource, ShaderKind::Task, "nanite.task");
         auto meshSpirv = compiler.compileShader(meshSource, ShaderKind::Mesh, "nanite.mesh");

@@ -1,6 +1,7 @@
 #include "Renderer.h"
 #include "Vertex.h"
 #include "Input.h"
+#include "ShaderManager.h"
 #include <iostream>
 #include <vector>
 #include <fstream>
@@ -31,6 +32,11 @@ Renderer::Renderer(Window& window, PhysicsSystem& physicsSystem)
     graphicsQueue = vulkanContext.getGraphicsQueue();
     presentQueue = vulkanContext.getPresentQueue();
     rayTracingSupported = vulkanContext.isRayTracingSupported();
+
+    // Initialize shader manager for runtime compilation
+    if (!Sanic::ShaderManager::initialize(device, "shaders", "shader_cache")) {
+        std::cerr << "Warning: ShaderManager initialization failed, falling back to pre-compiled shaders" << std::endl;
+    }
 
     createSwapchain();
     createImageViews();
@@ -822,11 +828,13 @@ void Renderer::updateUniformBuffer(uint32_t currentImage) {
 }
 
 void Renderer::createGraphicsPipeline() {
-    auto vertShaderCode = readFile("shaders/shader.vert.spv");
-    auto fragShaderCode = readFile("shaders/shader.frag.spv");
-
-    VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
-    VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+    // Use ShaderManager for runtime compilation (no pre-compiled SPV needed)
+    VkShaderModule vertShaderModule = Sanic::ShaderManager::loadShader("shaders/shader.vert", Sanic::ShaderStage::Vertex);
+    VkShaderModule fragShaderModule = Sanic::ShaderManager::loadShader("shaders/shader.frag", Sanic::ShaderStage::Fragment);
+    
+    if (vertShaderModule == VK_NULL_HANDLE || fragShaderModule == VK_NULL_HANDLE) {
+        throw std::runtime_error("failed to compile shader modules!");
+    }
 
     VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
     vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -954,8 +962,9 @@ void Renderer::createGraphicsPipeline() {
     }
     std::cout << "Graphics Pipeline created successfully!" << std::endl;
 
-    vkDestroyShaderModule(device, fragShaderModule, nullptr);
-    vkDestroyShaderModule(device, vertShaderModule, nullptr);
+    // Shader modules are cached by ShaderManager - don't destroy here
+    // vkDestroyShaderModule(device, fragShaderModule, nullptr);
+    // vkDestroyShaderModule(device, vertShaderModule, nullptr);
 }
 
 // Note: Renderer still has createMeshPipeline but it's not used in drawFrame anymore (DeferredRenderer handles it).
@@ -1183,11 +1192,13 @@ void Renderer::createSkyboxDescriptorSetLayout() {
 }
 
 void Renderer::createSkyboxGraphicsPipeline() {
-    auto vertShaderCode = readFile("shaders/skybox.vert.spv");
-    auto fragShaderCode = readFile("shaders/skybox.frag.spv");
-
-    VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
-    VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+    // Use ShaderManager for runtime compilation
+    VkShaderModule vertShaderModule = Sanic::ShaderManager::loadShader("shaders/skybox.vert", Sanic::ShaderStage::Vertex);
+    VkShaderModule fragShaderModule = Sanic::ShaderManager::loadShader("shaders/skybox.frag", Sanic::ShaderStage::Fragment);
+    
+    if (vertShaderModule == VK_NULL_HANDLE || fragShaderModule == VK_NULL_HANDLE) {
+        throw std::runtime_error("failed to compile skybox shader modules!");
+    }
 
     VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
     vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1300,8 +1311,9 @@ void Renderer::createSkyboxGraphicsPipeline() {
         throw std::runtime_error("failed to create skybox graphics pipeline!");
     }
 
-    vkDestroyShaderModule(device, fragShaderModule, nullptr);
-    vkDestroyShaderModule(device, vertShaderModule, nullptr);
+    // Shader modules are cached by ShaderManager - don't destroy here
+    // vkDestroyShaderModule(device, fragShaderModule, nullptr);
+    // vkDestroyShaderModule(device, vertShaderModule, nullptr);
 }
 
 // RT Integration
@@ -1504,6 +1516,9 @@ void Renderer::dispatchRayTracing(VkCommandBuffer commandBuffer) {
 
 Renderer::~Renderer() {
     vkDeviceWaitIdle(device);
+    
+    // Shutdown shader manager
+    Sanic::ShaderManager::shutdown();
     
     // Cleanup RT resources
     if (rtOutputImage != VK_NULL_HANDLE) {

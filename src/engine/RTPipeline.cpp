@@ -1,4 +1,5 @@
 #include "RTPipeline.h"
+#include "ShaderManager.h"
 #include <stdexcept>
 #include <iostream>
 #include <fstream>
@@ -37,16 +38,15 @@ void RTPipeline::loadRayTracingFunctions() {
 }
 
 void RTPipeline::createPipeline(VkDescriptorSetLayout descriptorSetLayout) {
-    // Load shaders
-    auto raygenCode = readFile("shaders/simple.rgen.spv");
-    auto missCode = readFile("shaders/simple.rmiss.spv");
-    auto shadowMissCode = readFile("shaders/shadow.rmiss.spv");
-    auto chitCode = readFile("shaders/simple.rchit.spv");
-
-    VkShaderModule raygenModule = createShaderModule(raygenCode);
-    VkShaderModule missModule = createShaderModule(missCode);
-    VkShaderModule shadowMissModule = createShaderModule(shadowMissCode);
-    VkShaderModule chitModule = createShaderModule(chitCode);
+    // Load shaders using ShaderManager for runtime compilation
+    VkShaderModule raygenModule = Sanic::ShaderManager::loadShader("shaders/simple.rgen", Sanic::ShaderStage::RayGen);
+    VkShaderModule missModule = Sanic::ShaderManager::loadShader("shaders/simple.rmiss", Sanic::ShaderStage::Miss);
+    VkShaderModule shadowMissModule = Sanic::ShaderManager::loadShader("shaders/shadow.rmiss", Sanic::ShaderStage::Miss);
+    VkShaderModule chitModule = Sanic::ShaderManager::loadShader("shaders/simple.rchit", Sanic::ShaderStage::ClosestHit);
+    
+    if (!raygenModule || !missModule || !shadowMissModule || !chitModule) {
+        throw std::runtime_error("failed to compile ray tracing shaders!");
+    }
 
     // Shader stages
     // Index 0: raygen, 1: miss (primary), 2: miss (shadow), 3: closest hit

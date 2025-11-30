@@ -5,6 +5,7 @@
  */
 
 #include "ScreenProbes.h"
+#include "ShaderManager.h"
 #include "VulkanContext.h"
 #include <fstream>
 #include <algorithm>
@@ -249,8 +250,7 @@ bool ScreenProbes::createPipelines() {
     
     if (vkCreatePipelineLayout(device, &pipeLayoutInfo, nullptr, &probePlaceLayout_) != VK_SUCCESS) return false;
     
-    VkShaderModule shaderModule;
-    if (!loadShader("shaders/probe_place.comp.spv", shaderModule)) return false;
+    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/probe_place.comp");
     
     VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -262,25 +262,8 @@ bool ScreenProbes::createPipelines() {
     pipelineInfo.layout = probePlaceLayout_;
     
     VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &probePlacePipeline_);
-    vkDestroyShaderModule(device, shaderModule, nullptr);
     
     return result == VK_SUCCESS;
-}
-
-bool ScreenProbes::loadShader(const std::string& path, VkShaderModule& outModule) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) return false;
-    
-    size_t size = file.tellg();
-    std::vector<char> code(size);
-    file.seekg(0);
-    file.read(code.data(), size);
-    
-    VkShaderModuleCreateInfo createInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    createInfo.codeSize = size;
-    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
-    
-    return vkCreateShaderModule(context_->getDevice(), &createInfo, nullptr, &outModule) == VK_SUCCESS;
 }
 
 void ScreenProbes::placeProbes(VkCommandBuffer cmd,

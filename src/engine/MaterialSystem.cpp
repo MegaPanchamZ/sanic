@@ -5,6 +5,7 @@
  */
 
 #include "MaterialSystem.h"
+#include "ShaderManager.h"
 #include <fstream>
 #include <stdexcept>
 #include <cstring>
@@ -380,25 +381,6 @@ bool MaterialSystem::createDescriptorSets() {
     return true;
 }
 
-bool MaterialSystem::loadShader(const std::string& path, VkShaderModule& outModule) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        return false;
-    }
-    
-    size_t fileSize = static_cast<size_t>(file.tellg());
-    std::vector<char> code(fileSize);
-    file.seekg(0);
-    file.read(code.data(), fileSize);
-    file.close();
-    
-    VkShaderModuleCreateInfo createInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    createInfo.codeSize = code.size();
-    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
-    
-    return vkCreateShaderModule(context_->getDevice(), &createInfo, nullptr, &outModule) == VK_SUCCESS;
-}
-
 bool MaterialSystem::createPipelines() {
     VkDevice device = context_->getDevice();
     
@@ -417,10 +399,7 @@ bool MaterialSystem::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule;
-        if (!loadShader("shaders/material_bin.comp.spv", shaderModule)) {
-            return false;
-        }
+        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/material_bin.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -432,7 +411,6 @@ bool MaterialSystem::createPipelines() {
         pipelineInfo.layout = materialBinLayout_;
         
         VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &materialBinPipeline_);
-        vkDestroyShaderModule(device, shaderModule, nullptr);
         
         if (result != VK_SUCCESS) {
             return false;
@@ -456,10 +434,7 @@ bool MaterialSystem::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule;
-        if (!loadShader("shaders/material_eval.comp.spv", shaderModule)) {
-            return false;
-        }
+        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/material_eval.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -471,7 +446,6 @@ bool MaterialSystem::createPipelines() {
         pipelineInfo.layout = materialEvalLayout_;
         
         VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &materialEvalPipeline_);
-        vkDestroyShaderModule(device, shaderModule, nullptr);
         
         if (result != VK_SUCCESS) {
             return false;
@@ -498,10 +472,7 @@ bool MaterialSystem::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule;
-        if (!loadShader("shaders/deferred_lighting.comp.spv", shaderModule)) {
-            return false;
-        }
+        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/deferred_lighting.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -513,7 +484,6 @@ bool MaterialSystem::createPipelines() {
         pipelineInfo.layout = deferredLightingLayout_;
         
         VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &deferredLightingPipeline_);
-        vkDestroyShaderModule(device, shaderModule, nullptr);
         
         if (result != VK_SUCCESS) {
             return false;

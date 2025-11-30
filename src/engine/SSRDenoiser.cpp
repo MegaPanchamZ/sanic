@@ -1,4 +1,5 @@
 #include "SSRDenoiser.h"
+#include "ShaderManager.h"
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -158,8 +159,7 @@ void SSRDenoiser::createTemporalPipeline() {
     }
     
     // Create pipeline
-    auto shaderCode = readFile("shaders/ssr_temporal.comp.spv");
-    VkShaderModule shaderModule = createShaderModule(shaderCode);
+    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/ssr_temporal.comp");
     
     VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -173,8 +173,6 @@ void SSRDenoiser::createTemporalPipeline() {
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &temporalPipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create temporal compute pipeline");
     }
-    
-    vkDestroyShaderModule(device, shaderModule, nullptr);
 }
 
 void SSRDenoiser::createSpatialPipeline() {
@@ -228,8 +226,7 @@ void SSRDenoiser::createSpatialPipeline() {
     }
     
     // Create pipeline
-    auto shaderCode = readFile("shaders/ssr_denoise.comp.spv");
-    VkShaderModule shaderModule = createShaderModule(shaderCode);
+    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/ssr_denoise.comp");
     
     VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -243,8 +240,6 @@ void SSRDenoiser::createSpatialPipeline() {
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &spatialPipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create spatial compute pipeline");
     }
-    
-    vkDestroyShaderModule(device, shaderModule, nullptr);
 }
 
 void SSRDenoiser::allocateDescriptorSets() {

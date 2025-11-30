@@ -1,5 +1,6 @@
 #include "ShadowRenderer.h"
 #include "Vertex.h"
+#include "ShaderManager.h"
 #include <array>
 #include <iostream>
 #include <fstream>
@@ -310,11 +311,13 @@ void ShadowRenderer::createResources() {
 }
 
 void ShadowRenderer::createPipeline(VkDescriptorSetLayout descriptorSetLayout) {
-    auto vertShaderCode = readFile("shaders/shadow.vert.spv");
-    auto fragShaderCode = readFile("shaders/shadow.frag.spv");
-
-    VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
-    VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+    // Use ShaderManager for runtime compilation
+    VkShaderModule vertShaderModule = Sanic::ShaderManager::loadShader("shaders/shadow.vert", Sanic::ShaderStage::Vertex);
+    VkShaderModule fragShaderModule = Sanic::ShaderManager::loadShader("shaders/shadow.frag", Sanic::ShaderStage::Fragment);
+    
+    if (!vertShaderModule || !fragShaderModule) {
+        throw std::runtime_error("failed to compile shadow shaders!");
+    }
 
     VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
     vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;

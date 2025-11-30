@@ -1,4 +1,5 @@
 #include "SSRSystem.h"
+#include "ShaderManager.h"
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -265,8 +266,7 @@ void SSRSystem::createDescriptorSetLayout() {
 }
 
 void SSRSystem::createComputePipeline() {
-    auto shaderCode = readFile("shaders/ssr.comp.spv");
-    VkShaderModule shaderModule = createShaderModule(shaderCode);
+    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/ssr.comp");
     
     VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -288,8 +288,6 @@ void SSRSystem::createComputePipeline() {
     if (vkCreateComputePipelines(context.getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create SSR compute pipeline");
     }
-    
-    vkDestroyShaderModule(context.getDevice(), shaderModule, nullptr);
 }
 
 void SSRSystem::createDescriptorSet() {

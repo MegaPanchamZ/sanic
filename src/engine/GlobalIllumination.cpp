@@ -5,6 +5,7 @@
  */
 
 #include "GlobalIllumination.h"
+#include "ShaderManager.h"
 #include "ScreenProbes.h"
 #include "RadianceCache.h"
 #include "VulkanContext.h"
@@ -213,13 +214,9 @@ bool GlobalIllumination::createPipelines() {
     if (vkCreatePipelineLayout(device, &pipeLayoutInfo, nullptr, &compositeLayout_) != VK_SUCCESS) return false;
     
     // Create compute pipelines
-    VkShaderModule finalGatherModule = VK_NULL_HANDLE;
-    VkShaderModule temporalModule = VK_NULL_HANDLE;
-    VkShaderModule compositeModule = VK_NULL_HANDLE;
-    
-    if (!loadShader("build/shaders/final_gather.comp.spv", finalGatherModule)) return false;
-    if (!loadShader("build/shaders/gi_temporal.comp.spv", temporalModule)) return false;
-    if (!loadShader("build/shaders/gi_composite.comp.spv", compositeModule)) return false;
+    VkShaderModule finalGatherModule = ShaderManager::loadShader("shaders/final_gather.comp");
+    VkShaderModule temporalModule = ShaderManager::loadShader("shaders/gi_temporal.comp");
+    VkShaderModule compositeModule = ShaderManager::loadShader("shaders/gi_composite.comp");
     
     VkComputePipelineCreateInfo computeInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     computeInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
@@ -238,27 +235,7 @@ bool GlobalIllumination::createPipelines() {
     computeInfo.layout = compositeLayout_;
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computeInfo, nullptr, &compositePipeline_) != VK_SUCCESS) return false;
     
-    vkDestroyShaderModule(device, finalGatherModule, nullptr);
-    vkDestroyShaderModule(device, temporalModule, nullptr);
-    vkDestroyShaderModule(device, compositeModule, nullptr);
-    
     return true;
-}
-
-bool GlobalIllumination::loadShader(const std::string& path, VkShaderModule& outModule) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) return false;
-    
-    size_t size = file.tellg();
-    std::vector<char> code(size);
-    file.seekg(0);
-    file.read(code.data(), size);
-    
-    VkShaderModuleCreateInfo createInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    createInfo.codeSize = size;
-    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
-    
-    return vkCreateShaderModule(context_->getDevice(), &createInfo, nullptr, &outModule) == VK_SUCCESS;
 }
 
 void GlobalIllumination::update(VkCommandBuffer cmd,

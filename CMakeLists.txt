@@ -292,6 +292,7 @@ set(SOURCES
     src/engine/TextureStreamer.cpp
     src/engine/ScriptingSystem.cpp
     # Shader System
+    src/engine/ShaderManager.cpp
     src/engine/shaders/ShaderCache.cpp
     src/engine/shaders/ShaderIncluder.cpp
     src/engine/shaders/ShaderPermutation.cpp

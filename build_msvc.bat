@@ -5,6 +5,10 @@ REM This sets up the Visual Studio environment and builds with Ninja
 echo Setting up Visual Studio 2022 environment...
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 
+REM Ensure MSVC linker is used (not Chocolatey's ld.exe)
+set "MSVC_PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.35.32215\bin\Hostx64\x64"
+set "PATH=%MSVC_PATH%;%PATH%"
+
 echo.
 echo Configuring CMake with MSVC...
 cd /d F:\Dev\meme\sanic
@@ -12,7 +16,10 @@ cd /d F:\Dev\meme\sanic
 if not exist build_msvc mkdir build_msvc
 cd build_msvc
 
-cmake .. -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+cmake .. -G "Ninja" -DCMAKE_BUILD_TYPE=Release ^
+    -DCMAKE_C_COMPILER=cl ^
+    -DCMAKE_CXX_COMPILER=cl ^
+    -DCMAKE_LINKER="%MSVC_PATH%\link.exe"
 
 if %ERRORLEVEL% neq 0 (
     echo CMake configuration failed!

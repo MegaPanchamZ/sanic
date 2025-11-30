@@ -1,5 +1,6 @@
 #include "DeferredRenderer.h"
 #include "Vertex.h"
+#include "ShaderManager.h"
 #include <iostream>
 #include <fstream>
 #include <array>
@@ -348,13 +349,14 @@ void DeferredRenderer::createPipelines() {
     VkDevice device = context.getDevice();
     
     // --- Mesh Pipeline (Geometry Pass) ---
-    auto taskShaderCode = readFile("shaders/nanite.task.spv");
-    auto meshShaderCode = readFile("shaders/nanite.mesh.spv");
-    auto gbufferFragShaderCode = readFile("shaders/gbuffer.frag.spv");
-
-    VkShaderModule taskModule = createShaderModule(taskShaderCode);
-    VkShaderModule meshModule = createShaderModule(meshShaderCode);
-    VkShaderModule fragModule = createShaderModule(gbufferFragShaderCode);
+    // Use ShaderManager for runtime compilation
+    VkShaderModule taskModule = Sanic::ShaderManager::loadShader("shaders/nanite.task", Sanic::ShaderStage::Task);
+    VkShaderModule meshModule = Sanic::ShaderManager::loadShader("shaders/nanite.mesh", Sanic::ShaderStage::Mesh);
+    VkShaderModule fragModule = Sanic::ShaderManager::loadShader("shaders/gbuffer.frag", Sanic::ShaderStage::Fragment);
+    
+    if (!taskModule || !meshModule || !fragModule) {
+        throw std::runtime_error("failed to compile deferred renderer shaders!");
+    }
 
     VkPipelineShaderStageCreateInfo stages[] = {
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_TASK_BIT_EXT, taskModule, "main", nullptr},
@@ -432,15 +434,15 @@ void DeferredRenderer::createPipelines() {
         throw std::runtime_error("failed to create mesh pipeline!");
     }
 
-    vkDestroyShaderModule(device, taskModule, nullptr);
-    vkDestroyShaderModule(device, meshModule, nullptr);
-    vkDestroyShaderModule(device, fragModule, nullptr);
+    // Shader modules cached by ShaderManager
 
     // --- Composition Pipeline ---
-    auto compVertCode = readFile("shaders/composition.vert.spv");
-    auto compFragCode = readFile("shaders/composition.frag.spv");
-    VkShaderModule compVert = createShaderModule(compVertCode);
-    VkShaderModule compFrag = createShaderModule(compFragCode);
+    VkShaderModule compVert = Sanic::ShaderManager::loadShader("shaders/composition.vert", Sanic::ShaderStage::Vertex);
+    VkShaderModule compFrag = Sanic::ShaderManager::loadShader("shaders/composition.frag", Sanic::ShaderStage::Fragment);
+    
+    if (!compVert || !compFrag) {
+        throw std::runtime_error("failed to compile composition shaders!");
+    }
 
     VkPipelineShaderStageCreateInfo compStages[] = {
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, compVert, "main", nullptr},

@@ -1,4 +1,5 @@
 #include "VisBufferRenderer.h"
+#include "ShaderManager.h"
 #include <stdexcept>
 #include <array>
 #include <iostream>
@@ -269,13 +270,9 @@ void VisBufferRenderer::updateComputeDescriptorSet(VkBuffer uniformBuffer, VkDev
 
 void VisBufferRenderer::createPipelines() {
     // 1. Mesh Shader Pipeline
-    auto taskCode = readFile("shaders/visbuffer.task.spv");
-    auto meshCode = readFile("shaders/visbuffer.mesh.spv");
-    auto fragCode = readFile("shaders/visbuffer.frag.spv");
-
-    VkShaderModule taskModule = createShaderModule(taskCode);
-    VkShaderModule meshModule = createShaderModule(meshCode);
-    VkShaderModule fragModule = createShaderModule(fragCode);
+    VkShaderModule taskModule = ShaderManager::loadShader("shaders/visbuffer.task");
+    VkShaderModule meshModule = ShaderManager::loadShader("shaders/visbuffer.mesh");
+    VkShaderModule fragModule = ShaderManager::loadShader("shaders/visbuffer.frag");
 
     VkPipelineShaderStageCreateInfo taskStage{};
     taskStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -409,8 +406,7 @@ void VisBufferRenderer::createPipelines() {
     }
     
     // 2. Compute Pipeline (Software Rasterizer)
-    auto compCode = readFile("shaders/visbuffer.comp.spv");
-    VkShaderModule compModule = createShaderModule(compCode);
+    VkShaderModule compModule = ShaderManager::loadShader("shaders/visbuffer.comp");
     
     VkPipelineShaderStageCreateInfo compStage{};
     compStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -437,8 +433,7 @@ void VisBufferRenderer::createPipelines() {
     }
     
     // 3. Material Classification Pipeline
-    auto matCode = readFile("shaders/material_classify.comp.spv");
-    VkShaderModule matModule = createShaderModule(matCode);
+    VkShaderModule matModule = ShaderManager::loadShader("shaders/material_classify.comp");
     
     compStage.module = matModule;
     
@@ -452,12 +447,6 @@ void VisBufferRenderer::createPipelines() {
     if (vkCreateComputePipelines(context.getDevice(), VK_NULL_HANDLE, 1, &compPipelineInfo, nullptr, &materialPipeline) != VK_SUCCESS) {
         throw std::runtime_error("failed to create material pipeline!");
     }
-
-    vkDestroyShaderModule(context.getDevice(), taskModule, nullptr);
-    vkDestroyShaderModule(context.getDevice(), meshModule, nullptr);
-    vkDestroyShaderModule(context.getDevice(), fragModule, nullptr);
-    vkDestroyShaderModule(context.getDevice(), compModule, nullptr);
-    vkDestroyShaderModule(context.getDevice(), matModule, nullptr);
 }
 
 void VisBufferRenderer::render(VkCommandBuffer cmd, uint32_t imageIndex, const std::vector<GameObject>& gameObjects) {
