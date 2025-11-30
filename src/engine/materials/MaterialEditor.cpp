@@ -377,13 +377,13 @@ void MaterialEditor::renderNode(MaterialNode* node) {
     ImNodes::EndNodeTitleBar();
     
     // Input pins
-    const auto& inputs = node->getInputPins();
+    const auto& inputs = node->getInputs();
     for (uint32_t i = 0; i < inputs.size(); i++) {
         renderNodePin(inputs[i], true, nodeId, i);
     }
     
     // Output pins
-    const auto& outputs = node->getOutputPins();
+    const auto& outputs = node->getOutputs();
     for (uint32_t i = 0; i < outputs.size(); i++) {
         renderNodePin(outputs[i], false, nodeId, i);
     }

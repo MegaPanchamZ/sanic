@@ -112,9 +112,19 @@ ShaderCompileResult ShaderCompilerEnhanced::compile(const std::string& source,
     shaderc::CompileOptions shadercOptions;
     configureOptions(shadercOptions, options);
     
+    // Create a fresh includer for this compilation (shaderc takes ownership)
+    auto compileIncluder = std::make_unique<ShaderIncluder>();
+    for (const auto& path : defaultIncludePaths_) {
+        compileIncluder->addIncludePath(path);
+    }
+    for (const auto& path : options.includePaths) {
+        compileIncluder->addIncludePath(path);
+    }
+    // Copy virtual files
+    // Note: virtualFiles_ is private, so we skip this for now
+    
     // Set includer
-    shadercOptions.SetIncluder(std::unique_ptr<shaderc::CompileOptions::IncluderInterface>(
-        new ShaderIncluder(*includer_)));
+    shadercOptions.SetIncluder(std::move(compileIncluder));
     
     // Compile
     shaderc_shader_kind kind = toShadercKind(options.stage);

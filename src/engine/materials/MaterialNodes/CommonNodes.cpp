@@ -789,66 +789,68 @@ std::string MaterialOutputNode::generateCode(MaterialCompiler& c) const {
 // NODE REGISTRATION
 // ============================================================================
 
-// Register all common nodes with the factory
+// Register all common nodes with the factory using direct calls
 namespace {
     struct CommonNodesRegistrar {
         CommonNodesRegistrar() {
+            auto& factory = MaterialNodeFactory::getInstance();
+            
             // Constants
-            REGISTER_MATERIAL_NODE(ScalarNode);
-            REGISTER_MATERIAL_NODE(VectorNode);
-            REGISTER_MATERIAL_NODE(ColorNode);
+            factory.registerNode("ScalarNode", "Constants", []() { return std::make_unique<ScalarNode>(); });
+            factory.registerNode("VectorNode", "Constants", []() { return std::make_unique<VectorNode>(); });
+            factory.registerNode("ColorNode", "Constants", []() { return std::make_unique<ColorNode>(); });
             
             // Textures
-            REGISTER_MATERIAL_NODE(TextureSampleNode);
-            REGISTER_MATERIAL_NODE(TexCoordNode);
-            REGISTER_MATERIAL_NODE(TexCoordTransformNode);
-            REGISTER_MATERIAL_NODE(ParallaxOcclusionNode);
+            factory.registerNode("TextureSampleNode", "Textures", []() { return std::make_unique<TextureSampleNode>(); });
+            factory.registerNode("TexCoordNode", "Textures", []() { return std::make_unique<TexCoordNode>(); });
+            factory.registerNode("TexCoordTransformNode", "Textures", []() { return std::make_unique<TexCoordTransformNode>(); });
+            factory.registerNode("ParallaxOcclusionNode", "Textures", []() { return std::make_unique<ParallaxOcclusionNode>(); });
             
             // Math - Basic
-            REGISTER_MATERIAL_NODE(AddNode);
-            REGISTER_MATERIAL_NODE(SubtractNode);
-            REGISTER_MATERIAL_NODE(MultiplyNode);
-            REGISTER_MATERIAL_NODE(DivideNode);
-            REGISTER_MATERIAL_NODE(LerpNode);
-            REGISTER_MATERIAL_NODE(ClampNode);
-            REGISTER_MATERIAL_NODE(SaturateNode);
-            REGISTER_MATERIAL_NODE(OneMinusNode);
-            REGISTER_MATERIAL_NODE(AbsNode);
-            REGISTER_MATERIAL_NODE(PowerNode);
-            REGISTER_MATERIAL_NODE(SqrtNode);
+            factory.registerNode("AddNode", "Math", []() { return std::make_unique<AddNode>(); });
+            factory.registerNode("SubtractNode", "Math", []() { return std::make_unique<SubtractNode>(); });
+            factory.registerNode("MultiplyNode", "Math", []() { return std::make_unique<MultiplyNode>(); });
+            factory.registerNode("DivideNode", "Math", []() { return std::make_unique<DivideNode>(); });
+            factory.registerNode("LerpNode", "Math", []() { return std::make_unique<LerpNode>(); });
+            factory.registerNode("ClampNode", "Math", []() { return std::make_unique<ClampNode>(); });
+            factory.registerNode("SaturateNode", "Math", []() { return std::make_unique<SaturateNode>(); });
+            factory.registerNode("OneMinusNode", "Math", []() { return std::make_unique<OneMinusNode>(); });
+            factory.registerNode("AbsNode", "Math", []() { return std::make_unique<AbsNode>(); });
+            factory.registerNode("PowerNode", "Math", []() { return std::make_unique<PowerNode>(); });
+            factory.registerNode("SqrtNode", "Math", []() { return std::make_unique<SqrtNode>(); });
             
             // Math - Vector
-            REGISTER_MATERIAL_NODE(NormalizeNode);
-            REGISTER_MATERIAL_NODE(DotProductNode);
-            REGISTER_MATERIAL_NODE(CrossProductNode);
-            REGISTER_MATERIAL_NODE(ReflectNode);
-            REGISTER_MATERIAL_NODE(FresnelNode);
+            factory.registerNode("NormalizeNode", "Math", []() { return std::make_unique<NormalizeNode>(); });
+            factory.registerNode("DotProductNode", "Math", []() { return std::make_unique<DotProductNode>(); });
+            factory.registerNode("CrossProductNode", "Math", []() { return std::make_unique<CrossProductNode>(); });
+            factory.registerNode("ReflectNode", "Math", []() { return std::make_unique<ReflectNode>(); });
+            factory.registerNode("FresnelNode", "Math", []() { return std::make_unique<FresnelNode>(); });
             
             // Math - Trigonometric
-            REGISTER_MATERIAL_NODE(SinNode);
-            REGISTER_MATERIAL_NODE(CosNode);
+            factory.registerNode("SinNode", "Math", []() { return std::make_unique<SinNode>(); });
+            factory.registerNode("CosNode", "Math", []() { return std::make_unique<CosNode>(); });
             
             // Math - Rounding
-            REGISTER_MATERIAL_NODE(FloorNode);
-            REGISTER_MATERIAL_NODE(FracNode);
-            REGISTER_MATERIAL_NODE(MinNode);
-            REGISTER_MATERIAL_NODE(MaxNode);
-            REGISTER_MATERIAL_NODE(SmoothStepNode);
+            factory.registerNode("FloorNode", "Math", []() { return std::make_unique<FloorNode>(); });
+            factory.registerNode("FracNode", "Math", []() { return std::make_unique<FracNode>(); });
+            factory.registerNode("MinNode", "Math", []() { return std::make_unique<MinNode>(); });
+            factory.registerNode("MaxNode", "Math", []() { return std::make_unique<MaxNode>(); });
+            factory.registerNode("SmoothStepNode", "Math", []() { return std::make_unique<SmoothStepNode>(); });
             
             // Utility
-            REGISTER_MATERIAL_NODE(TimeNode);
-            REGISTER_MATERIAL_NODE(WorldPositionNode);
-            REGISTER_MATERIAL_NODE(WorldNormalNode);
-            REGISTER_MATERIAL_NODE(ViewDirectionNode);
-            REGISTER_MATERIAL_NODE(CameraPositionNode);
-            REGISTER_MATERIAL_NODE(ScreenPositionNode);
-            REGISTER_MATERIAL_NODE(VertexColorNode);
-            REGISTER_MATERIAL_NODE(AppendNode);
-            REGISTER_MATERIAL_NODE(ComponentMaskNode);
-            REGISTER_MATERIAL_NODE(IfNode);
+            factory.registerNode("TimeNode", "Utility", []() { return std::make_unique<TimeNode>(); });
+            factory.registerNode("WorldPositionNode", "Utility", []() { return std::make_unique<WorldPositionNode>(); });
+            factory.registerNode("WorldNormalNode", "Utility", []() { return std::make_unique<WorldNormalNode>(); });
+            factory.registerNode("ViewDirectionNode", "Utility", []() { return std::make_unique<ViewDirectionNode>(); });
+            factory.registerNode("CameraPositionNode", "Utility", []() { return std::make_unique<CameraPositionNode>(); });
+            factory.registerNode("ScreenPositionNode", "Utility", []() { return std::make_unique<ScreenPositionNode>(); });
+            factory.registerNode("VertexColorNode", "Utility", []() { return std::make_unique<VertexColorNode>(); });
+            factory.registerNode("AppendNode", "Utility", []() { return std::make_unique<AppendNode>(); });
+            factory.registerNode("ComponentMaskNode", "Utility", []() { return std::make_unique<ComponentMaskNode>(); });
+            factory.registerNode("IfNode", "Utility", []() { return std::make_unique<IfNode>(); });
             
             // Output
-            REGISTER_MATERIAL_NODE(MaterialOutputNode);
+            factory.registerNode("MaterialOutputNode", "Output", []() { return std::make_unique<MaterialOutputNode>(); });
         }
     };
     

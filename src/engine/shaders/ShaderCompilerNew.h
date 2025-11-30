@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <vulkan/vulkan.h>
 #include <shaderc/shaderc.hpp>
 #include "ShaderCache.h"
 #include "ShaderIncluder.h"

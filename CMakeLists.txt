@@ -8,8 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(FetchContent)
 
 # --- Build Options ---
-option(SANIC_BUILD_EDITOR "Build the editor" ON)
-option(SANIC_ENABLE_D3D12 "Enable DirectX 12 backend" ON)
+option(SANIC_BUILD_EDITOR "Build the editor" OFF)  # Disabled - needs material/shader system fixes
+option(SANIC_ENABLE_D3D12 "Enable DirectX 12 backend" OFF)  # Disabled by default due to MinGW compat issues
 option(SANIC_ENABLE_VULKAN "Enable Vulkan backend" ON)
 
 # --- Platform Detection ---
@@ -273,12 +273,19 @@ set(SOURCES
     src/engine/shaders/ShaderHotReload.cpp
     src/engine/shaders/ShaderCompilerNew.cpp
     src/engine/shaders/ShaderLibrary.cpp
-    # Material System
-    src/engine/materials/MaterialNode.cpp
-    src/engine/materials/MaterialNodes/CommonNodes.cpp
-    src/engine/materials/MaterialGraph.cpp
-    src/engine/materials/MaterialCompiler.cpp
-    src/engine/materials/MaterialEditor.cpp
+    # Material System - DISABLED: Requires significant API harmonization
+    # Issues remaining after partial fixes:
+    # 1. MaterialEditor.cpp: Missing imgui include paths
+    # 2. MaterialGraph.cpp: Uses instance() vs getInstance(), areTypesCompatible wrong scope
+    # 3. MaterialPin: Missing 'optional' field
+    # 4. MaterialSerializer: Missing serializeNode/deserializeNode static methods
+    # 5. MaterialCompiler.cpp: ShaderCompiler incomplete type (needs full include, not forward decl)
+    # Already fixed: addInputPin/addOutputPin wrappers, REGISTER_MATERIAL_NODE_AUTO macro
+    # src/engine/materials/MaterialNode.cpp
+    # src/engine/materials/MaterialNodes/CommonNodes.cpp
+    # src/engine/materials/MaterialGraph.cpp
+    # src/engine/materials/MaterialCompiler.cpp
+    # src/engine/materials/MaterialEditor.cpp
     # RHI Abstraction Layer
     src/engine/rhi/RHI.cpp
 )
@@ -293,14 +300,15 @@ if(SANIC_ENABLE_VULKAN)
     )
 endif()
 
-if(SANIC_ENABLE_D3D12 AND WIN32)
-    list(APPEND SOURCES
-        src/engine/rhi/d3d12/D3D12RHI.cpp
-        src/engine/rhi/d3d12/D3D12Resources.cpp
-        src/engine/rhi/d3d12/D3D12CommandList.cpp
-        src/engine/rhi/d3d12/D3D12Conversions.cpp
-    )
-endif()
+# D3D12 Backend (disabled due to MinGW compatibility issues)
+# if(SANIC_ENABLE_D3D12 AND WIN32)
+#     list(APPEND SOURCES
+#         src/engine/rhi/d3d12/D3D12RHI.cpp
+#         src/engine/rhi/d3d12/D3D12Resources.cpp
+#         src/engine/rhi/d3d12/D3D12CommandList.cpp
+#         src/engine/rhi/d3d12/D3D12Conversions.cpp
+#     )
+# endif()
 
 # --- Engine Library ---
 # Build engine as a library so it can be shared between targets
@@ -315,6 +323,8 @@ target_include_directories(SanicEngineLib PRIVATE
     ${JoltPhysics_SOURCE_DIR}/..
     ${meshoptimizer_SOURCE_DIR}/src
     ${spirv-reflect_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}
+    ${imnodes_SOURCE_DIR}
     $<$<BOOL:${SANIC_ENABLE_D3D12}>:${d3d12memoryallocator_SOURCE_DIR}/include>
 )
 
@@ -444,11 +454,13 @@ if(SANIC_BUILD_EDITOR)
         src/editor/viewport/Grid.cpp
         src/editor/panels/HierarchyPanel.cpp
         src/editor/panels/InspectorPanel.cpp
-        src/editor/panels/AssetBrowserPanel.cpp
+        src/editor/panels/AssetBrowser.cpp
         src/editor/panels/ConsolePanel.cpp
+        src/editor/panels/Menubar.cpp
+        src/editor/panels/Toolbar.cpp
         src/editor/widgets/PropertyWidgets.cpp
         src/editor/preview/PreviewRenderer.cpp
-        src/editor/EditorMain.cpp
+        src/editor/main_editor.cpp
     )
     
     add_executable(SanicEditor ${EDITOR_SOURCES} ${IMGUI_SOURCES} ${IMGUIZMO_SOURCES} ${IMNODES_SOURCES})

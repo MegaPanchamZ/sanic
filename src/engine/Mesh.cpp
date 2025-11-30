@@ -9,13 +9,19 @@
 
 Mesh::Mesh(VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue graphicsQueue, const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
     : device(device) {
+    std::cout << "  Mesh: Creating with " << vertices.size() << " vertices and " << indices.size() << " indices" << std::endl;
+    
     // Cache vertex and index data for later cluster hierarchy building
     cachedVertices = vertices;
     cachedIndices = indices;
     
+    std::cout << "  Mesh: Creating vertex buffer..." << std::endl;
     createVertexBuffer(physicalDevice, commandPool, graphicsQueue, vertices);
+    std::cout << "  Mesh: Creating index buffer..." << std::endl;
     createIndexBuffer(physicalDevice, commandPool, graphicsQueue, indices);
+    std::cout << "  Mesh: Building meshlets..." << std::endl;
     buildMeshlets(physicalDevice, commandPool, graphicsQueue, vertices, indices);
+    std::cout << "  Mesh: Construction complete" << std::endl;
 }
 
 Mesh::~Mesh() {
@@ -45,23 +51,34 @@ void Mesh::draw(VkCommandBuffer commandBuffer) {
 
 void Mesh::createVertexBuffer(VkPhysicalDevice physicalDevice, VkCommandPool commandPool, VkQueue graphicsQueue, const std::vector<Vertex>& vertices) {
     VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+    std::cout << "    VB: bufferSize=" << bufferSize << std::endl;
 
     VkBuffer stagingBuffer;
     VkDeviceMemory stagingBufferMemory;
+    std::cout << "    VB: creating staging buffer..." << std::endl;
     createBuffer(physicalDevice, bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+    std::cout << "    VB: staging buffer created" << std::endl;
 
     void* data;
+    std::cout << "    VB: mapping memory..." << std::endl;
     vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
     memcpy(data, vertices.data(), (size_t)bufferSize);
     vkUnmapMemory(device, stagingBufferMemory);
+    std::cout << "    VB: memory mapped and copied" << std::endl;
 
+    std::cout << "    VB: creating device local buffer..." << std::endl;
     createBuffer(physicalDevice, bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory);
+    std::cout << "    VB: getting buffer address..." << std::endl;
     vertexBufferAddress = getBufferAddress(vertexBuffer);
+    std::cout << "    VB: buffer address = " << vertexBufferAddress << std::endl;
 
+    std::cout << "    VB: copying buffer..." << std::endl;
     copyBuffer(commandPool, graphicsQueue, stagingBuffer, vertexBuffer, bufferSize);
+    std::cout << "    VB: buffer copied" << std::endl;
 
     vkDestroyBuffer(device, stagingBuffer, nullptr);
     vkFreeMemory(device, stagingBufferMemory, nullptr);
+    std::cout << "    VB: done" << std::endl;
 }
 
 VkDeviceAddress Mesh::getBufferAddress(VkBuffer buffer) {
@@ -94,7 +111,11 @@ void Mesh::createIndexBuffer(VkPhysicalDevice physicalDevice, VkCommandPool comm
 }
 
 void Mesh::buildMeshlets(VkPhysicalDevice physicalDevice, VkCommandPool commandPool, VkQueue graphicsQueue, const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices) {
+    std::cout << "  buildMeshlets: indices=" << indices.size() << " vertices=" << vertices.size() << std::endl;
+    
     size_t max_meshlets = meshopt_buildMeshletsBound(indices.size(), 64, 124);
+    std::cout << "  max_meshlets bound = " << max_meshlets << std::endl;
+    
     std::vector<meshopt_Meshlet> localMeshlets(max_meshlets);
     std::vector<unsigned int> meshlet_vertices(max_meshlets * 64);
     std::vector<unsigned char> meshlet_triangles(max_meshlets * 124 * 3);
@@ -102,6 +123,25 @@ void Mesh::buildMeshlets(VkPhysicalDevice physicalDevice, VkCommandPool commandP
     meshletCount = meshopt_buildMeshlets(localMeshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(),
                                          indices.data(), indices.size(), &vertices[0].pos.x, vertices.size(), sizeof(Vertex),
                                          64, 124, 0.5f);
+    
+    std::cout << "  meshletCount = " << meshletCount << std::endl;
+    
+    if (meshletCount == 0) {
+        std::cout << "  WARNING: No meshlets generated, skipping meshlet buffer creation" << std::endl;
+        // Create empty buffers to avoid null handles
+        VkDeviceSize dummySize = sizeof(Meshlet);
+        createBuffer(physicalDevice, dummySize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, meshletBuffer, meshletBufferMemory);
+        meshletBufferAddress = getBufferAddress(meshletBuffer);
+        
+        dummySize = sizeof(unsigned int);
+        createBuffer(physicalDevice, dummySize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, meshletVerticesBuffer, meshletVerticesBufferMemory);
+        meshletVerticesBufferAddress = getBufferAddress(meshletVerticesBuffer);
+        
+        dummySize = sizeof(unsigned char);
+        createBuffer(physicalDevice, dummySize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, meshletTrianglesBuffer, meshletTrianglesBufferMemory);
+        meshletTrianglesBufferAddress = getBufferAddress(meshletTrianglesBuffer);
+        return;
+    }
 
     const meshopt_Meshlet& last = localMeshlets[meshletCount - 1];
     meshlet_vertices.resize(last.vertex_offset + last.vertex_count);
@@ -212,8 +252,9 @@ void Mesh::createBuffer(VkPhysicalDevice physicalDevice, VkDeviceSize size, VkBu
     allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits, properties);
 
     // Enable Buffer Device Address if requested (for RT/Bindless)
+    // Note: flagsInfo must stay in scope until vkAllocateMemory is called
+    VkMemoryAllocateFlagsInfo flagsInfo{};
     if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
-        VkMemoryAllocateFlagsInfo flagsInfo{};
         flagsInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
         flagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
         allocInfo.pNext = &flagsInfo;

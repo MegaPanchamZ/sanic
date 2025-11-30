@@ -13,6 +13,7 @@
 #include <string>
 #include <cstdint>
 #include <optional>
+#include <map>
 
 namespace Sanic {
 

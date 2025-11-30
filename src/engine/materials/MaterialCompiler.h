@@ -169,7 +169,7 @@ private:
     bool m_DebugInfo = false;
     
     // Shader compiler for SPIR-V generation
-    std::unique_ptr<ShaderCompiler> m_ShaderCompiler;
+    std::unique_ptr<ShaderCompilerEnhanced> m_ShaderCompiler;
 };
 
 } // namespace Sanic

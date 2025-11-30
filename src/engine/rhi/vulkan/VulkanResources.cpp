@@ -18,7 +18,7 @@ VulkanBuffer::VulkanBuffer(VulkanRHI* rhi, const RHIBufferDesc& desc)
     
     // Always enable buffer device address for storage buffers
     if (hasFlag(desc.usage, RHIBufferUsage::StorageBuffer) ||
-        hasFlag(desc.usage, RHIBufferUsage::AccelerationStructureStorage)) {
+        hasFlag(desc.usage, RHIBufferUsage::AccelerationStructure)) {
         bufferInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
     

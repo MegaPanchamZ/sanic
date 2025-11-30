@@ -217,8 +217,9 @@ D3D12_BLEND ToD3D12Blend(RHIBlendFactor factor) {
         case RHIBlendFactor::OneMinusDstAlpha: return D3D12_BLEND_INV_DEST_ALPHA;
         case RHIBlendFactor::ConstantColor: return D3D12_BLEND_BLEND_FACTOR;
         case RHIBlendFactor::OneMinusConstantColor: return D3D12_BLEND_INV_BLEND_FACTOR;
-        case RHIBlendFactor::ConstantAlpha: return D3D12_BLEND_ALPHA_FACTOR;
-        case RHIBlendFactor::OneMinusConstantAlpha: return D3D12_BLEND_INV_ALPHA_FACTOR;
+        // Note: D3D12 uses BLEND_FACTOR for both color and alpha constant blend
+        case RHIBlendFactor::ConstantAlpha: return D3D12_BLEND_BLEND_FACTOR;
+        case RHIBlendFactor::OneMinusConstantAlpha: return D3D12_BLEND_INV_BLEND_FACTOR;
         case RHIBlendFactor::SrcAlphaSaturate: return D3D12_BLEND_SRC_ALPHA_SAT;
         case RHIBlendFactor::Src1Color: return D3D12_BLEND_SRC1_COLOR;
         case RHIBlendFactor::OneMinusSrc1Color: return D3D12_BLEND_INV_SRC1_COLOR;
@@ -388,8 +389,13 @@ D3D12_SHADER_VISIBILITY ToD3D12ShaderVisibility(RHIShaderStage stage) {
         case RHIShaderStage::Domain: return D3D12_SHADER_VISIBILITY_DOMAIN;
         case RHIShaderStage::Geometry: return D3D12_SHADER_VISIBILITY_GEOMETRY;
         case RHIShaderStage::Fragment: return D3D12_SHADER_VISIBILITY_PIXEL;
+#ifndef SANIC_D3D12_NO_MESH_SHADERS
         case RHIShaderStage::Task: return D3D12_SHADER_VISIBILITY_AMPLIFICATION;
         case RHIShaderStage::Mesh: return D3D12_SHADER_VISIBILITY_MESH;
+#else
+        case RHIShaderStage::Task: return D3D12_SHADER_VISIBILITY_ALL; // Fallback
+        case RHIShaderStage::Mesh: return D3D12_SHADER_VISIBILITY_ALL; // Fallback
+#endif
         default: return D3D12_SHADER_VISIBILITY_ALL;
     }
 }

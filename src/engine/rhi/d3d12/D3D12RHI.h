@@ -15,6 +15,36 @@
 #include <dxgi1_6.h>
 #include <D3D12MemAlloc.h>
 
+// Detect if newer D3D12 interfaces are available
+// MinGW may not have the newer interfaces
+#ifndef __ID3D12Device5_INTERFACE_DEFINED__
+#define SANIC_D3D12_NO_DXR
+using ID3D12Device5 = ID3D12Device;
+#endif
+
+#ifndef __ID3D12GraphicsCommandList6_INTERFACE_DEFINED__
+#define SANIC_D3D12_NO_MESH_SHADERS
+using ID3D12GraphicsCommandList6 = ID3D12GraphicsCommandList4;
+#endif
+
+#ifndef __ID3D12GraphicsCommandList4_INTERFACE_DEFINED__
+using ID3D12GraphicsCommandList4 = ID3D12GraphicsCommandList;
+using ID3D12GraphicsCommandList6 = ID3D12GraphicsCommandList;
+#endif
+
+#ifndef __ID3D12Debug3_INTERFACE_DEFINED__
+using ID3D12Debug3 = ID3D12Debug;
+#endif
+
+#ifndef __ID3D12StateObject_INTERFACE_DEFINED__
+#define SANIC_D3D12_NO_STATE_OBJECTS
+struct ID3D12StateObject : ID3D12Pageable {};
+#endif
+
+#ifndef __ID3D12InfoQueue_INTERFACE_DEFINED__
+struct ID3D12InfoQueue : IUnknown {};
+#endif
+
 #include <wrl/client.h>
 #include <vector>
 #include <array>

@@ -11,6 +11,7 @@ static uint32_t calculateMipLevels(uint32_t width, uint32_t height) {
 
 Skybox::Skybox(VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool commandPool, VkQueue queue)
     : physicalDevice(physicalDevice), device(device), commandPool(commandPool), queue(queue) {
+    std::cout << "Skybox: Creating cube vertices..." << std::endl;
 
     // Cube vertices for skybox
     std::vector<Vertex> vertices = {
@@ -63,7 +64,9 @@ Skybox::Skybox(VkPhysicalDevice physicalDevice, VkDevice device, VkCommandPool c
         indices.push_back(i);
     }
 
+    std::cout << "Skybox: Creating mesh with " << vertices.size() << " vertices..." << std::endl;
     mesh = std::make_shared<Mesh>(physicalDevice, device, commandPool, queue, vertices, indices);
+    std::cout << "Skybox: Mesh created successfully" << std::endl;
 
     // Placeholder faces
     std::vector<std::string> faces = {

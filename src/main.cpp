@@ -94,9 +94,10 @@ int main() {
             input.update();
             window.pollEvents();
             
+            // Physics update - now with proper delta time clamping
             physicsSystem.update(deltaTime);
-            renderer.update(deltaTime); // Syncs physics transforms to game objects
             
+            renderer.update(deltaTime); // Syncs physics transforms to game objects
             renderer.processInput(deltaTime);
             renderer.drawFrame();
         }
@@ -104,6 +105,12 @@ int main() {
         renderer.waitIdle();
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr.flush();
+        std::cout.flush();
+        return 1;
+    } catch (...) {
+        std::cerr << "Unknown exception caught!" << std::endl;
+        std::cerr.flush();
         return 1;
     }
     

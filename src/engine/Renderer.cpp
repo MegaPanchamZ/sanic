@@ -1050,10 +1050,14 @@ std::shared_ptr<Mesh> Renderer::createSphereMesh(int segments, int rings) {
 
 
 void Renderer::loadGameObjects() {
-    std::cout << "\n=== SANIC ENGINE FEATURE TEST SCENE ===" << std::endl;
-    std::cout << "Loading test scene to verify rendering features..." << std::endl;
+    std::cout << "\n=== SANIC ENGINE - FULL SCENE (Physics Disabled) ===" << std::endl;
+    std::cout << "Loading scene with rock objects..." << std::endl;
+    std::cout.flush();
     
-    // Load Terrain Textures
+    // ========================================================================
+    // TERRAIN - Ground plane
+    // ========================================================================
+    std::cout << "Loading terrain textures..." << std::endl;
     auto terrainDiffuse = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/ground/diffuse/ghz_ground_sk1_earth05_dif.png");
     auto terrainSpecular = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/ground/specular/ghz_ground_sk1_earth05_pow.png");
     auto terrainNormal = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/ground/normal/ghz_ground_sk1_earth05_nrm.png");
@@ -1064,7 +1068,21 @@ void Renderer::loadGameObjects() {
     terrainMaterial->normal = terrainNormal;
     terrainMaterial->shininess = 32.0f;
 
-    // Load Rock Textures (high specular for reflection testing)
+    std::cout << "Creating terrain mesh..." << std::endl;
+    auto terrainMesh = createTerrainMesh();
+    
+    GameObject terrain;
+    terrain.mesh = terrainMesh;
+    terrain.material = terrainMaterial;
+    terrain.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 0.0f));
+    createDescriptorSet(terrain);
+    gameObjects.push_back(terrain);
+    std::cout << "[TERRAIN] Ground plane loaded" << std::endl;
+
+    // ========================================================================
+    // ROCKS - Load rock textures and mesh
+    // ========================================================================
+    std::cout << "Loading rock textures..." << std::endl;
     auto rockDiffuse = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/rock/diffuse/ghz_rock_sk1_wall01_dif.png");
     auto rockSpecular = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/rock/specular/ghz_rock_sk1_wall01_pow.png");
     auto rockNormal = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/rock/normal/ghz_rock_sk1_wall01_nrm.png");
@@ -1075,300 +1093,67 @@ void Renderer::loadGameObjects() {
     rockMaterial->normal = rockNormal;
     rockMaterial->shininess = 64.0f;
 
-    // Load alternate ground texture for variety
-    auto terrainDiffuse2 = std::make_shared<Texture>(physicalDevice, device, commandPool, graphicsQueue, "../assets/ground/diffuse/ghz_ground_sk1_earth03_dif.png");
-    auto terrainMaterial2 = std::make_shared<Material>();
-    terrainMaterial2->diffuse = terrainDiffuse2;
-    terrainMaterial2->specular = terrainSpecular;
-    terrainMaterial2->normal = terrainNormal;
-    terrainMaterial2->shininess = 16.0f;
+    // Create sphere mesh for rocks
+    std::cout << "Creating rock mesh (sphere)..." << std::endl;
+    auto rockMesh = createSphereMesh(32, 16);
 
-    // Load Cube Mesh
-    tinyobj::attrib_t attrib;
-    std::vector<tinyobj::shape_t> shapes;
-    std::vector<tinyobj::material_t> materials;
-    std::string warn, err;
-
-    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, "../assets/cube.obj")) {
-        throw std::runtime_error(warn + err);
-    }
-
-    std::vector<Vertex> vertices;
-    std::vector<uint32_t> indices;
-    std::unordered_map<Vertex, uint32_t> uniqueVertices{};
-
-    for (const auto& shape : shapes) {
-        for (const auto& index : shape.mesh.indices) {
-            Vertex vertex{};
-            vertex.pos = {
-                attrib.vertices[3 * index.vertex_index + 0],
-                attrib.vertices[3 * index.vertex_index + 1],
-                attrib.vertices[3 * index.vertex_index + 2]
-            };
-            vertex.texCoord = {
-                attrib.texcoords[2 * index.texcoord_index + 0],
-                1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
-            };
-            vertex.normal = {
-                attrib.normals[3 * index.normal_index + 0],
-                attrib.normals[3 * index.normal_index + 1],
-                attrib.normals[3 * index.normal_index + 2]
-            };
-            vertex.color = {1.0f, 1.0f, 1.0f};
-            if (uniqueVertices.count(vertex) == 0) {
-                uniqueVertices[vertex] = static_cast<uint32_t>(vertices.size());
-                vertices.push_back(vertex);
-            }
-            indices.push_back(uniqueVertices[vertex]);
-        }
-    }
-
-    auto cubeMesh = std::make_shared<Mesh>(physicalDevice, device, commandPool, graphicsQueue, vertices, indices);
-
-    // ============================================================
-    // TEST SCENE LAYOUT - Designed to verify rendering features
-    // ============================================================
-    
-    // 1. TERRAIN - Tests: Diffuse, Normal mapping, receives shadows
-    auto terrainMesh = createTerrainMesh();
-    GameObject terrain;
-    terrain.mesh = terrainMesh;
-    terrain.material = terrainMaterial;
-    terrain.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, 0.0f));
-    createDescriptorSet(terrain);
-    
-    // Physics Body for Terrain (Static)
-    {
-        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
-        // Create the shape first, then use it (not the settings object)
-        JPH::BoxShapeSettings floorShapeSettings(JPH::Vec3(100.0f, 1.0f, 100.0f));
-        auto shapeResult = floorShapeSettings.Create();
-        if (!shapeResult.IsValid()) {
-            std::cerr << "Failed to create floor shape!" << std::endl;
-        }
-        JPH::ShapeRefC floorShape = shapeResult.Get();
-        // Position at Y=0 to match visual transform, with box half-extent of 1.0 in Y
-        // The box extends from Y=-1 to Y=+1, so center at Y=0 places top surface at Y=+1
-        // But our visual plane is at Y=0, so we need center at Y=-1 for top surface at Y=0
-        // Actually the terrain mesh is a flat plane at Y=0, and box is for collision
-        // Set physics body center to Y=0 to match visual
-        JPH::BodyCreationSettings floorSettings(floorShape, JPH::RVec3(0.0f, 0.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
-        terrain.bodyID = bodyInterface.CreateAndAddBody(floorSettings, JPH::EActivation::DontActivate);
-    }
-    
-    gameObjects.push_back(terrain);
-    std::cout << "[TERRAIN] Ground plane - Tests: Normal mapping, shadow receiving" << std::endl;
-
-    // 2. SHADOW CASTER CUBE - Elevated to cast visible shadow on ground
-    GameObject shadowCaster;
-    shadowCaster.mesh = cubeMesh;
-    shadowCaster.material = rockMaterial;
-    shadowCaster.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.0f, 0.0f));
-    createDescriptorSet(shadowCaster);
-    
-    // Physics Body for Shadow Caster (Dynamic)
-    {
-        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
-        JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f)); // Half extents
-        auto shapeResult = boxShapeSettings.Create();
-        JPH::ShapeRefC shape = shapeResult.Get();
-        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(0.0f, 2.0f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Kinematic, Layers::MOVING);
-        shadowCaster.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
-    }
-    
-    gameObjects.push_back(shadowCaster);
-    std::cout << "[CUBE 1] Shadow caster at (0, 2, 0) - Tests: Shadow casting" << std::endl;
-
-    // 3. SHADOW RECEIVER CUBE - On ground, should have shadow from cube above
-    GameObject shadowReceiver;
-    shadowReceiver.mesh = cubeMesh;
-    shadowReceiver.material = terrainMaterial2;
-    shadowReceiver.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.5f, 0.0f));
-    createDescriptorSet(shadowReceiver);
-    
-    // Physics Body for Shadow Receiver (Dynamic)
-    {
-        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
-        JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
-        auto shapeResult = boxShapeSettings.Create();
-        JPH::ShapeRefC shape = shapeResult.Get();
-        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(0.0f, 0.5f, 0.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Kinematic, Layers::MOVING);
-        shadowReceiver.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
-    }
-    
-    gameObjects.push_back(shadowReceiver);
-    std::cout << "[CUBE 2] Shadow receiver at (0, 0.5, 0) - Tests: Shadow receiving" << std::endl;
-
-    // 4. SPECULAR TEST CUBES - Arranged to show specular highlights
-    for (int i = 0; i < 3; i++) {
-        GameObject specCube;
-        specCube.mesh = cubeMesh;
-        specCube.material = rockMaterial;
-        float x = -3.0f + i * 3.0f;
-        specCube.transform = glm::translate(glm::mat4(1.0f), glm::vec3(x, 0.5f, -3.0f));
-        createDescriptorSet(specCube);
-        
-        // Physics Body
-        {
-            JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
-            JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
-            auto shapeResult = boxShapeSettings.Create();
-            JPH::ShapeRefC shape = shapeResult.Get();
-            JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(x, 0.5f, -3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Kinematic, Layers::MOVING);
-            specCube.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
-        }
-        
-        gameObjects.push_back(specCube);
-    }
-    std::cout << "[CUBES 3-5] Specular test row at z=-3 - Tests: Specular highlights" << std::endl;
-
-    // 5. ROTATED CUBES - Test normal mapping on angled surfaces
-    GameObject rotatedCube1;
-    rotatedCube1.mesh = cubeMesh;
-    rotatedCube1.material = rockMaterial;
-    glm::mat4 rot1 = glm::translate(glm::mat4(1.0f), glm::vec3(-4.0f, 0.5f, 0.0f));
-    rot1 = glm::rotate(rot1, glm::radians(45.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-    rotatedCube1.transform = rot1;
-    createDescriptorSet(rotatedCube1);
-    
-    // Physics Body (Rotated)
-    {
-        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
-        JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
-        auto shapeResult = boxShapeSettings.Create();
-        JPH::ShapeRefC shape = shapeResult.Get();
-        // Reconstruct rotation for Jolt
-        JPH::Quat rotation = JPH::Quat::sRotation(JPH::Vec3(0, 1, 0), glm::radians(45.0f));
-        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(-4.0f, 0.5f, 0.0f), rotation, JPH::EMotionType::Kinematic, Layers::MOVING);
-        rotatedCube1.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
-    }
-
-    gameObjects.push_back(rotatedCube1);
-    std::cout << "[CUBE 6] 45-degree rotated at (-4, 0.5, 0) - Tests: Normal mapping on angles" << std::endl;
-
-    GameObject rotatedCube2;
-    rotatedCube2.mesh = cubeMesh;
-    rotatedCube2.material = rockMaterial;
-    glm::mat4 rot2 = glm::translate(glm::mat4(1.0f), glm::vec3(4.0f, 0.5f, 0.0f));
-    rot2 = glm::rotate(rot2, glm::radians(30.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-    rot2 = glm::rotate(rot2, glm::radians(30.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-    rotatedCube2.transform = rot2;
-    createDescriptorSet(rotatedCube2);
-    
-    // Physics Body (Multi-axis Rotated)
-    {
-        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
-        JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
-        auto shapeResult = boxShapeSettings.Create();
-        JPH::ShapeRefC shape = shapeResult.Get();
-        // Reconstruct rotation
-        JPH::Quat rotX = JPH::Quat::sRotation(JPH::Vec3(1, 0, 0), glm::radians(30.0f));
-        JPH::Quat rotY = JPH::Quat::sRotation(JPH::Vec3(0, 1, 0), glm::radians(30.0f));
-        JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(4.0f, 0.5f, 0.0f), rotY * rotX, JPH::EMotionType::Kinematic, Layers::MOVING);
-        rotatedCube2.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
-    }
-
-    gameObjects.push_back(rotatedCube2);
-    std::cout << "[CUBE 7] Multi-axis rotated at (4, 0.5, 0) - Tests: Complex normal transforms" << std::endl;
-
-    // 6. STACKED CUBES - Test self-shadowing
-    for (int i = 0; i < 3; i++) {
-        GameObject stackCube;
-        stackCube.mesh = cubeMesh;
-        stackCube.material = (i % 2 == 0) ? rockMaterial : terrainMaterial2;
-        stackCube.transform = glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 0.5f + i * 1.0f, 3.0f));
-        createDescriptorSet(stackCube);
-        
-        // Physics Body
-        {
-            JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
-            JPH::BoxShapeSettings boxShapeSettings(JPH::Vec3(0.5f, 0.5f, 0.5f));
-            auto shapeResult = boxShapeSettings.Create();
-            JPH::ShapeRefC shape = shapeResult.Get();
-            JPH::BodyCreationSettings boxSettings(shape, JPH::RVec3(3.0f, 0.5f + i * 1.0f, 3.0f), JPH::Quat::sIdentity(), JPH::EMotionType::Kinematic, Layers::MOVING);
-            stackCube.bodyID = bodyInterface.CreateAndAddBody(boxSettings, JPH::EActivation::DontActivate);
-        }
-        
-        gameObjects.push_back(stackCube);
-    }
-    std::cout << "[CUBES 8-10] Stacked tower at (3, y, 3) - Tests: Self-shadowing" << std::endl;
-
-    // 7. LIGHT INDICATOR SPHERE - Shows where the light source direction points from
-    auto sphereMesh = createSphereMesh(16, 12);
-    
-    // Create a bright yellow material for the light indicator
-    auto lightMaterial = std::make_shared<Material>();
-    lightMaterial->diffuse = terrainSpecular;  // Use specular map (white-ish)
-    lightMaterial->specular = terrainSpecular;
-    lightMaterial->normal = terrainNormal;
-    lightMaterial->shininess = 1.0f;
-    
-    // Light direction is (1, 2, 1) normalized, position at 15 units out
-    glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, 2.0f, 1.0f));
-    glm::vec3 lightIndicatorPos = lightDir * 15.0f;  // Visible in scene
-    
-    GameObject lightIndicator;
-    lightIndicator.mesh = sphereMesh;
-    lightIndicator.material = lightMaterial;
-    lightIndicator.transform = glm::scale(
-        glm::translate(glm::mat4(1.0f), lightIndicatorPos),
-        glm::vec3(1.0f)  // 1 unit radius
-    );
-    createDescriptorSet(lightIndicator);
-    
-    // Physics Body (Sphere, Static or Dynamic?) Let's make it static so it stays as indicator
-    {
-        JPH::BodyInterface& bodyInterface = physicsSystem.getBodyInterface();
-        JPH::SphereShapeSettings sphereShapeSettings(1.0f);
-        auto shapeResult = sphereShapeSettings.Create();
-        JPH::ShapeRefC shape = shapeResult.Get();
-        JPH::BodyCreationSettings sphereSettings(shape, JPH::RVec3(lightIndicatorPos.x, lightIndicatorPos.y, lightIndicatorPos.z), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
-        lightIndicator.bodyID = bodyInterface.CreateAndAddBody(sphereSettings, JPH::EActivation::DontActivate);
-    }
-    
-    gameObjects.push_back(lightIndicator);
-    std::cout << "[SPHERE] Light indicator at " << lightIndicatorPos.x << ", " 
-              << lightIndicatorPos.y << ", " << lightIndicatorPos.z << " - Shows light direction" << std::endl;
-
-    // 8. MIRROR CUBE - Tests: Perfect reflections (metallic=1, roughness=0)
-    // Create a "mirror" material - we'll use a white diffuse and set shader to treat it as mirror
-    // The shader will detect this by checking for very high specular (white texture)
-    auto mirrorMaterial = std::make_shared<Material>();
-    mirrorMaterial->diffuse = terrainSpecular;   // White-ish base
-    mirrorMaterial->specular = terrainSpecular;  // High specular signals mirror
-    mirrorMaterial->normal = terrainNormal;      // Flat normal
-    mirrorMaterial->shininess = 1000.0f;         // Very high shininess = mirror flag
-    
-    // Create a flat plane for the mirror
-    std::vector<Vertex> mirrorVerts = {
-        {{-2.0f, 0.0f, -0.05f}, {1,1,1}, {0,0}, {0,0,1}},
-        {{ 2.0f, 0.0f, -0.05f}, {1,1,1}, {1,0}, {0,0,1}},
-        {{ 2.0f, 3.0f, -0.05f}, {1,1,1}, {1,1}, {0,0,1}},
-        {{-2.0f, 3.0f, -0.05f}, {1,1,1}, {0,1}, {0,0,1}},
+    // ========================================================================
+    // STATIC ROCKS - Large decorative rocks (no physics)
+    // ========================================================================
+    std::vector<glm::vec3> staticRockPositions = {
+        glm::vec3(-5.0f, 0.5f, -3.0f),
+        glm::vec3(4.0f, 0.3f, 2.0f),
+        glm::vec3(-2.0f, 0.4f, 5.0f),
+        glm::vec3(6.0f, 0.6f, -4.0f),
+        glm::vec3(0.0f, 0.35f, -6.0f)
     };
-    std::vector<uint32_t> mirrorInds = {0, 1, 2, 2, 3, 0};
-    auto mirrorMesh = std::make_shared<Mesh>(physicalDevice, device, commandPool, graphicsQueue, mirrorVerts, mirrorInds);
-    
-    GameObject mirror;
-    mirror.mesh = mirrorMesh;
-    mirror.material = mirrorMaterial;
-    // Position mirror standing upright behind the scene
-    mirror.transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -8.0f));
-    createDescriptorSet(mirror);
-    gameObjects.push_back(mirror);
-    std::cout << "[MIRROR] Reflective plane at (0, 0, -8) - Tests: IBL reflections" << std::endl;
+    std::vector<float> staticRockScales = {1.2f, 0.8f, 1.0f, 1.5f, 0.9f};
 
-    std::cout << "\n=== FEATURE VERIFICATION GUIDE ===" << std::endl;
-    std::cout << "SHADOWS: Look for dark areas under/beside elevated cubes" << std::endl;
-    std::cout << "NORMALS: Surface details visible on cubes/terrain" << std::endl;
-    std::cout << "SPECULAR: Bright highlights when viewing at correct angle" << std::endl;
-    std::cout << "SKYBOX: Background should show cubemap (currently placeholder)" << std::endl;
-    std::cout << "DIFFUSE: Textures visible on all surfaces" << std::endl;
-    std::cout << "MIRROR: Should reflect the skybox clearly" << std::endl;
-    std::cout << "\nControls: WASD=move, Mouse=look, Shift=turbo, Space/Ctrl=up/down" << std::endl;
-    std::cout << "=================================\n" << std::endl;
+    for (size_t i = 0; i < staticRockPositions.size(); i++) {
+        GameObject rock;
+        rock.mesh = rockMesh;
+        rock.material = rockMaterial;
+        
+        glm::mat4 transform = glm::translate(glm::mat4(1.0f), staticRockPositions[i]);
+        transform = glm::scale(transform, glm::vec3(staticRockScales[i]));
+        rock.transform = transform;
+        
+        createDescriptorSet(rock);
+        gameObjects.push_back(rock);
+    }
+    std::cout << "[ROCKS] " << staticRockPositions.size() << " static rocks loaded" << std::endl;
 
-    std::cout << "GameObjects loaded: " << gameObjects.size() << " objects" << std::endl;
+    // ========================================================================
+    // DYNAMIC ROCKS - Smaller rocks that would have physics (no physics for now)
+    // ========================================================================
+    std::vector<glm::vec3> dynamicRockPositions = {
+        glm::vec3(-1.0f, 2.0f, 1.0f),
+        glm::vec3(2.0f, 3.0f, -1.0f),
+        glm::vec3(0.5f, 4.0f, 0.5f),
+        glm::vec3(-3.0f, 2.5f, 2.0f),
+        glm::vec3(3.0f, 1.5f, 3.0f)
+    };
+
+    for (size_t i = 0; i < dynamicRockPositions.size(); i++) {
+        GameObject rock;
+        rock.mesh = rockMesh;
+        rock.material = rockMaterial;
+        
+        glm::mat4 transform = glm::translate(glm::mat4(1.0f), dynamicRockPositions[i]);
+        transform = glm::scale(transform, glm::vec3(0.5f)); // Smaller dynamic rocks
+        rock.transform = transform;
+        
+        // Physics disabled for now - would add physics body here
+        // JPH::BodyCreationSettings bodySettings(...);
+        // rock.bodyID = physicsSystem.getBodyInterface().CreateAndAddBody(bodySettings, JPH::EActivation::Activate);
+        
+        createDescriptorSet(rock);
+        gameObjects.push_back(rock);
+    }
+    std::cout << "[ROCKS] " << dynamicRockPositions.size() << " dynamic rocks loaded (physics disabled)" << std::endl;
+
+    std::cout << "\nGameObjects loaded: " << gameObjects.size() << " objects total" << std::endl;
+    std::cout << "==================================================" << std::endl;
 }
 
 void Renderer::createSkyboxDescriptorSetLayout() {

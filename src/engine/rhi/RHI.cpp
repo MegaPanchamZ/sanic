@@ -1,18 +1,25 @@
 #include "RHI.h"
+
+#ifdef SANIC_ENABLE_VULKAN
 #include "vulkan/VulkanRHI.h"
-#ifdef _WIN32
+#endif
+
+#ifdef SANIC_ENABLE_D3D12
 #include "d3d12/D3D12RHI.h"
 #endif
+
 #include <stdexcept>
 
 namespace Sanic {
 
 std::unique_ptr<IRHI> CreateRHI(RHIBackend backend) {
     switch (backend) {
+#ifdef SANIC_ENABLE_VULKAN
         case RHIBackend::Vulkan:
             return std::make_unique<VulkanRHI>();
+#endif
             
-#ifdef _WIN32
+#ifdef SANIC_ENABLE_D3D12
         case RHIBackend::D3D12:
             return std::make_unique<D3D12RHI>();
 #endif
@@ -25,13 +32,14 @@ std::unique_ptr<IRHI> CreateRHI(RHIBackend backend) {
 bool IsRHIBackendAvailable(RHIBackend backend) {
     switch (backend) {
         case RHIBackend::Vulkan:
-            // Vulkan is available if the SDK is present
-            // Could add runtime check here
+#ifdef SANIC_ENABLE_VULKAN
             return true;
+#else
+            return false;
+#endif
             
         case RHIBackend::D3D12:
-#ifdef _WIN32
-            // D3D12 is available on Windows 10+
+#ifdef SANIC_ENABLE_D3D12
             return true;
 #else
             return false;

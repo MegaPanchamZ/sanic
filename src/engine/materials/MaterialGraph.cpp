@@ -45,7 +45,7 @@ MaterialNode* MaterialGraph::addNode(std::unique_ptr<MaterialNode> node) {
 }
 
 MaterialNode* MaterialGraph::createNode(const std::string& typeName) {
-    auto node = MaterialNodeFactory::instance().create(typeName);
+    auto node = MaterialNodeFactory::getInstance().create(typeName);
     if (!node) {
         return nullptr;
     }
@@ -122,8 +122,8 @@ uint64_t MaterialGraph::connect(uint64_t sourceNodeId, uint32_t sourcePinIndex,
     }
     
     // Validate pin indices
-    const auto& outputs = sourceNode->getOutputPins();
-    const auto& inputs = targetNode->getInputPins();
+    const auto& outputs = sourceNode->getOutputs();
+    const auto& inputs = targetNode->getInputs();
     
     if (sourcePinIndex >= outputs.size() || targetPinIndex >= inputs.size()) {
         return 0;
@@ -305,8 +305,8 @@ bool MaterialGraph::wouldCreateCycle(uint64_t sourceNodeId, uint64_t targetNodeI
 }
 
 bool MaterialGraph::areTypesCompatible(MaterialValueType sourceType, MaterialValueType targetType) const {
-    // Use the static function from MaterialNode
-    return MaterialNode::areTypesCompatible(sourceType, targetType);
+    // Use the free function from MaterialNode.h
+    return Sanic::areTypesCompatible(sourceType, targetType);
 }
 
 // ============================================================================
@@ -428,7 +428,7 @@ std::vector<std::pair<MaterialNode*, uint32_t>> MaterialGraph::getUnconnectedReq
     std::vector<std::pair<MaterialNode*, uint32_t>> result;
     
     for (const auto& [nodeId, node] : m_Nodes) {
-        const auto& inputs = node->getInputPins();
+        const auto& inputs = node->getInputs();
         for (uint32_t i = 0; i < inputs.size(); i++) {
             const MaterialPin& pin = inputs[i];
             
@@ -474,7 +474,7 @@ std::vector<MaterialGraphDiagnostic> MaterialGraph::validate() const {
         MaterialGraphDiagnostic diag;
         diag.severity = MaterialGraphDiagnostic::Severity::Error;
         diag.nodeId = node->id;
-        diag.pinName = node->getInputPins()[pinIndex].name;
+        diag.pinName = node->getInputs()[pinIndex].name;
         diag.message = "Required input '" + diag.pinName + "' is not connected";
         diagnostics.push_back(diag);
     }
@@ -790,3 +790,4 @@ uint64_t MaterialGraph::generateConnectionId() {
 }
 
 } // namespace Sanic
+

@@ -23,6 +23,7 @@
 #include <mutex>
 #include <filesystem>
 #include <chrono>
+#include <variant>
 
 namespace Sanic {
 

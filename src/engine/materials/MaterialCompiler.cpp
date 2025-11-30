@@ -11,7 +11,8 @@
 namespace Sanic {
 
 MaterialCompiler::MaterialCompiler() {
-    m_ShaderCompiler = std::make_unique<ShaderCompiler>();
+    m_ShaderCompiler = std::make_unique<ShaderCompilerEnhanced>();
+    m_ShaderCompiler->initialize();
 }
 
 CompiledMaterial MaterialCompiler::compile(const MaterialGraph& graph) {
@@ -70,36 +71,40 @@ CompiledMaterial MaterialCompiler::compile(const MaterialGraph& graph) {
     }
     
     // Compile to SPIR-V
-    ShaderCompiler::CompileOptions options;
-    options.generateDebugInfo = m_DebugInfo;
-    options.optimizationLevel = m_OptimizationLevel;
+    ShaderCompileOptions vertOptions;
+    vertOptions.stage = ShaderStage::Vertex;
+    vertOptions.sourceName = graph.name + ".vert";
+    vertOptions.generateDebugInfo = m_DebugInfo;
+    vertOptions.optimization = (m_OptimizationLevel > 0) ? ShaderOptLevel::Performance : ShaderOptLevel::None;
     
     // Compile vertex shader
     auto vertResult = m_ShaderCompiler->compile(
         result.vertexShaderSource,
-        graph.name + ".vert",
-        ShaderStage::Vertex,
-        options
+        vertOptions
     );
     
     if (!vertResult.success) {
         result.success = false;
-        result.errorMessage = "Vertex shader compilation failed:\n" + vertResult.errorMessage;
+        result.errorMessage = "Vertex shader compilation failed:\n" + vertResult.errors;
         return result;
     }
     result.vertexSpirv = vertResult.spirv;
     
     // Compile fragment shader
+    ShaderCompileOptions fragOptions;
+    fragOptions.stage = ShaderStage::Fragment;
+    fragOptions.sourceName = graph.name + ".frag";
+    fragOptions.generateDebugInfo = m_DebugInfo;
+    fragOptions.optimization = (m_OptimizationLevel > 0) ? ShaderOptLevel::Performance : ShaderOptLevel::None;
+    
     auto fragResult = m_ShaderCompiler->compile(
         result.fragmentShaderSource,
-        graph.name + ".frag",
-        ShaderStage::Fragment,
-        options
+        fragOptions
     );
     
     if (!fragResult.success) {
         result.success = false;
-        result.errorMessage = "Fragment shader compilation failed:\n" + fragResult.errorMessage;
+        result.errorMessage = "Fragment shader compilation failed:\n" + fragResult.errors;
         return result;
     }
     result.fragmentSpirv = fragResult.spirv;
@@ -135,7 +140,7 @@ std::string MaterialCompiler::getInputValue(const MaterialNode* node, const std:
     if (!m_CurrentGraph) return defaultValue;
     
     // Find the input pin index
-    const auto& inputs = node->getInputPins();
+    const auto& inputs = node->getInputs();
     uint32_t pinIndex = 0;
     bool found = false;
     
@@ -159,7 +164,7 @@ std::string MaterialCompiler::getInputValue(const MaterialNode* node, const std:
     MaterialNode* sourceNode = m_CurrentGraph->getNode(connection->sourceNodeId);
     if (!sourceNode) return defaultValue;
     
-    const auto& outputs = sourceNode->getOutputPins();
+    const auto& outputs = sourceNode->getOutputs();
     if (connection->sourcePin >= outputs.size()) return defaultValue;
     
     const std::string& sourcePinName = outputs[connection->sourcePin].name;
@@ -381,7 +386,7 @@ void MaterialCompiler::generateNodeCode(const MaterialGraph& graph) {
         
         // Register the main output
         if (!result.empty()) {
-            const auto& outputs = node->getOutputPins();
+            const auto& outputs = node->getOutputs();
             if (!outputs.empty()) {
                 // Register first output pin as default
                 m_NodeOutputs[node->id][outputs[0].name] = result;
@@ -500,3 +505,4 @@ std::string MaterialCompiler::getGBufferOutputs() const {
 }
 
 } // namespace Sanic
+

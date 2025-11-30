@@ -519,4 +519,114 @@ bool MaterialSerializer::fromString(const std::string& data) {
     return true;
 }
 
+nlohmann::json MaterialSerializer::serializeNode(const MaterialNode* node) {
+    nlohmann::json json;
+    
+    if (!node) return json;
+    
+    json["typeName"] = node->getName();
+    json["category"] = node->getCategory();
+    json["posX"] = node->position.x;
+    json["posY"] = node->position.y;
+    
+    // Serialize input default values
+    nlohmann::json inputsJson = nlohmann::json::array();
+    const auto& inputs = node->getInputs();
+    for (size_t i = 0; i < inputs.size(); i++) {
+        const auto& pin = inputs[i];
+        nlohmann::json inputJson;
+        inputJson["name"] = pin.name;
+        inputJson["type"] = static_cast<int>(pin.type);
+        
+        // Serialize default value
+        std::visit([&inputJson](auto&& value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, float>) {
+                inputJson["valueType"] = "float";
+                inputJson["value"] = value;
+            } else if constexpr (std::is_same_v<T, glm::vec2>) {
+                inputJson["valueType"] = "vec2";
+                inputJson["value"] = {value.x, value.y};
+            } else if constexpr (std::is_same_v<T, glm::vec3>) {
+                inputJson["valueType"] = "vec3";
+                inputJson["value"] = {value.x, value.y, value.z};
+            } else if constexpr (std::is_same_v<T, glm::vec4>) {
+                inputJson["valueType"] = "vec4";
+                inputJson["value"] = {value.x, value.y, value.z, value.w};
+            } else if constexpr (std::is_same_v<T, int32_t>) {
+                inputJson["valueType"] = "int";
+                inputJson["value"] = value;
+            } else if constexpr (std::is_same_v<T, bool>) {
+                inputJson["valueType"] = "bool";
+                inputJson["value"] = value;
+            } else if constexpr (std::is_same_v<T, std::string>) {
+                inputJson["valueType"] = "string";
+                inputJson["value"] = value;
+            }
+        }, pin.defaultValue);
+        
+        inputsJson.push_back(inputJson);
+    }
+    json["inputs"] = inputsJson;
+    
+    return json;
+}
+
+std::unique_ptr<MaterialNode> MaterialSerializer::deserializeNode(const nlohmann::json& json) {
+    if (!json.contains("typeName")) return nullptr;
+    
+    std::string typeName = json["typeName"].get<std::string>();
+    
+    // Create node using factory
+    auto node = MaterialNodeFactory::getInstance().create(typeName);
+    if (!node) return nullptr;
+    
+    // Restore position
+    if (json.contains("posX") && json.contains("posY")) {
+        node->position.x = json["posX"].get<float>();
+        node->position.y = json["posY"].get<float>();
+    }
+    
+    // Restore input default values
+    if (json.contains("inputs") && json["inputs"].is_array()) {
+        auto& nodeInputs = node->getInputsMutable();
+        for (const auto& inputJson : json["inputs"]) {
+            if (!inputJson.contains("name")) continue;
+            
+            std::string name = inputJson["name"].get<std::string>();
+            
+            // Find matching input by name
+            for (auto& input : nodeInputs) {
+                if (input.name != name) continue;
+                
+                if (inputJson.contains("valueType") && inputJson.contains("value")) {
+                    std::string valueType = inputJson["valueType"].get<std::string>();
+                    
+                    if (valueType == "float") {
+                        input.defaultValue = inputJson["value"].get<float>();
+                    } else if (valueType == "vec2") {
+                        auto arr = inputJson["value"];
+                        input.defaultValue = glm::vec2(arr[0].get<float>(), arr[1].get<float>());
+                    } else if (valueType == "vec3") {
+                        auto arr = inputJson["value"];
+                        input.defaultValue = glm::vec3(arr[0].get<float>(), arr[1].get<float>(), arr[2].get<float>());
+                    } else if (valueType == "vec4") {
+                        auto arr = inputJson["value"];
+                        input.defaultValue = glm::vec4(arr[0].get<float>(), arr[1].get<float>(), arr[2].get<float>(), arr[3].get<float>());
+                    } else if (valueType == "int") {
+                        input.defaultValue = inputJson["value"].get<int32_t>();
+                    } else if (valueType == "bool") {
+                        input.defaultValue = inputJson["value"].get<bool>();
+                    } else if (valueType == "string") {
+                        input.defaultValue = inputJson["value"].get<std::string>();
+                    }
+                }
+                break;
+            }
+        }
+    }
+    
+    return node;
+}
+
 } // namespace Sanic

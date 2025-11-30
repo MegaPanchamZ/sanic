@@ -8,6 +8,7 @@
 #pragma once
 
 #include "MaterialNode.h"
+#include <nlohmann/json.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <functional>

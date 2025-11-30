@@ -21,6 +21,7 @@
 #include <functional>
 #include <unordered_map>
 #include <glm/glm.hpp>
+#include <nlohmann/json.hpp>
 
 namespace Sanic {
 
@@ -75,9 +76,9 @@ using MaterialPinValue = std::variant<
 >;
 
 /**
- * Connection to another node's pin
+ * Connection to another node's pin (simple reference)
  */
-struct MaterialConnection {
+struct MaterialNodeConnection {
     uint32_t nodeId = 0;       // ID of connected node
     uint32_t pinIndex = 0;     // Index of connected pin
     
@@ -97,10 +98,13 @@ struct MaterialPin {
     MaterialPinValue defaultValue;
     
     // Connection (only for input pins)
-    std::optional<MaterialConnection> connection;
+    std::optional<MaterialNodeConnection> connection;
     
     // Whether this pin is hidden in UI
     bool hidden = false;
+    
+    // Whether this input is optional (can be unconnected)
+    bool optional = true;
     
     // Help text for tooltip
     std::string tooltip;
@@ -187,6 +191,15 @@ protected:
     uint32_t addInput(const std::string& name, MaterialValueType type);
     uint32_t addOutput(const std::string& name, MaterialValueType type);
     
+    // Convenience aliases for addInput/addOutput (optional parameter is currently ignored)
+    uint32_t addInputPin(const std::string& name, MaterialValueType type, bool optional = false) {
+        (void)optional; // Currently unused, for future extensibility
+        return addInput(name, type);
+    }
+    uint32_t addOutputPin(const std::string& name, MaterialValueType type) {
+        return addOutput(name, type);
+    }
+    
     void setInputDefault(uint32_t index, float value);
     void setInputDefault(uint32_t index, const glm::vec2& value);
     void setInputDefault(uint32_t index, const glm::vec3& value);
@@ -257,13 +270,30 @@ private:
 };
 
 /**
- * Macro for easy node registration
+ * Macro for easy node registration (with explicit category)
  */
 #define REGISTER_MATERIAL_NODE(TypeName, Category) \
     namespace { \
         static bool _reg_##TypeName = []() { \
             MaterialNodeFactory::getInstance().registerNode( \
                 #TypeName, Category, \
+                []() { return std::make_unique<TypeName>(); } \
+            ); \
+            return true; \
+        }(); \
+    }
+
+/**
+ * Macro for easy node registration (uses node's getCategory() method)
+ * Usage: REGISTER_MATERIAL_NODE_AUTO(MyNode) - category derived from getCategory()
+ */
+#define REGISTER_MATERIAL_NODE_AUTO(TypeName) \
+    namespace { \
+        static bool _reg_##TypeName = []() { \
+            auto temp = std::make_unique<TypeName>(); \
+            std::string category = temp->getCategory(); \
+            MaterialNodeFactory::getInstance().registerNode( \
+                #TypeName, category, \
                 []() { return std::make_unique<TypeName>(); } \
             ); \
             return true; \
@@ -307,6 +337,10 @@ public:
     // String I/O
     std::string toString() const;
     bool fromString(const std::string& data);
+    
+    // Static node serialization (JSON-based)
+    static nlohmann::json serializeNode(const MaterialNode* node);
+    static std::unique_ptr<MaterialNode> deserializeNode(const nlohmann::json& json);
     
 private:
     bool writing_ = true;
