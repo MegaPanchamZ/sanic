@@ -367,7 +367,7 @@ bool TemporalSystem::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/motion_vectors.comp");
+        VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/motion_vectors.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -404,7 +404,7 @@ bool TemporalSystem::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/temporal_aa.comp");
+        VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/temporal_aa.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;

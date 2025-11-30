@@ -116,7 +116,7 @@ void MeshletStreamer::createDescriptorSet() {
 }
 
 void MeshletStreamer::createPipeline() {
-    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/cull_meshlets.comp");
+    VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/cull_meshlets.comp");
     
     VkPipelineShaderStageCreateInfo shaderStageInfo{};
     shaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;

@@ -250,7 +250,7 @@ bool ScreenProbes::createPipelines() {
     
     if (vkCreatePipelineLayout(device, &pipeLayoutInfo, nullptr, &probePlaceLayout_) != VK_SUCCESS) return false;
     
-    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/probe_place.comp");
+    VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/probe_place.comp");
     
     VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;

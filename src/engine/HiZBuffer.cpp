@@ -173,7 +173,7 @@ void HiZBuffer::createDescriptorSetLayout() {
 }
 
 void HiZBuffer::createComputePipeline() {
-    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/depth_downsample.comp");
+    VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/depth_downsample.comp");
     
     VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;

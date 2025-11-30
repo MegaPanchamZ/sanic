@@ -260,7 +260,7 @@ bool SoftwareRasterizerPipeline::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/triangle_bin.comp");
+        VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/triangle_bin.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -295,7 +295,7 @@ bool SoftwareRasterizerPipeline::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/sw_rasterize.comp");
+        VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/sw_rasterize.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -374,7 +374,7 @@ bool SoftwareRasterizerPipeline::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/visbuffer_resolve.comp");
+        VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/visbuffer_resolve.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;

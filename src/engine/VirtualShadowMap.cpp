@@ -344,9 +344,9 @@ void VirtualShadowMap::createShadowPipeline() {
     }
 
     // Shaders
-    VkShaderModule taskModule = ShaderManager::loadShader("shaders/vsm.task");
-    VkShaderModule meshModule = ShaderManager::loadShader("shaders/vsm.mesh");
-    VkShaderModule fragModule = ShaderManager::loadShader("shaders/vsm.frag");
+    VkShaderModule taskModule = Sanic::ShaderManager::loadShader("shaders/vsm.task");
+    VkShaderModule meshModule = Sanic::ShaderManager::loadShader("shaders/vsm.mesh");
+    VkShaderModule fragModule = Sanic::ShaderManager::loadShader("shaders/vsm.frag");
 
     VkPipelineShaderStageCreateInfo taskStage{};
     taskStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -621,7 +621,7 @@ void VirtualShadowMap::createPipelines() {
     }
     
     // Pipeline
-    VkShaderModule computeShaderModule = ShaderManager::loadShader("shaders/vsm_marking.comp");
+    VkShaderModule computeShaderModule = Sanic::ShaderManager::loadShader("shaders/vsm_marking.comp");
     
     VkPipelineShaderStageCreateInfo shaderStageInfo{};
     shaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;

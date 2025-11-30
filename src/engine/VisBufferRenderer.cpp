@@ -270,9 +270,9 @@ void VisBufferRenderer::updateComputeDescriptorSet(VkBuffer uniformBuffer, VkDev
 
 void VisBufferRenderer::createPipelines() {
     // 1. Mesh Shader Pipeline
-    VkShaderModule taskModule = ShaderManager::loadShader("shaders/visbuffer.task");
-    VkShaderModule meshModule = ShaderManager::loadShader("shaders/visbuffer.mesh");
-    VkShaderModule fragModule = ShaderManager::loadShader("shaders/visbuffer.frag");
+    VkShaderModule taskModule = Sanic::ShaderManager::loadShader("shaders/visbuffer.task");
+    VkShaderModule meshModule = Sanic::ShaderManager::loadShader("shaders/visbuffer.mesh");
+    VkShaderModule fragModule = Sanic::ShaderManager::loadShader("shaders/visbuffer.frag");
 
     VkPipelineShaderStageCreateInfo taskStage{};
     taskStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -406,7 +406,7 @@ void VisBufferRenderer::createPipelines() {
     }
     
     // 2. Compute Pipeline (Software Rasterizer)
-    VkShaderModule compModule = ShaderManager::loadShader("shaders/visbuffer.comp");
+    VkShaderModule compModule = Sanic::ShaderManager::loadShader("shaders/visbuffer.comp");
     
     VkPipelineShaderStageCreateInfo compStage{};
     compStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -433,7 +433,7 @@ void VisBufferRenderer::createPipelines() {
     }
     
     // 3. Material Classification Pipeline
-    VkShaderModule matModule = ShaderManager::loadShader("shaders/material_classify.comp");
+    VkShaderModule matModule = Sanic::ShaderManager::loadShader("shaders/material_classify.comp");
     
     compStage.module = matModule;
     

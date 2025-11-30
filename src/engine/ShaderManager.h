@@ -72,6 +72,15 @@ public:
                                      const std::vector<std::pair<std::string, std::string>>& defines = {});
     
     /**
+     * Load a shader module from source file (auto-detect stage from extension)
+     * Compiles on first load, uses cache for subsequent loads.
+     * 
+     * @param path Path to shader source (e.g., "shaders/ssr.comp" - .comp = compute)
+     * @return VkShaderModule handle, or VK_NULL_HANDLE on failure
+     */
+    static VkShaderModule loadShader(const std::string& path);
+    
+    /**
      * Load shader and get SPIR-V bytecode directly
      * Useful for ray tracing pipelines that need the raw bytes
      * 

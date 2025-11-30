@@ -159,7 +159,7 @@ void SSRDenoiser::createTemporalPipeline() {
     }
     
     // Create pipeline
-    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/ssr_temporal.comp");
+    VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/ssr_temporal.comp");
     
     VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -226,7 +226,7 @@ void SSRDenoiser::createSpatialPipeline() {
     }
     
     // Create pipeline
-    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/ssr_denoise.comp");
+    VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/ssr_denoise.comp");
     
     VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;

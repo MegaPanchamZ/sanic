@@ -214,9 +214,9 @@ bool GlobalIllumination::createPipelines() {
     if (vkCreatePipelineLayout(device, &pipeLayoutInfo, nullptr, &compositeLayout_) != VK_SUCCESS) return false;
     
     // Create compute pipelines
-    VkShaderModule finalGatherModule = ShaderManager::loadShader("shaders/final_gather.comp");
-    VkShaderModule temporalModule = ShaderManager::loadShader("shaders/gi_temporal.comp");
-    VkShaderModule compositeModule = ShaderManager::loadShader("shaders/gi_composite.comp");
+    VkShaderModule finalGatherModule = Sanic::ShaderManager::loadShader("shaders/final_gather.comp");
+    VkShaderModule temporalModule = Sanic::ShaderManager::loadShader("shaders/gi_temporal.comp");
+    VkShaderModule compositeModule = Sanic::ShaderManager::loadShader("shaders/gi_composite.comp");
     
     VkComputePipelineCreateInfo computeInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     computeInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};

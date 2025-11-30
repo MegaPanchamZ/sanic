@@ -399,7 +399,7 @@ bool MaterialSystem::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/material_bin.comp");
+        VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/material_bin.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -434,7 +434,7 @@ bool MaterialSystem::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/material_eval.comp");
+        VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/material_eval.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -472,7 +472,7 @@ bool MaterialSystem::createPipelines() {
             return false;
         }
         
-        VkShaderModule shaderModule = ShaderManager::loadShader("shaders/deferred_lighting.comp");
+        VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/deferred_lighting.comp");
         
         VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;

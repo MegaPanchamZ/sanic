@@ -266,7 +266,7 @@ void SSRSystem::createDescriptorSetLayout() {
 }
 
 void SSRSystem::createComputePipeline() {
-    VkShaderModule shaderModule = ShaderManager::loadShader("shaders/ssr.comp");
+    VkShaderModule shaderModule = Sanic::ShaderManager::loadShader("shaders/ssr.comp");
     
     VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;

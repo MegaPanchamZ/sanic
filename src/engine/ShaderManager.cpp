@@ -229,6 +229,12 @@ VkShaderModule ShaderManager::loadShader(const std::string& path, ShaderStage st
     return module;
 }
 
+VkShaderModule ShaderManager::loadShader(const std::string& path) {
+    // Auto-detect stage from file extension
+    ShaderStage stage = inferShaderStage(path);
+    return loadShader(path, stage, {});
+}
+
 std::vector<uint32_t> ShaderManager::loadShaderSpirv(const std::string& path, ShaderStage stage,
                                                        const std::vector<std::pair<std::string, std::string>>& defines) {
     auto& mgr = instance();
