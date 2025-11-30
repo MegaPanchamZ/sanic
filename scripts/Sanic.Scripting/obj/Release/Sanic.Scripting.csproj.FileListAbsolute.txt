@@ -1,0 +1,14 @@
+F:\Dev\meme\sanic\build\scripts\Sanic.Scripting.deps.json
+F:\Dev\meme\sanic\build\scripts\Sanic.Scripting.runtimeconfig.json
+F:\Dev\meme\sanic\build\scripts\Sanic.Scripting.dll
+F:\Dev\meme\sanic\build\scripts\Sanic.Scripting.pdb
+F:\Dev\meme\sanic\scripts\Sanic.Scripting\obj\Release\Sanic.Scripting.GeneratedMSBuildEditorConfig.editorconfig
+F:\Dev\meme\sanic\scripts\Sanic.Scripting\obj\Release\Sanic.Scripting.AssemblyInfoInputs.cache
+F:\Dev\meme\sanic\scripts\Sanic.Scripting\obj\Release\Sanic.Scripting.AssemblyInfo.cs
+F:\Dev\meme\sanic\scripts\Sanic.Scripting\obj\Release\Sanic.Scripting.csproj.CoreCompileInputs.cache
+F:\Dev\meme\sanic\scripts\Sanic.Scripting\obj\Release\Sanic.Scripting.sourcelink.json
+F:\Dev\meme\sanic\scripts\Sanic.Scripting\obj\Release\Sanic.Scripting.dll
+F:\Dev\meme\sanic\scripts\Sanic.Scripting\obj\Release\refint\Sanic.Scripting.dll
+F:\Dev\meme\sanic\scripts\Sanic.Scripting\obj\Release\Sanic.Scripting.pdb
+F:\Dev\meme\sanic\scripts\Sanic.Scripting\obj\Release\Sanic.Scripting.genruntimeconfig.cache
+F:\Dev\meme\sanic\scripts\Sanic.Scripting\obj\Release\ref\Sanic.Scripting.dll
