@@ -1,4 +1,5 @@
 #include "DescriptorManager.h"
+#include <array>
 #include <iostream>
 
 void DescriptorManager::init(VkDevice device, VkPhysicalDevice physicalDevice) {

@@ -103,10 +103,9 @@ int main() {
             input.update();
             window.pollEvents();
             
-            // Physics update - DISABLED due to crash in Jolt JobSystem
-            // Issue: Second physics Update() call crashes - likely MinGW/Jolt compatibility issue
-            // physicsSystem.update(deltaTime);
-            if (frameCount < 5) { std::cout << "  physics SKIPPED (crash workaround)" << std::endl; std::cout.flush(); }
+            // Physics update - re-enabled with MSVC build (MinGW had Jolt SIMD issues)
+            physicsSystem.update(deltaTime);
+            if (frameCount < 5) { std::cout << "  physics updated" << std::endl; std::cout.flush(); }
             
             if (frameCount == 0) { std::cout << "renderer.update()..." << std::endl; std::cout.flush(); }
             renderer.update(deltaTime); // Syncs physics transforms to game objects

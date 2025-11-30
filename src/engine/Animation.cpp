@@ -7,6 +7,7 @@
 #include "Animation.h"
 #include "VulkanContext.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <iostream>

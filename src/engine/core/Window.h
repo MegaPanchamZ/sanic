@@ -1,4 +1,12 @@
 #pragma once
+
+// Prevent Windows.h from defining min/max macros
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <string>

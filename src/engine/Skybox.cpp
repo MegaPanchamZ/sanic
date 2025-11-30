@@ -1,5 +1,6 @@
 #include "Skybox.h"
 #include "../external/stb_image.h"
+#include <array>
 #include <stdexcept>
 #include <iostream>
 #include <cmath>

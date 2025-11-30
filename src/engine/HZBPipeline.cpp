@@ -3,6 +3,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <algorithm>
+#include <array>
 
 // ============================================================================
 // Helper functions

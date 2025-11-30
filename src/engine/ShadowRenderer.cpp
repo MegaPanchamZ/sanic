@@ -1,5 +1,6 @@
 #include "ShadowRenderer.h"
 #include "Vertex.h"
+#include <array>
 #include <iostream>
 #include <fstream>
 #include <stdexcept>

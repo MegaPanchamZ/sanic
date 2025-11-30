@@ -17,6 +17,7 @@
 #include <glm/glm.hpp>
 #include <array>
 #include <memory>
+#include <string>
 
 // Forward declarations
 class VulkanContext;

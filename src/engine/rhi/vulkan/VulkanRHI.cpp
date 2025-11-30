@@ -11,6 +11,7 @@
 #include <stdexcept>
 
 #ifdef _WIN32
+#define NOMINMAX
 #include <Windows.h>
 #include <vulkan/vulkan_win32.h>
 #endif

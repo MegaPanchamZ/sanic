@@ -112,6 +112,11 @@ if(SANIC_USING_MINGW)
     message(STATUS "Jolt: Disabling precompiled headers for MinGW compatibility")
 endif()
 
+# Configure Jolt to use dynamic runtime on MSVC (to match our project)
+if(MSVC)
+    set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_Declare(
     JoltPhysics
     GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
