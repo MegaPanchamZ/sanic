@@ -30,21 +30,134 @@ constexpr uint32_t MAX_LIGHTS = 1024;
 constexpr uint32_t INVALID_TEXTURE = 0xFFFFFFFF;
 
 /**
+ * Blend mode enum - determines how material is rendered
+ */
+enum class EBlendMode : uint32_t {
+    Opaque = 0,           // Standard opaque rendering
+    Masked = 1,           // Alpha test (cutout)
+    Translucent = 2,      // Alpha blended (sorted back-to-front)
+    Additive = 3,         // Additive blending
+    Modulate = 4          // Multiplicative blending
+};
+
+/**
+ * Material flags bitfield
+ */
+namespace MaterialFlags {
+    constexpr uint32_t TwoSided           = 1 << 0;   // Render both sides
+    constexpr uint32_t UseVertexColor     = 1 << 1;   // Multiply by vertex color
+    constexpr uint32_t Subsurface         = 1 << 2;   // Has subsurface scattering
+    constexpr uint32_t Foliage            = 1 << 3;   // Use foliage shading model
+    constexpr uint32_t Hair               = 1 << 4;   // Use hair shading model
+    constexpr uint32_t Cloth              = 1 << 5;   // Use cloth shading model
+    constexpr uint32_t ClearCoat          = 1 << 6;   // Has clear coat layer
+    constexpr uint32_t Anisotropic        = 1 << 7;   // Anisotropic specular
+    constexpr uint32_t Emissive           = 1 << 8;   // Has emissive contribution
+    constexpr uint32_t WorldPositionOffset = 1 << 9; // Uses WPO
+    constexpr uint32_t PixelDepthOffset   = 1 << 10;  // Uses PDO
+    constexpr uint32_t Decal              = 1 << 11;  // Is a decal material
+    constexpr uint32_t DitheredLOD        = 1 << 12;  // Use dithered LOD transitions
+}
+
+/**
  * GPU Material structure (must match shader)
+ * 
+ * Supports:
+ * - PBR workflow with metallic/roughness
+ * - Multiple blend modes (opaque, masked, translucent)
+ * - Alpha masking with configurable threshold
+ * - Various shading models via flags
  */
 struct alignas(16) GPUMaterial {
+    // Texture indices (bindless)
     uint32_t albedoTexture;
     uint32_t normalTexture;
     uint32_t roughnessMetallicTexture;
     uint32_t emissiveTexture;
     
+    // Base color (RGBA - alpha used for masked materials)
     glm::vec4 baseColor;
+    
+    // PBR parameters
     float roughness;
     float metallic;
     float emissiveStrength;
-    uint32_t flags;
+    
+    // Blend mode (packed with flags for alignment)
+    uint32_t blendModeAndFlags;  // Low 4 bits: blend mode, High 28 bits: flags
+    
+    // Opacity mask parameters
+    float opacityMaskClipValue;  // Alpha threshold for masked materials (default 0.333)
+    float subsurfaceOpacity;     // For subsurface scattering
+    float clearCoatRoughness;    // For clear coat materials
+    float anisotropy;            // For anisotropic materials
+    
+    // Helper functions
+    void setBlendMode(EBlendMode mode) {
+        blendModeAndFlags = (blendModeAndFlags & 0xFFFFFFF0) | static_cast<uint32_t>(mode);
+    }
+    
+    EBlendMode getBlendMode() const {
+        return static_cast<EBlendMode>(blendModeAndFlags & 0xF);
+    }
+    
+    void setFlags(uint32_t flags) {
+        blendModeAndFlags = (blendModeAndFlags & 0xF) | (flags << 4);
+    }
+    
+    uint32_t getFlags() const {
+        return blendModeAndFlags >> 4;
+    }
+    
+    bool hasFlag(uint32_t flag) const {
+        return (getFlags() & flag) != 0;
+    }
+    
+    void addFlag(uint32_t flag) {
+        setFlags(getFlags() | flag);
+    }
+    
+    // Check if material requires alpha testing
+    bool isMasked() const {
+        return getBlendMode() == EBlendMode::Masked;
+    }
+    
+    // Check if material requires transparency sorting
+    bool isTranslucent() const {
+        EBlendMode mode = getBlendMode();
+        return mode == EBlendMode::Translucent || 
+               mode == EBlendMode::Additive || 
+               mode == EBlendMode::Modulate;
+    }
+    
+    // Default constructor with sensible defaults
+    static GPUMaterial createDefault() {
+        GPUMaterial mat{};
+        mat.albedoTexture = INVALID_TEXTURE;
+        mat.normalTexture = INVALID_TEXTURE;
+        mat.roughnessMetallicTexture = INVALID_TEXTURE;
+        mat.emissiveTexture = INVALID_TEXTURE;
+        mat.baseColor = glm::vec4(1.0f);
+        mat.roughness = 0.5f;
+        mat.metallic = 0.0f;
+        mat.emissiveStrength = 0.0f;
+        mat.blendModeAndFlags = 0;  // Opaque, no flags
+        mat.opacityMaskClipValue = 0.333f;  // Nanite-style default
+        mat.subsurfaceOpacity = 0.0f;
+        mat.clearCoatRoughness = 0.0f;
+        mat.anisotropy = 0.0f;
+        return mat;
+    }
+    
+    // Create a masked material for foliage, etc.
+    static GPUMaterial createMasked(float clipValue = 0.5f) {
+        GPUMaterial mat = createDefault();
+        mat.setBlendMode(EBlendMode::Masked);
+        mat.opacityMaskClipValue = clipValue;
+        return mat;
+    }
 };
-static_assert(sizeof(GPUMaterial) == 48, "GPUMaterial must be 48 bytes");
+static_assert(sizeof(GPUMaterial) == 64, "GPUMaterial must be 64 bytes");
 
 /**
  * Light types

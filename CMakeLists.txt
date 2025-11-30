@@ -72,6 +72,11 @@ FetchContent_Declare(
 set(MESHOPT_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(meshoptimizer)
 
+# .NET CoreCLR Scripting (loaded at runtime via hostfxr)
+# No compile-time dependency needed - runtime loads hostfxr.dll dynamically
+# Requires .NET 8 SDK to be installed for script compilation
+message(STATUS "C# Scripting: .NET CoreCLR will be loaded at runtime")
+
 # Shaderc (Executable approach)
 set(VK_SDK_PATH $ENV{VULKAN_SDK})
 find_program(GLSLC_EXECUTABLE 
@@ -137,6 +142,8 @@ set(SOURCES
     src/engine/ParticleSystem.cpp
     src/engine/SceneSerializer.cpp
     src/engine/VolumetricLighting.cpp
+    src/engine/TextureStreamer.cpp
+    src/engine/ScriptingSystem.cpp
 )
 
 # --- Engine Library ---

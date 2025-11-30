@@ -40,7 +40,25 @@ struct PixelWorkItem {
     uint instanceId;
 };
 
-// Material data
+// Blend mode enum (must match CPU EBlendMode)
+const uint BLEND_MODE_OPAQUE = 0;
+const uint BLEND_MODE_MASKED = 1;
+const uint BLEND_MODE_TRANSLUCENT = 2;
+const uint BLEND_MODE_ADDITIVE = 3;
+const uint BLEND_MODE_MODULATE = 4;
+
+// Material flags (must match CPU MaterialFlags)
+const uint MAT_FLAG_TWO_SIDED = 1 << 0;
+const uint MAT_FLAG_USE_VERTEX_COLOR = 1 << 1;
+const uint MAT_FLAG_SUBSURFACE = 1 << 2;
+const uint MAT_FLAG_FOLIAGE = 1 << 3;
+const uint MAT_FLAG_HAIR = 1 << 4;
+const uint MAT_FLAG_CLOTH = 1 << 5;
+const uint MAT_FLAG_CLEAR_COAT = 1 << 6;
+const uint MAT_FLAG_ANISOTROPIC = 1 << 7;
+const uint MAT_FLAG_EMISSIVE = 1 << 8;
+
+// Material data (must match CPU GPUMaterial - 64 bytes)
 struct Material {
     uint albedoTexture;
     uint normalTexture;
@@ -48,11 +66,30 @@ struct Material {
     uint emissiveTexture;
     
     vec4 baseColor;
+    
     float roughness;
     float metallic;
     float emissiveStrength;
-    uint flags;
+    uint blendModeAndFlags;      // Low 4 bits: blend mode, High 28 bits: flags
+    
+    float opacityMaskClipValue;  // Alpha threshold for masked materials
+    float subsurfaceOpacity;     // For SSS
+    float clearCoatRoughness;    // For clear coat
+    float anisotropy;            // For anisotropic materials
 };
+
+// Helper functions for material properties
+uint getBlendMode(Material mat) {
+    return mat.blendModeAndFlags & 0xF;
+}
+
+uint getMaterialFlags(Material mat) {
+    return mat.blendModeAndFlags >> 4;
+}
+
+bool hasMaterialFlag(Material mat, uint flag) {
+    return (getMaterialFlags(mat) & flag) != 0;
+}
 
 // Buffer references
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClusterBuffer {
@@ -270,17 +307,28 @@ void main() {
     vec3 localNormal = bary.x * v0.normal + bary.y * v1.normal + bary.z * v2.normal;
     vec3 worldNormal = normalize(normalMatrix * localNormal);
     
+    // Load material
+    Material mat = pc.materialBuffer.materials[pc.materialId];
+    uint blendMode = getBlendMode(mat);
+    uint matFlags = getMaterialFlags(mat);
+    
     // Interpolate UVs
     vec2 uv = bary.x * v0.uv + bary.y * v1.uv + bary.z * v2.uv;
     
-    // Load material
-    Material mat = pc.materialBuffer.materials[pc.materialId];
-    
     // Sample textures with proper filtering
     vec3 albedo = mat.baseColor.rgb;
+    float alpha = mat.baseColor.a;
+    
     if (mat.albedoTexture != 0xFFFFFFFF) {
         vec4 texColor = sampleTextureGrad(mat.albedoTexture, v0.uv, v1.uv, v2.uv, bary, ddx, ddy);
         albedo *= texColor.rgb;
+        alpha *= texColor.a;
+    }
+    
+    // For masked materials, we should have already discarded in the visibility pass
+    // But double-check here for safety (e.g., if pixel slipped through)
+    if (blendMode == BLEND_MODE_MASKED && alpha < mat.opacityMaskClipValue) {
+        return; // Skip this pixel
     }
     
     // Normal mapping
@@ -296,6 +344,12 @@ void main() {
         worldNormal = normalize(TBN * tangentNormal);
     }
     
+    // Handle two-sided materials
+    if (hasMaterialFlag(mat, MAT_FLAG_TWO_SIDED)) {
+        // Flip normal if back-facing (view dot normal < 0)
+        // Note: This is simplified; proper back-face detection requires view direction
+    }
+    
     // Roughness/Metallic
     float roughness = mat.roughness;
     float metallic = mat.metallic;
@@ -305,13 +359,35 @@ void main() {
         metallic *= rmTex.b;
     }
     
+    // Emissive
+    vec3 emissive = vec3(0.0);
+    if (hasMaterialFlag(mat, MAT_FLAG_EMISSIVE) && mat.emissiveTexture != 0xFFFFFFFF) {
+        emissive = sampleTextureGrad(mat.emissiveTexture, v0.uv, v1.uv, v2.uv, bary, ddx, ddy).rgb;
+        emissive *= mat.emissiveStrength;
+    }
+    
+    // Clear coat handling
+    float clearCoat = 0.0;
+    float clearCoatRoughness = mat.clearCoatRoughness;
+    if (hasMaterialFlag(mat, MAT_FLAG_CLEAR_COAT)) {
+        clearCoat = 1.0; // Full clear coat layer
+    }
+    
     // Compute depth from clip position
     vec4 clipPos = pc.viewProj * vec4(worldPos, 1.0);
     float depth = clipPos.z / clipPos.w;
     
+    // Pack shading model into G-buffer
+    // gbufferMaterial layout: (roughness, metallic, shadingModel, materialId)
+    float shadingModel = 0.0; // Default PBR
+    if (hasMaterialFlag(mat, MAT_FLAG_SUBSURFACE)) shadingModel = 0.25;
+    else if (hasMaterialFlag(mat, MAT_FLAG_FOLIAGE)) shadingModel = 0.5;
+    else if (hasMaterialFlag(mat, MAT_FLAG_HAIR)) shadingModel = 0.75;
+    else if (hasMaterialFlag(mat, MAT_FLAG_CLOTH)) shadingModel = 1.0;
+    
     // Write G-Buffer
     imageStore(gbufferPosition, ivec2(pixelCoord), vec4(worldPos, depth));
     imageStore(gbufferNormal, ivec2(pixelCoord), vec4(worldNormal * 0.5 + 0.5, 1.0));
-    imageStore(gbufferAlbedo, ivec2(pixelCoord), vec4(albedo, 1.0));
-    imageStore(gbufferMaterial, ivec2(pixelCoord), vec4(roughness, metallic, 1.0, float(pc.materialId) / 255.0));
+    imageStore(gbufferAlbedo, ivec2(pixelCoord), vec4(albedo, alpha)); // Include alpha in albedo
+    imageStore(gbufferMaterial, ivec2(pixelCoord), vec4(roughness, metallic, shadingModel, float(pc.materialId) / 255.0));
 }
