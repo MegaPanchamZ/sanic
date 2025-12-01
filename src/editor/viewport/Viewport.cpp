@@ -12,12 +12,16 @@
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
+#include <algorithm>
 
 namespace Sanic::Editor {
 
 Viewport::Viewport() {
     // Default camera position
     camera_.lookAt(glm::vec3(5, 5, 5), glm::vec3(0, 0, 0));
+    
+    // Initialize show flags for default view mode
+    ApplyViewMode(viewMode_, showFlags_);
 }
 
 Viewport::~Viewport() {
@@ -339,6 +343,13 @@ void Viewport::setTool(ViewportTool tool) {
     }
 }
 
+void Viewport::setViewMode(Sanic::EViewMode mode) {
+    if (viewMode_ != mode) {
+        viewMode_ = mode;
+        ApplyViewMode(viewMode_, showFlags_);
+    }
+}
+
 void Viewport::focusOnSelection() {
     if (!editor_ || !editor_->getWorld()) return;
     
@@ -433,10 +444,168 @@ void Viewport::drawToolbar() {
         gizmo_.setSnapEnabled(snapEnabled);
     }
     
+    ImGui::SameLine();
+    ImGui::Spacing();
+    ImGui::SameLine();
+    
+    // View Mode dropdown
+    drawViewModeMenu();
+    
     ImGui::PopStyleVar(2);
 }
 
+void Viewport::drawViewModeMenu() {
+    const char* currentModeName = Sanic::GetViewModeName(viewMode_);
+    
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 6));
+    
+    // Calculate width based on text
+    float buttonWidth = ImGui::CalcTextSize(currentModeName).x + 30.0f;
+    buttonWidth = std::max(buttonWidth, 100.0f);
+    
+    if (ImGui::BeginCombo("##ViewMode", currentModeName, ImGuiComboFlags_WidthFitPreview)) {
+        // Standard modes
+        if (ImGui::BeginMenu("Standard")) {
+            if (ImGui::MenuItem("Lit", nullptr, viewMode_ == Sanic::EViewMode::Lit)) 
+                setViewMode(Sanic::EViewMode::Lit);
+            if (ImGui::MenuItem("Unlit", nullptr, viewMode_ == Sanic::EViewMode::Unlit)) 
+                setViewMode(Sanic::EViewMode::Unlit);
+            if (ImGui::MenuItem("Wireframe", nullptr, viewMode_ == Sanic::EViewMode::Wireframe)) 
+                setViewMode(Sanic::EViewMode::Wireframe);
+            if (ImGui::MenuItem("Lit Wireframe", nullptr, viewMode_ == Sanic::EViewMode::LitWireframe)) 
+                setViewMode(Sanic::EViewMode::LitWireframe);
+            ImGui::EndMenu();
+        }
+        
+        // Lighting modes
+        if (ImGui::BeginMenu("Lighting")) {
+            if (ImGui::MenuItem("Lighting Only", nullptr, viewMode_ == Sanic::EViewMode::LightingOnly)) 
+                setViewMode(Sanic::EViewMode::LightingOnly);
+            if (ImGui::MenuItem("Detail Lighting", nullptr, viewMode_ == Sanic::EViewMode::DetailLighting)) 
+                setViewMode(Sanic::EViewMode::DetailLighting);
+            if (ImGui::MenuItem("Light Complexity", nullptr, viewMode_ == Sanic::EViewMode::LightComplexity)) 
+                setViewMode(Sanic::EViewMode::LightComplexity);
+            ImGui::EndMenu();
+        }
+        
+        // Buffer Visualization
+        if (ImGui::BeginMenu("Buffer Visualization")) {
+            if (ImGui::MenuItem("Base Color", nullptr, viewMode_ == Sanic::EViewMode::BaseColor)) 
+                setViewMode(Sanic::EViewMode::BaseColor);
+            if (ImGui::MenuItem("Metallic", nullptr, viewMode_ == Sanic::EViewMode::Metallic)) 
+                setViewMode(Sanic::EViewMode::Metallic);
+            if (ImGui::MenuItem("Roughness", nullptr, viewMode_ == Sanic::EViewMode::Roughness)) 
+                setViewMode(Sanic::EViewMode::Roughness);
+            if (ImGui::MenuItem("Specular", nullptr, viewMode_ == Sanic::EViewMode::Specular)) 
+                setViewMode(Sanic::EViewMode::Specular);
+            ImGui::Separator();
+            if (ImGui::MenuItem("World Normals", nullptr, viewMode_ == Sanic::EViewMode::WorldNormal)) 
+                setViewMode(Sanic::EViewMode::WorldNormal);
+            if (ImGui::MenuItem("Ambient Occlusion", nullptr, viewMode_ == Sanic::EViewMode::AmbientOcclusion)) 
+                setViewMode(Sanic::EViewMode::AmbientOcclusion);
+            if (ImGui::MenuItem("Scene Depth", nullptr, viewMode_ == Sanic::EViewMode::SceneDepth)) 
+                setViewMode(Sanic::EViewMode::SceneDepth);
+            ImGui::EndMenu();
+        }
+        
+        // Material
+        if (ImGui::BeginMenu("Material")) {
+            if (ImGui::MenuItem("Reflections", nullptr, viewMode_ == Sanic::EViewMode::Reflections)) 
+                setViewMode(Sanic::EViewMode::Reflections);
+            if (ImGui::MenuItem("Reflection Override", nullptr, viewMode_ == Sanic::EViewMode::ReflectionOverride)) 
+                setViewMode(Sanic::EViewMode::ReflectionOverride);
+            ImGui::EndMenu();
+        }
+        
+        // Mesh visualization
+        if (ImGui::BeginMenu("Mesh")) {
+            if (ImGui::MenuItem("Vertex Colors", nullptr, viewMode_ == Sanic::EViewMode::VertexColors)) 
+                setViewMode(Sanic::EViewMode::VertexColors);
+            if (ImGui::MenuItem("Mesh UVs", nullptr, viewMode_ == Sanic::EViewMode::MeshUVs)) 
+                setViewMode(Sanic::EViewMode::MeshUVs);
+            if (ImGui::MenuItem("LOD Coloration", nullptr, viewMode_ == Sanic::EViewMode::LODColoration)) 
+                setViewMode(Sanic::EViewMode::LODColoration);
+            if (ImGui::MenuItem("Triangle Density", nullptr, viewMode_ == Sanic::EViewMode::TriangleDensity)) 
+                setViewMode(Sanic::EViewMode::TriangleDensity);
+            ImGui::EndMenu();
+        }
+        
+        // Advanced visualization
+        if (ImGui::BeginMenu("Advanced")) {
+            if (ImGui::MenuItem("Nanite", nullptr, viewMode_ == Sanic::EViewMode::Nanite)) 
+                setViewMode(Sanic::EViewMode::Nanite);
+            if (ImGui::MenuItem("Virtual Shadow Map", nullptr, viewMode_ == Sanic::EViewMode::VirtualShadowMap)) 
+                setViewMode(Sanic::EViewMode::VirtualShadowMap);
+            if (ImGui::MenuItem("Lumen", nullptr, viewMode_ == Sanic::EViewMode::Lumen)) 
+                setViewMode(Sanic::EViewMode::Lumen);
+            if (ImGui::MenuItem("DDGI", nullptr, viewMode_ == Sanic::EViewMode::DDGI)) 
+                setViewMode(Sanic::EViewMode::DDGI);
+            if (ImGui::MenuItem("SSR", nullptr, viewMode_ == Sanic::EViewMode::SSR)) 
+                setViewMode(Sanic::EViewMode::SSR);
+            if (ImGui::MenuItem("Motion Vectors", nullptr, viewMode_ == Sanic::EViewMode::MotionVectors)) 
+                setViewMode(Sanic::EViewMode::MotionVectors);
+            ImGui::EndMenu();
+        }
+        
+        // Geometry Inspection
+        if (ImGui::BeginMenu("Geometry Inspection")) {
+            if (ImGui::MenuItem("Clay", nullptr, viewMode_ == Sanic::EViewMode::Clay)) 
+                setViewMode(Sanic::EViewMode::Clay);
+            if (ImGui::MenuItem("Front/Back Face", nullptr, viewMode_ == Sanic::EViewMode::FrontBackFace)) 
+                setViewMode(Sanic::EViewMode::FrontBackFace);
+            ImGui::EndMenu();
+        }
+        
+        // Ray Tracing
+        if (ImGui::BeginMenu("Ray Tracing")) {
+            if (ImGui::MenuItem("Path Tracing", nullptr, viewMode_ == Sanic::EViewMode::PathTracing)) 
+                setViewMode(Sanic::EViewMode::PathTracing);
+            if (ImGui::MenuItem("Ray Tracing Debug", nullptr, viewMode_ == Sanic::EViewMode::RayTracingDebug)) 
+                setViewMode(Sanic::EViewMode::RayTracingDebug);
+            ImGui::EndMenu();
+        }
+        
+        // Performance
+        if (ImGui::BeginMenu("Performance")) {
+            if (ImGui::MenuItem("Shader Complexity", nullptr, viewMode_ == Sanic::EViewMode::ShaderComplexity)) 
+                setViewMode(Sanic::EViewMode::ShaderComplexity);
+            if (ImGui::MenuItem("Quad Overdraw", nullptr, viewMode_ == Sanic::EViewMode::QuadOverdraw)) 
+                setViewMode(Sanic::EViewMode::QuadOverdraw);
+            ImGui::EndMenu();
+        }
+        
+        ImGui::EndCombo();
+    }
+    
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("View Mode: %s\nCategory: %s", 
+                          Sanic::GetViewModeName(viewMode_), 
+                          Sanic::GetViewModeCategory(viewMode_));
+    }
+    
+    ImGui::PopStyleVar();
+}
+
 void Viewport::drawViewportOverlay() {
+    // View mode indicator in top-left (below toolbar)
+    if (viewMode_ != Sanic::EViewMode::Lit) {
+        ImGui::SetCursorPos(ImVec2(8, 48));
+        
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.35f, 0.55f, 0.85f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
+        
+        const char* modeName = Sanic::GetViewModeName(viewMode_);
+        ImVec2 textSize = ImGui::CalcTextSize(modeName);
+        
+        ImGui::BeginChild("ViewModeIndicator", ImVec2(textSize.x + 16, textSize.y + 8), false, ImGuiWindowFlags_NoScrollbar);
+        ImGui::SetCursorPos(ImVec2(8, 4));
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", modeName);
+        ImGui::EndChild();
+        
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+    }
+    
     // Camera info in bottom-left
     ImGui::SetCursorPos(ImVec2(8, viewportSize_.y - 60));
     

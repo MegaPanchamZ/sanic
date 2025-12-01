@@ -19,6 +19,7 @@
 #include "Gizmo.h"
 #include "Grid.h"
 #include "../../engine/VulkanContext.h"
+#include "../../engine/core/ViewMode.h"
 #include <imgui.h>
 #include <memory>
 
@@ -70,6 +71,12 @@ public:
     void setGridVisible(bool visible) { grid_.setVisible(visible); }
     bool isGridVisible() const { return grid_.isVisible(); }
     
+    // View Mode
+    void setViewMode(Sanic::EViewMode mode);
+    Sanic::EViewMode getViewMode() const { return viewMode_; }
+    const Sanic::ShowFlags& getShowFlags() const { return showFlags_; }
+    Sanic::ShowFlags& getShowFlags() { return showFlags_; }
+    
     // 3D cursor
     void set3DCursor(const glm::vec3& position) { cursor3D_ = position; }
     glm::vec3 get3DCursor() const { return cursor3D_; }
@@ -87,6 +94,7 @@ private:
     void handleKeyboardShortcuts();
     
     void drawToolbar();
+    void drawViewModeMenu();
     void drawViewportOverlay();
     void drawViewCube();
     void drawGizmoControls();
@@ -117,6 +125,10 @@ private:
     
     // Grid
     Grid grid_;
+    
+    // View Mode
+    Sanic::EViewMode viewMode_ = Sanic::EViewMode::Lit;
+    Sanic::ShowFlags showFlags_;
     
     // Box selection
     bool boxSelecting_ = false;
