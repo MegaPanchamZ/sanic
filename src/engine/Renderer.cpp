@@ -381,14 +381,26 @@ void Renderer::drawFrame() {
         deferredRenderer->render(commandBuffer, imageIndex, gameObjects);
     }
 
+    // PASS 2.5: Copy scene to editor viewport render target
+    // This allows the scene to be displayed inside the ImGui viewport panel
+    if (editorEnabled_ && viewportRenderCallback_) {
+        viewportRenderCallback_(commandBuffer, swapchainImages[imageIndex], 
+                                swapchainExtent.width, swapchainExtent.height);
+    }
+
     // PASS 3: ImGui UI Overlay
     if (editorEnabled_) {
+        // Clear to dark editor background color
+        VkClearValue clearColor = {{{0.11f, 0.11f, 0.13f, 1.0f}}};
+        
         VkRenderPassBeginInfo imguiRenderPassInfo{};
         imguiRenderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         imguiRenderPassInfo.renderPass = imguiRenderPass;
         imguiRenderPassInfo.framebuffer = imguiFramebuffers[imageIndex];
         imguiRenderPassInfo.renderArea.offset = {0, 0};
         imguiRenderPassInfo.renderArea.extent = swapchainExtent;
+        imguiRenderPassInfo.clearValueCount = 1;
+        imguiRenderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &imguiRenderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         
@@ -843,10 +855,20 @@ void Renderer::processInput(float deltaTime) {
 
 void Renderer::updateUniformBuffer(uint32_t currentImage) {
     UniformBufferObject ubo{};
-    ubo.view = camera.getViewMatrix();
-    ubo.proj = camera.getProjectionMatrix();
     
-    ubo.viewPos = glm::vec4(camera.getPosition(), 1.0f);
+    // Use camera override if enabled (Editor viewport), otherwise use internal camera
+    if (cameraOverrideEnabled_) {
+        ubo.view = cameraOverrideView_;
+        ubo.proj = cameraOverrideProj_;
+        // Extract position from view matrix inverse
+        glm::mat4 invView = glm::inverse(cameraOverrideView_);
+        ubo.viewPos = glm::vec4(invView[3]);
+    } else {
+        ubo.view = camera.getViewMatrix();
+        ubo.proj = camera.getProjectionMatrix();
+        ubo.viewPos = glm::vec4(camera.getPosition(), 1.0f);
+    }
+    
     ubo.lightColor = glm::vec4(1.0f, 0.98f, 0.95f, 1.0f);  // Warm white
 
     // ========================================================================
@@ -1682,7 +1704,7 @@ void Renderer::createSwapchain() {
     createInfo.imageColorSpace = surfaceFormat.colorSpace;
     createInfo.imageExtent = extent;
     createInfo.imageArrayLayers = 1;
-    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     createInfo.preTransform = capabilities.currentTransform;
     createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -1761,11 +1783,11 @@ void Renderer::createRenderPass() {
 }
 
 void Renderer::createImGuiRenderPass() {
-    // ImGui render pass - loads existing content and renders on top
+    // ImGui render pass - clears to editor background color
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format = swapchainImageFormat;
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // Keep existing content
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;  // Clear to editor background
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;

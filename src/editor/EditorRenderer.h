@@ -31,6 +31,7 @@ public:
         VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
         VkCommandPool commandPool = VK_NULL_HANDLE;
         VkQueue graphicsQueue = VK_NULL_HANDLE;
+        VkFormat colorFormat = VK_FORMAT_B8G8R8A8_SRGB;  // Match swapchain format
         ImGuiBackend* imguiBackend = nullptr;
     };
     

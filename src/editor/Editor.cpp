@@ -121,9 +121,10 @@ void Editor::shutdown() {
     selection_.reset();
 }
 
-bool Editor::initializeImGui(VkRenderPass renderPass, uint32_t imageCount) {
+bool Editor::initializeImGui(VkRenderPass renderPass, uint32_t imageCount, VkFormat swapchainFormat) {
     if (imguiInitialized_) return true;
     
+    swapchainFormat_ = swapchainFormat;  // Store for EditorRenderer
     VkDevice device = vulkanContext_->getDevice();
     
     // Create descriptor pool for ImGui
@@ -210,6 +211,7 @@ bool Editor::initializeImGui(VkRenderPass renderPass, uint32_t imageCount) {
     editorRendererInfo.physicalDevice = vulkanContext_->getPhysicalDevice();
     editorRendererInfo.commandPool = vulkanContext_->getCommandPool();
     editorRendererInfo.graphicsQueue = vulkanContext_->getGraphicsQueue();
+    editorRendererInfo.colorFormat = swapchainFormat_;  // Match swapchain format for blit compatibility
     editorRendererInfo.imguiBackend = nullptr; // We'll use ImGui_ImplVulkan directly
     
     if (!editorRenderer_->initialize(editorRendererInfo)) {

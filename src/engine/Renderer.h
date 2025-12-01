@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <vector>
 #include <optional>
+#include <functional>
 #include "GameObject.h"
 #include "Skybox.h"
 #include "AccelerationStructureBuilder.h"
@@ -37,16 +38,42 @@ public:
     VkRenderPass getRenderPass() const { return renderPass; }
     VkCommandBuffer getCommandBuffer() const { return commandBuffer; }
     uint32_t getSwapchainImageCount() const { return static_cast<uint32_t>(swapchainImages.size()); }
+    VkImage getSwapchainImage(uint32_t index) const { return swapchainImages[index]; }
+    VkExtent2D getSwapchainExtent() const { return swapchainExtent; }
+    VkFormat getSwapchainFormat() const { return swapchainImageFormat; }
     bool isEditorEnabled() const { return editorEnabled_; }
     void setEditorEnabled(bool enabled) { editorEnabled_ = enabled; }
+    
+    // Editor viewport rendering callback
+    using ViewportRenderCallback = std::function<void(VkCommandBuffer, VkImage, uint32_t, uint32_t)>;
+    void setViewportRenderCallback(ViewportRenderCallback callback) { viewportRenderCallback_ = callback; }
     
     // Called by Editor to render ImGui
     void beginImGuiFrame();
     void renderImGui(VkCommandBuffer cmd);
+    
+    // Camera override for Editor viewport
+    // When set, these matrices are used instead of the internal camera
+    void setCameraOverride(const glm::mat4& view, const glm::mat4& projection) {
+        cameraOverrideView_ = view;
+        cameraOverrideProj_ = projection;
+        cameraOverrideEnabled_ = true;
+    }
+    void clearCameraOverride() { cameraOverrideEnabled_ = false; }
+    bool hasCameraOverride() const { return cameraOverrideEnabled_; }
+    
+    // Access to camera for legacy/non-override mode
+    Camera& getCamera() { return camera; }
+    const Camera& getCamera() const { return camera; }
 
 private:
+    // Camera override state
+    bool cameraOverrideEnabled_ = false;
+    glm::mat4 cameraOverrideView_ = glm::mat4(1.0f);
+    glm::mat4 cameraOverrideProj_ = glm::mat4(1.0f);
     bool editorEnabled_ = true;
-    VulkanContext vulkanContext;
+    ViewportRenderCallback viewportRenderCallback_;
+    VulkanContext vulkanContext;;
     std::unique_ptr<ShadowRenderer> shadowRenderer;
     std::unique_ptr<DeferredRenderer> deferredRenderer;
     std::unique_ptr<VisBufferRenderer> visBufferRenderer;

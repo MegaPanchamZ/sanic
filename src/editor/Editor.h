@@ -78,7 +78,7 @@ public:
     void shutdown();
     
     // ImGui Vulkan resources
-    bool initializeImGui(VkRenderPass renderPass, uint32_t imageCount);
+    bool initializeImGui(VkRenderPass renderPass, uint32_t imageCount, VkFormat swapchainFormat = VK_FORMAT_B8G8R8A8_SRGB);
     void shutdownImGui();
     
     // Main loop
@@ -180,6 +180,9 @@ private:
     
     // First run flag for default layout
     bool firstRun_ = false;
+    
+    // Swapchain format for viewport rendering
+    VkFormat swapchainFormat_ = VK_FORMAT_B8G8R8A8_SRGB;
     
     // Notification system
     struct Notification {

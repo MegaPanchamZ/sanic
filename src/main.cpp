@@ -4,6 +4,7 @@
 #include "engine/Input.h"
 #include "engine/PhysicsSystem.h"
 #include "editor/Editor.h"
+#include "editor/viewport/Viewport.h"
 #include <chrono>
 
 #include "engine/ShaderCompiler.h"
@@ -105,9 +106,32 @@ int main() {
         }
         
         // Initialize ImGui Vulkan backend (skips context creation since we did it above)
-        if (!editor.initializeImGui(renderer.getRenderPass(), renderer.getSwapchainImageCount())) {
+        if (!editor.initializeImGui(renderer.getRenderPass(), renderer.getSwapchainImageCount(), 
+                                     renderer.getSwapchainFormat())) {
             std::cerr << "Failed to initialize ImGui!" << std::endl;
             return -1;
+        }
+        
+        // Setup viewport rendering callback to blit scene to editor viewport texture
+        if (auto* editorRenderer = editor.getEditorRenderer()) {
+            renderer.setViewportRenderCallback([&editor, &editorRenderer = *editorRenderer](
+                VkCommandBuffer cmd, VkImage srcImage, uint32_t width, uint32_t height) {
+                // Check if viewport needs resize
+                auto* viewport = editor.getPanel<Sanic::Editor::Viewport>();
+                if (viewport) {
+                    uint32_t vpWidth = viewport->getViewportWidth();
+                    uint32_t vpHeight = viewport->getViewportHeight();
+                    if (vpWidth > 0 && vpHeight > 0 && 
+                        (vpWidth != editorRenderer.getWidth() || vpHeight != editorRenderer.getHeight())) {
+                        // Note: resize happens on CPU side, can't do here
+                        // Handled in update loop
+                    }
+                }
+                
+                // Blit the scene to the viewport texture
+                editorRenderer.blitToViewport(cmd, srcImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                               width, height);
+            });
         }
         
         std::cout << "Editor initialized" << std::endl;
@@ -130,6 +154,20 @@ int main() {
             
             // Start ImGui frame
             editor.beginFrame();
+            
+            // Handle viewport resize
+            if (auto* editorRenderer = editor.getEditorRenderer()) {
+                auto* viewport = editor.getPanel<Sanic::Editor::Viewport>();
+                if (viewport) {
+                    uint32_t vpWidth = viewport->getViewportWidth();
+                    uint32_t vpHeight = viewport->getViewportHeight();
+                    if (vpWidth > 0 && vpHeight > 0 && 
+                        (vpWidth != editorRenderer->getWidth() || vpHeight != editorRenderer->getHeight())) {
+                        editorRenderer->resize(vpWidth, vpHeight);
+                        viewport->setViewportTexture(editorRenderer->getViewportTexture());
+                    }
+                }
+            }
             
             // Physics update - only when editor is in Play mode
             if (editor.isPlaying()) {
