@@ -364,10 +364,16 @@ void Renderer::drawFrame() {
         
         // PASS 1.5: SSR (Screen-Space Reflections) - needs G-Buffer from previous frame
         if (ssrSystem && ssrEnabled) {
+            // Use camera override if enabled
+            glm::mat4 viewMat = cameraOverrideEnabled_ ? cameraOverrideView_ : camera.getViewMatrix();
+            glm::mat4 projMat = cameraOverrideEnabled_ ? cameraOverrideProj_ : camera.getProjectionMatrix();
+            glm::vec3 camPos = cameraOverrideEnabled_ ? 
+                glm::vec3(glm::inverse(cameraOverrideView_)[3]) : camera.getPosition();
+            
             ssrSystem->update(commandBuffer,
-                              camera.getViewMatrix(),
-                              camera.getProjectionMatrix(),
-                              camera.getPosition(),
+                              viewMat,
+                              projMat,
+                              camPos,
                               deferredRenderer->getPositionImageView(),
                               deferredRenderer->getNormalImageView(),
                               deferredRenderer->getAlbedoImageView(),

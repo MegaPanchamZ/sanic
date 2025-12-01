@@ -182,9 +182,21 @@ int main() {
             // Finalize ImGui frame - must be called before renderer tries to get draw data
             ImGui::Render();
             
-            // Only process camera input when not interacting with ImGui
+            // Set camera override from viewport when viewport is hovered/focused
+            auto* viewport = editor.getPanel<Sanic::Editor::Viewport>();
+            if (viewport) {
+                // Always use the viewport camera for rendering (Editor mode)
+                const auto& vpCamera = viewport->getCamera();
+                renderer.setCameraOverride(vpCamera.getViewMatrix(), vpCamera.getProjectionMatrix());
+            } else {
+                renderer.clearCameraOverride();
+            }
+            
+            // Only process legacy camera input when not interacting with ImGui
+            // (Viewport handles its own camera input in handleInput())
             if (!ImGui::GetIO().WantCaptureMouse && !ImGui::GetIO().WantCaptureKeyboard) {
-                renderer.processInput(deltaTime);
+                // In Editor mode, we don't use the legacy camera input anymore
+                // The viewport camera is controlled via Viewport::handleInput()
             }
             
             renderer.drawFrame();
