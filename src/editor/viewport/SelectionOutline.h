@@ -11,7 +11,7 @@
 #include <vector>
 
 namespace Sanic {
-    class ECSManager;
+    class World;
 }
 
 namespace Sanic::Editor {
@@ -38,7 +38,7 @@ public:
     // Render selection outlines
     void render(VkCommandBuffer cmd, 
                 const Selection& selection,
-                const Sanic::ECSManager& ecs,
+                Sanic::World& world,
                 const glm::mat4& view,
                 const glm::mat4& proj);
     

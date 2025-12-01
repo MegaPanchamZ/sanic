@@ -31,8 +31,21 @@ public:
     void drawFrame();
     void waitIdle();
     void processInput(float deltaTime);
+    
+    // Editor integration
+    VulkanContext& getVulkanContext() { return vulkanContext; }
+    VkRenderPass getRenderPass() const { return renderPass; }
+    VkCommandBuffer getCommandBuffer() const { return commandBuffer; }
+    uint32_t getSwapchainImageCount() const { return static_cast<uint32_t>(swapchainImages.size()); }
+    bool isEditorEnabled() const { return editorEnabled_; }
+    void setEditorEnabled(bool enabled) { editorEnabled_ = enabled; }
+    
+    // Called by Editor to render ImGui
+    void beginImGuiFrame();
+    void renderImGui(VkCommandBuffer cmd);
 
 private:
+    bool editorEnabled_ = true;
     VulkanContext vulkanContext;
     std::unique_ptr<ShadowRenderer> shadowRenderer;
     std::unique_ptr<DeferredRenderer> deferredRenderer;
@@ -82,6 +95,12 @@ private:
     VkSemaphore imageAvailableSemaphore;
     VkSemaphore renderFinishedSemaphore;
     VkFence inFlightFence;
+
+    // ImGui render pass
+    VkRenderPass imguiRenderPass = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> imguiFramebuffers;
+    void createImGuiRenderPass();
+    void createImGuiFramebuffers();
 
     VkImage depthImage;
     VkDeviceMemory depthImageMemory;
@@ -164,7 +183,7 @@ private:
     static const uint32_t RT_MAX_TEXTURES = 16;
     
     // RT Rendering Toggle (press R to switch)
-    bool useRayTracing = true;
+    bool useRayTracing = false;  // Disabled by default until RT issues are fixed
     
     void createRTDescriptorSetLayout();
     void createRTOutputImage();

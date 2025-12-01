@@ -1,15 +1,19 @@
 #include <iostream>
 #include "engine/Window.h"
 #include "engine/Renderer.h"
-#include "engine/Renderer.h"
 #include "engine/Input.h"
 #include "engine/PhysicsSystem.h"
+#include "editor/Editor.h"
 #include <chrono>
 
 #include "engine/ShaderCompiler.h"
 #include <fstream>
 #include <vector>
 #include <filesystem>
+
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_vulkan.h>
 
 void writeShader(const std::string& filename, const std::vector<uint32_t>& spirv) {
     std::ofstream file(filename, std::ios::binary);
@@ -76,51 +80,88 @@ int main() {
         writeShader("shaders/simple.rchit.spv", rchitSpirv);
         std::cout << "Ray Tracing shaders compiled successfully." << std::endl;
 
-        Window window(800, 600, "Sanic Engine");
+        Window window(1600, 900, "Sanic Engine - Editor");
         PhysicsSystem physicsSystem;
         std::cout << "Physics system created" << std::endl;
         Renderer renderer(window, physicsSystem);
         std::cout << "Renderer created" << std::endl;
         
+        // Initialize ImGui context first
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+        
+        // Initialize ImGui GLFW backend
+        ImGui_ImplGlfw_InitForVulkan(window.getHandle(), true);
+        
+        // Create and initialize the Editor
+        Sanic::Editor::Editor editor;
+        if (!editor.initialize(&renderer.getVulkanContext(), nullptr)) {
+            std::cerr << "Failed to initialize editor!" << std::endl;
+            return -1;
+        }
+        
+        // Initialize ImGui Vulkan backend (skips context creation since we did it above)
+        if (!editor.initializeImGui(renderer.getRenderPass(), renderer.getSwapchainImageCount())) {
+            std::cerr << "Failed to initialize ImGui!" << std::endl;
+            return -1;
+        }
+        
+        std::cout << "Editor initialized" << std::endl;
+        
         Input& input = Input::getInstance();
         input.init(window.getHandle());
         
         std::cout << "Starting main loop..." << std::endl;
-        std::cout.flush();
         
         auto lastTime = std::chrono::high_resolution_clock::now();
         int frameCount = 0;
         
         while (!window.shouldClose()) {
-            if (frameCount < 5) { std::cout << "Frame " << frameCount << " starting..." << std::endl; std::cout.flush(); }
             auto currentTime = std::chrono::high_resolution_clock::now();
             float deltaTime = std::chrono::duration<float>(currentTime - lastTime).count();
             lastTime = currentTime;
             
-            if (frameCount < 5) { std::cout << "  deltaTime=" << deltaTime << std::endl; std::cout.flush(); }
-            
             input.update();
             window.pollEvents();
             
-            // Physics update - re-enabled with MSVC build (MinGW had Jolt SIMD issues)
-            physicsSystem.update(deltaTime);
-            if (frameCount < 5) { std::cout << "  physics updated" << std::endl; std::cout.flush(); }
+            // Start ImGui frame
+            editor.beginFrame();
             
-            if (frameCount == 0) { std::cout << "renderer.update()..." << std::endl; std::cout.flush(); }
-            renderer.update(deltaTime); // Syncs physics transforms to game objects
-            if (frameCount == 0) { std::cout << "renderer.processInput()..." << std::endl; std::cout.flush(); }
-            renderer.processInput(deltaTime);
-            if (frameCount == 0) { std::cout << "renderer.drawFrame()..." << std::endl; std::cout.flush(); }
+            // Physics update - only when editor is in Play mode
+            if (editor.isPlaying()) {
+                physicsSystem.update(deltaTime);
+            }
+            
+            renderer.update(deltaTime);
+            
+            // Update editor UI
+            editor.update(deltaTime);
+            
+            // Finalize ImGui frame - must be called before renderer tries to get draw data
+            ImGui::Render();
+            
+            // Only process camera input when not interacting with ImGui
+            if (!ImGui::GetIO().WantCaptureMouse && !ImGui::GetIO().WantCaptureKeyboard) {
+                renderer.processInput(deltaTime);
+            }
+            
             renderer.drawFrame();
-            if (frameCount == 0) { std::cout << "Frame complete!" << std::endl; std::cout.flush(); }
+            
+            // End ImGui frame (handles multi-viewport)
+            editor.endFrame();
             
             frameCount++;
-            if (frameCount % 1000 == 0) {
-                std::cout << "Frames: " << frameCount << std::endl;
-            }
         }
         
         std::cout << "Exited main loop after " << frameCount << " frames" << std::endl;
+        
+        // Shutdown editor
+        editor.shutdownImGui();
+        editor.shutdown();
         
         renderer.waitIdle();
     } catch (const std::exception& e) {

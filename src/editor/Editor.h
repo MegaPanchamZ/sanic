@@ -150,6 +150,7 @@ private:
     void createDefaultPanels();
     void saveLayout();
     void loadLayout();
+    void setupDefaultDockLayout();
     void saveConfig();
     void loadConfig();
     
@@ -170,6 +171,9 @@ private:
     // ImGui Vulkan resources
     VkDescriptorPool imguiDescriptorPool_ = VK_NULL_HANDLE;
     bool imguiInitialized_ = false;
+    
+    // First run flag for default layout
+    bool firstRun_ = false;
     
     // Notification system
     struct Notification {

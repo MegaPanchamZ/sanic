@@ -9,6 +9,7 @@
 #include "../core/Selection.h"
 #include "../core/UndoSystem.h"
 #include <glm/gtc/type_ptr.hpp>
+#include <imgui_internal.h>
 
 namespace Sanic::Editor {
 
@@ -210,7 +211,7 @@ void InspectorPanel::drawAddComponentButton(Entity entity) {
 }
 
 void InspectorPanel::drawTransformComponent(Entity entity, Transform& transform) {
-    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_AllowItemOverlap;
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_AllowOverlap;
     
     bool open = ImGui::TreeNodeEx("Transform", flags);
     
@@ -268,7 +269,7 @@ void InspectorPanel::drawNameComponent(Entity entity, Name& name) {
 }
 
 void InspectorPanel::drawMeshRendererComponent(Entity entity, MeshRenderer& renderer) {
-    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_AllowItemOverlap;
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_AllowOverlap;
     
     bool open = ImGui::TreeNodeEx("Mesh Renderer", flags);
     
@@ -295,7 +296,7 @@ void InspectorPanel::drawMeshRendererComponent(Entity entity, MeshRenderer& rend
 }
 
 void InspectorPanel::drawLightComponent(Entity entity, Light& light) {
-    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_AllowItemOverlap;
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_AllowOverlap;
     
     bool open = ImGui::TreeNodeEx("Light", flags);
     
@@ -336,7 +337,7 @@ void InspectorPanel::drawLightComponent(Entity entity, Light& light) {
 }
 
 void InspectorPanel::drawCameraComponent(Entity entity, Camera& camera) {
-    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_AllowItemOverlap;
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_AllowOverlap;
     
     bool open = ImGui::TreeNodeEx("Camera", flags);
     
@@ -384,7 +385,7 @@ bool InspectorPanel::drawVector3(const char* label, glm::vec3& value, float rese
     ImGui::PushMultiItemsWidths(3, ImGui::CalcItemWidth());
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
     
-    float lineHeight = GImGui->Font->FontSize + GImGui->Style.FramePadding.y * 2.0f;
+    float lineHeight = ImGui::GetFontSize() + GImGui->Style.FramePadding.y * 2.0f;
     ImVec2 buttonSize = { lineHeight + 3.0f, lineHeight };
     
     // X

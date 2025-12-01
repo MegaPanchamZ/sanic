@@ -8,6 +8,7 @@
 #include "../Editor.h"
 #include "../viewport/Gizmo.h"
 #include <imgui.h>
+#include <imgui_internal.h>
 
 namespace Sanic::Editor {
 

@@ -1,0 +1,74 @@
+{
+  "name": "Terrain",
+  "type": "sublevel",
+  "actors": [
+    {
+      "guid": "{E5F6A7B8-C9D0-1234-EF01-567890123456}",
+      "class": "Landscape",
+      "name": "MainTerrain",
+      "transform": {
+        "position": [0, 0, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "heightmap": "/Content/Terrain/MainHeightmap.stex",
+        "material": "/Content/Materials/Terrain/GrassRock.smat",
+        "sectorSize": 64,
+        "sectorsX": 16,
+        "sectorsY": 16,
+        "heightScale": 200.0,
+        "layers": [
+          {
+            "name": "Grass",
+            "diffuse": "/Content/Textures/Terrain/Grass_Diffuse.stex",
+            "normal": "/Content/Textures/Terrain/Grass_Normal.stex",
+            "blendmap": "/Content/Terrain/GrassBlend.stex"
+          },
+          {
+            "name": "Rock",
+            "diffuse": "/Content/Textures/Terrain/Rock_Diffuse.stex",
+            "normal": "/Content/Textures/Terrain/Rock_Normal.stex",
+            "blendmap": "/Content/Terrain/RockBlend.stex"
+          },
+          {
+            "name": "Sand",
+            "diffuse": "/Content/Textures/Terrain/Sand_Diffuse.stex",
+            "normal": "/Content/Textures/Terrain/Sand_Normal.stex",
+            "blendmap": "/Content/Terrain/SandBlend.stex"
+          }
+        ],
+        "foliage": {
+          "enabled": true,
+          "density": 0.5,
+          "types": [
+            {
+              "mesh": "/Content/Meshes/Foliage/Grass_Clump.smesh",
+              "density": 0.8,
+              "minScale": 0.8,
+              "maxScale": 1.2
+            }
+          ]
+        }
+      }
+    },
+    {
+      "guid": "{F6A7B8C9-D0E1-2345-F012-678901234567}",
+      "class": "WaterBody",
+      "name": "Ocean",
+      "transform": {
+        "position": [0, -5, 0],
+        "rotation": [0, 0, 0],
+        "scale": [2000, 1, 2000]
+      },
+      "properties": {
+        "material": "/Content/Materials/Water/Ocean.smat",
+        "waveHeight": 0.5,
+        "waveFrequency": 0.1,
+        "shallowColor": [0.1, 0.5, 0.6],
+        "deepColor": [0.0, 0.1, 0.3],
+        "caustics": true
+      }
+    }
+  ]
+}

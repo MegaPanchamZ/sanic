@@ -1,0 +1,101 @@
+{
+  "name": "TestWorld",
+  "version": "1.0",
+  "bounds": {
+    "min": [-1000, -100, -1000],
+    "max": [1000, 500, 1000]
+  },
+  "worldSettings": {
+    "gravity": [0.0, -9.81, 0.0],
+    "timeScale": 1.0,
+    "skybox": "/Content/Textures/Skybox/DefaultSky.stex",
+    "ambientColor": [0.1, 0.12, 0.15]
+  },
+  "streamingSettings": {
+    "loadRadius": 500.0,
+    "unloadRadius": 600.0,
+    "priorityDistance": 100.0
+  },
+  "sublevels": [
+    {
+      "name": "Terrain",
+      "path": "/Content/Levels/TestWorld/Terrain.slevel",
+      "alwaysLoaded": true,
+      "streamingDistance": 0
+    },
+    {
+      "name": "Environment",
+      "path": "/Content/Levels/TestWorld/Environment.slevel",
+      "alwaysLoaded": true,
+      "streamingDistance": 0
+    },
+    {
+      "name": "Splines",
+      "path": "/Content/Levels/TestWorld/Splines.slevel",
+      "alwaysLoaded": true,
+      "streamingDistance": 0
+    }
+  ],
+  "actors": [
+    {
+      "guid": "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}",
+      "class": "DirectionalLight",
+      "name": "Sun",
+      "transform": {
+        "position": [0, 100, 0],
+        "rotation": [-45, 30, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "color": [1.0, 0.95, 0.85],
+        "intensity": 10.0,
+        "castShadows": true,
+        "shadowCascades": 4
+      }
+    },
+    {
+      "guid": "{B2C3D4E5-F6A7-8901-BCDE-F23456789012}",
+      "class": "SkyAtmosphere",
+      "name": "Atmosphere",
+      "transform": {
+        "position": [0, 0, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "rayleighScattering": [0.0058, 0.0135, 0.0331],
+        "mieScattering": 0.003,
+        "sunDiskScale": 1.0
+      }
+    },
+    {
+      "guid": "{C3D4E5F6-A7B8-9012-CDEF-345678901234}",
+      "class": "PlayerStart",
+      "name": "DefaultPlayerStart",
+      "transform": {
+        "position": [0, 5, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "playerClass": "KineticCharacter"
+      }
+    },
+    {
+      "guid": "{D4E5F6A7-B8C9-0123-DEF0-456789012345}",
+      "class": "DDGIVolume",
+      "name": "MainDDGI",
+      "transform": {
+        "position": [0, 50, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "probeCount": [32, 16, 32],
+        "probeSpacing": [20, 10, 20],
+        "raysPerProbe": 256,
+        "hysteresis": 0.95
+      }
+    }
+  ]
+}

@@ -55,7 +55,7 @@ void SelectionOutline::resize(uint32_t width, uint32_t height) {
 
 void SelectionOutline::render(VkCommandBuffer cmd,
                               const Selection& selection,
-                              const Sanic::ECSManager& ecs,
+                              Sanic::World& world,
                               const glm::mat4& view,
                               const glm::mat4& proj) {
     if (!selection.hasSelection()) return;
@@ -65,16 +65,16 @@ void SelectionOutline::render(VkCommandBuffer cmd,
     // 2. Render outline using stencil test
     
     for (Entity entity : selection.getSelection()) {
-        if (!ecs.isEntityValid(entity)) continue;
+        if (!world.isValid(entity)) continue;
         
         // Get transform
-        auto* transform = ecs.getComponent<Transform>(entity);
-        if (!transform) continue;
+        if (!world.hasComponent<Transform>(entity)) continue;
+        auto& transform = world.getComponent<Transform>(entity);
         
         glm::mat4 model = glm::mat4(1.0f);
-        model = glm::translate(model, transform->position);
-        model = model * glm::mat4_cast(transform->rotation);
-        model = glm::scale(model, transform->scale);
+        model = glm::translate(model, transform.position);
+        model = model * glm::mat4_cast(transform.rotation);
+        model = glm::scale(model, transform.scale);
         
         glm::mat4 mvp = proj * view * model;
         

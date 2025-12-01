@@ -1,0 +1,183 @@
+{
+  "name": "Environment",
+  "type": "sublevel",
+  "actors": [
+    {
+      "guid": "{AABBCCDD-0001-0001-0001-000000000001}",
+      "class": "StaticMeshActor",
+      "name": "Rock_Large_01",
+      "transform": {
+        "position": [25, 0, 15],
+        "rotation": [0, 45, 0],
+        "scale": [2.5, 2.5, 2.5]
+      },
+      "properties": {
+        "mesh": "/Content/Meshes/Environment/Rock_Large.smesh",
+        "material": "/Content/Materials/Environment/Rock_Mossy.smat",
+        "castShadow": true,
+        "collision": "complex"
+      }
+    },
+    {
+      "guid": "{AABBCCDD-0001-0001-0001-000000000002}",
+      "class": "StaticMeshActor",
+      "name": "Rock_Large_02",
+      "transform": {
+        "position": [-30, 5, 40],
+        "rotation": [10, 120, -5],
+        "scale": [3.0, 2.8, 3.2]
+      },
+      "properties": {
+        "mesh": "/Content/Meshes/Environment/Rock_Large.smesh",
+        "material": "/Content/Materials/Environment/Rock_Mossy.smat",
+        "castShadow": true,
+        "collision": "complex"
+      }
+    },
+    {
+      "guid": "{AABBCCDD-0002-0002-0002-000000000001}",
+      "class": "FoliageCluster",
+      "name": "Forest_Zone_01",
+      "transform": {
+        "position": [-100, 0, -100],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "bounds": { "min": [-200, 0, -200], "max": [0, 50, 0] },
+        "density": 0.3,
+        "types": [
+          {
+            "mesh": "/Content/Meshes/Foliage/Tree_Pine_01.smesh",
+            "weight": 0.3,
+            "minScale": 0.8,
+            "maxScale": 1.4,
+            "alignToNormal": false
+          },
+          {
+            "mesh": "/Content/Meshes/Foliage/Tree_Oak_01.smesh",
+            "weight": 0.2,
+            "minScale": 0.9,
+            "maxScale": 1.3,
+            "alignToNormal": false
+          },
+          {
+            "mesh": "/Content/Meshes/Foliage/Bush_01.smesh",
+            "weight": 0.5,
+            "minScale": 0.6,
+            "maxScale": 1.0,
+            "alignToNormal": true
+          }
+        ]
+      }
+    },
+    {
+      "guid": "{AABBCCDD-0003-0003-0003-000000000001}",
+      "class": "AncientRuins",
+      "name": "Ruins_Temple_01",
+      "transform": {
+        "position": [300, 0, 200],
+        "rotation": [0, -30, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "prefab": "/Content/Prefabs/Structures/Temple_Ruins.sprefab",
+        "interiorEnabled": true,
+        "secretRoom": {
+          "position": [10, -5, 0],
+          "trigger": "puzzle",
+          "reward": "EmeraldShard"
+        }
+      }
+    },
+    {
+      "guid": "{AABBCCDD-0004-0004-0004-000000000001}",
+      "class": "FloatingIsland",
+      "name": "SkyIsland_01",
+      "transform": {
+        "position": [0, 200, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "mesh": "/Content/Meshes/Islands/FloatingIsland_Medium.smesh",
+        "floatAmplitude": 5.0,
+        "floatPeriod": 8.0,
+        "rotationSpeed": 0.5,
+        "trailEffect": "/Content/Effects/Island_Trail.sfx",
+        "landingPad": true
+      }
+    },
+    {
+      "guid": "{AABBCCDD-0005-0005-0005-000000000001}",
+      "class": "Checkpoint",
+      "name": "Checkpoint_01",
+      "transform": {
+        "position": [100, 5, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "mesh": "/Content/Meshes/Gameplay/Checkpoint_Post.smesh",
+        "activationRadius": 5.0,
+        "respawnOffset": [0, 2, 0],
+        "activationEffect": "/Content/Effects/Checkpoint_Activate.sfx"
+      }
+    },
+    {
+      "guid": "{AABBCCDD-0006-0006-0006-000000000001}",
+      "class": "EnemySpawner",
+      "name": "EnemySpawn_Patrol_01",
+      "transform": {
+        "position": [150, 5, 50],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "enemyClass": "Motobug",
+        "count": 5,
+        "spawnRadius": 20.0,
+        "respawnTime": 60.0,
+        "patrolPath": "/Content/Paths/Patrol_Zone_01.spath",
+        "aggroRadius": 30.0
+      }
+    },
+    {
+      "guid": "{AABBCCDD-0007-0007-0007-000000000001}",
+      "class": "ItemBox",
+      "name": "ItemBox_Shield_01",
+      "transform": {
+        "position": [75, 3, 25],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "itemType": "shield",
+        "shieldType": "bubble",
+        "mesh": "/Content/Meshes/Gameplay/ItemBox.smesh",
+        "breakEffect": "/Content/Effects/ItemBox_Break.sfx",
+        "respawnTime": 120.0
+      }
+    },
+    {
+      "guid": "{AABBCCDD-0008-0008-0008-000000000001}",
+      "class": "EnvironmentVolume",
+      "name": "WindZone_01",
+      "transform": {
+        "position": [200, 50, 100],
+        "rotation": [0, 45, 0],
+        "scale": [50, 100, 50]
+      },
+      "properties": {
+        "volumeType": "wind",
+        "windDirection": [0.5, 0.5, 0],
+        "windStrength": 30.0,
+        "gustFrequency": 2.0,
+        "gustStrength": 15.0,
+        "affectsPlayer": true,
+        "affectsPhysics": true,
+        "visualEffect": "/Content/Effects/Wind_Particles.sfx"
+      }
+    }
+  ]
+}

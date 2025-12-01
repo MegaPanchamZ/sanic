@@ -7,22 +7,38 @@ Input& Input::getInstance() {
 
 void Input::init(GLFWwindow* win) {
     window = win;
-    glfwSetWindowUserPointer(window, this);
-    glfwSetKeyCallback(window, Input::keyCallback);
-    glfwSetCursorPosCallback(window, Input::cursorPosCallback);
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    // Don't install GLFW callbacks here - ImGui needs them!
+    // We'll poll input state directly instead.
+    // ImGui_ImplGlfw already installed callbacks via glfwSetWindowUserPointer.
+    
+    // Don't capture the cursor by default - editor needs it free
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    
+    // Initialize mouse position
+    double x, y;
+    glfwGetCursorPos(window, &x, &y);
+    lastX = x;
+    lastY = y;
+    firstMouse = false;
 }
 
 void Input::update() {
-    // Reset per-frame state
-    mouseDelta = glm::vec2(0.0f);
+    // Poll mouse position each frame instead of using callbacks
+    double x, y;
+    glfwGetCursorPos(window, &x, &y);
+    
+    mouseDelta = glm::vec2(
+        static_cast<float>(x - lastX),
+        static_cast<float>(lastY - y)  // Reversed Y
+    );
+    
+    lastX = x;
+    lastY = y;
 }
 
 bool Input::isKeyPressed(int key) const {
-    if (key >= 0 && key < 1024) {
-        return keys[key];
-    }
-    return false;
+    // Use direct polling - callbacks are handled by ImGui
+    return glfwGetKey(window, key) == GLFW_PRESS;
 }
 
 bool Input::isKeyDown(int key) const {
@@ -33,42 +49,20 @@ glm::vec2 Input::getMouseDelta() const {
     return mouseDelta;
 }
 
+// These callback functions are kept for compatibility but not installed
+// ImGui handles the callbacks now
 void Input::keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
-    Input* input = static_cast<Input*>(glfwGetWindowUserPointer(window));
-    if (input) {
-        input->handleKey(key, action);
-    }
+    // Not used - ImGui handles this
 }
 
 void Input::cursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
-    Input* input = static_cast<Input*>(glfwGetWindowUserPointer(window));
-    if (input) {
-        input->handleMouseMove(xpos, ypos);
-    }
+    // Not used - we poll mouse position in update()
 }
 
 void Input::handleKey(int key, int action) {
-    if (key >= 0 && key < 1024) {
-        if (action == GLFW_PRESS) {
-            keys[key] = true;
-        } else if (action == GLFW_RELEASE) {
-            keys[key] = false;
-        }
-    }
+    // Not used
 }
 
 void Input::handleMouseMove(double xpos, double ypos) {
-    if (firstMouse) {
-        lastX = xpos;
-        lastY = ypos;
-        firstMouse = false;
-    }
-
-    double xoffset = xpos - lastX;
-    double yoffset = lastY - ypos; // Reversed since y-coordinates range from bottom to top
-
-    lastX = xpos;
-    lastY = ypos;
-
-    mouseDelta = glm::vec2(static_cast<float>(xoffset), static_cast<float>(yoffset));
+    // Not used
 }

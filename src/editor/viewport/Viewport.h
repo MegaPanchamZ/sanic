@@ -88,6 +88,7 @@ private:
     
     void drawToolbar();
     void drawViewportOverlay();
+    void drawViewCube();
     void drawGizmoControls();
     void drawCameraInfo();
     void drawSelectionOutlines();

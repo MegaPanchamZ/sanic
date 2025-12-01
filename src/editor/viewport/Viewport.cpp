@@ -52,7 +52,11 @@ void Viewport::update(float deltaTime) {
 void Viewport::draw() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    // Make the viewport window completely transparent so the 3D scene shows through
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+    
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground;
     
     if (beginPanel(flags)) {
         // Get viewport dimensions
@@ -71,18 +75,18 @@ void Viewport::draw() {
         isFocused_ = ImGui::IsWindowFocused();
         isHovered_ = ImGui::IsWindowHovered();
         
-        // Draw viewport content (placeholder - would render scene here)
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         
-        // Background
-        drawList->AddRectFilled(
-            ImVec2(viewportPos_.x, viewportPos_.y),
-            ImVec2(viewportPos_.x + viewportSize_.x, viewportPos_.y + viewportSize_.y),
-            IM_COL32(30, 30, 30, 255)
-        );
-        
-        // Draw grid
-        grid_.drawImGui(camera_.getViewProjectionMatrix(), viewportSize_, camera_.getPosition());
+        // The 3D scene is rendered underneath - we just draw UI overlays here
+        // Draw a subtle border to show the viewport bounds when focused
+        if (isFocused_) {
+            drawList->AddRect(
+                ImVec2(viewportPos_.x, viewportPos_.y),
+                ImVec2(viewportPos_.x + viewportSize_.x, viewportPos_.y + viewportSize_.y),
+                IM_COL32(100, 150, 255, 100),
+                0.0f, 0, 1.0f
+            );
+        }
         
         // Draw selection outlines
         drawSelectionOutlines();
@@ -116,6 +120,7 @@ void Viewport::draw() {
     }
     endPanel();
     
+    ImGui::PopStyleColor(2);  // WindowBg, ChildBg
     ImGui::PopStyleVar();
 }
 
@@ -443,6 +448,60 @@ void Viewport::drawViewportOverlay() {
     ImGui::Text("%s | FOV: %.0f", camera_.isPerspective() ? "Perspective" : "Ortho", camera_.getFov());
     
     ImGui::EndChild();
+    ImGui::PopStyleColor();
+    
+    // View Cube / Camera Controls in top-right
+    drawViewCube();
+}
+
+void Viewport::drawViewCube() {
+    float cubeSize = 100.0f;
+    float padding = 10.0f;
+    
+    ImGui::SetCursorPos(ImVec2(viewportSize_.x - cubeSize - padding, padding + 35)); // Below toolbar
+    
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
+    ImGui::BeginChild("ViewCube", ImVec2(cubeSize, cubeSize + 30), false, ImGuiWindowFlags_NoScrollbar);
+    
+    // Perspective/Ortho toggle
+    if (ImGui::Button(camera_.isPerspective() ? "Persp" : "Ortho", ImVec2(cubeSize - 8, 20))) {
+        camera_.togglePerspective();
+    }
+    
+    ImGui::Spacing();
+    
+    // View buttons in a 3x3 grid-ish layout
+    float btnSize = 28.0f;
+    float spacing = 2.0f;
+    
+    // Row 1: Top view in center
+    ImGui::SetCursorPosX((cubeSize - btnSize) * 0.5f);
+    if (ImGui::Button("T", ImVec2(btnSize, btnSize))) {
+        camera_.snapToTop();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Top (Numpad 7)");
+    
+    // Row 2: Left, Front, Right
+    if (ImGui::Button("L", ImVec2(btnSize, btnSize))) {
+        camera_.snapToLeft();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Left");
+    ImGui::SameLine(0, spacing);
+    
+    if (ImGui::Button("F", ImVec2(btnSize, btnSize))) {
+        camera_.snapToFront();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Front (Numpad 1)");
+    ImGui::SameLine(0, spacing);
+    
+    if (ImGui::Button("R", ImVec2(btnSize, btnSize))) {
+        camera_.snapToRight();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Right (Numpad 3)");
+    
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
     ImGui::PopStyleColor();
 }
 

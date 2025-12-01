@@ -1,0 +1,33 @@
+{
+  "rendering": {
+    "renderer": "deferred",
+    "raytracing": true,
+    "ddgi": {
+      "enabled": true,
+      "probeSpacing": 4.0,
+      "raysPerProbe": 256
+    },
+    "ssr": {
+      "enabled": true,
+      "maxSteps": 64
+    },
+    "bloom": {
+      "enabled": true,
+      "intensity": 0.5
+    },
+    "dof": {
+      "enabled": true,
+      "focalDistance": 10.0
+    }
+  },
+  "physics": {
+    "gravity": [0.0, -9.81, 0.0],
+    "simulationRate": 120,
+    "maxSubsteps": 4
+  },
+  "audio": {
+    "maxVoices": 128,
+    "spatializationEnabled": true,
+    "dopplerEnabled": true
+  }
+}

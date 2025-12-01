@@ -157,7 +157,7 @@ void DeferredRenderer::createRenderPass() {
     attachments[5].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[5].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[5].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[5].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    attachments[5].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;  // Changed for ImGui overlay
     
     // Subpasses
     std::array<VkAttachmentReference, 4> gBufferColorRefs{};
@@ -492,84 +492,162 @@ void DeferredRenderer::updateCompositionDescriptorSet(VkBuffer uniformBuffer, Vk
                                                       VkImageView ddgiDepthView,
                                                       VkImageView ssrReflectionsView, VkSampler ssrSampler) 
 {
+    std::cout << "  updateCompositionDescriptorSet: ENTER" << std::endl; std::cout.flush();
     VkDevice device = context.getDevice();
+    std::cout << "  device=" << (void*)device << std::endl; std::cout.flush();
+    std::cout << "  descriptorPool=" << (void*)descriptorPool << std::endl; std::cout.flush();
+    std::cout << "  compositionDescriptorSetLayout=" << (void*)compositionDescriptorSetLayout << std::endl; std::cout.flush();
+    
+    if (descriptorPool == VK_NULL_HANDLE) {
+        throw std::runtime_error("descriptorPool is VK_NULL_HANDLE!");
+    }
+    if (compositionDescriptorSetLayout == VK_NULL_HANDLE) {
+        throw std::runtime_error("compositionDescriptorSetLayout is VK_NULL_HANDLE!");
+    }
     
     // Only allocate if not already allocated
     if (compositionDescriptorSet == VK_NULL_HANDLE) {
+        std::cout << "  allocating descriptor set..." << std::endl; std::cout.flush();
         VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         allocInfo.descriptorPool = descriptorPool;
         allocInfo.descriptorSetCount = 1;
         allocInfo.pSetLayouts = &compositionDescriptorSetLayout;
         
-        if (vkAllocateDescriptorSets(device, &allocInfo, &compositionDescriptorSet) != VK_SUCCESS) {
+        VkResult result = vkAllocateDescriptorSets(device, &allocInfo, &compositionDescriptorSet);
+        if (result != VK_SUCCESS) {
+            std::cerr << "vkAllocateDescriptorSets failed with result: " << result << std::endl;
             throw std::runtime_error("failed to allocate composition descriptor set!");
         }
+        std::cout << "  allocated! compositionDescriptorSet=" << (void*)compositionDescriptorSet << std::endl; std::cout.flush();
     }
 
-    std::array<VkDescriptorImageInfo, 4> gbufferInfos;
-    gbufferInfos[0] = {VK_NULL_HANDLE, position.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    gbufferInfos[1] = {VK_NULL_HANDLE, normal.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    gbufferInfos[2] = {VK_NULL_HANDLE, albedo.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    gbufferInfos[3] = {VK_NULL_HANDLE, pbr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    std::cout << "  building gbufferInfos..." << std::endl; std::cout.flush();
+    // Create all descriptor info structs upfront to ensure they remain valid
+    std::array<VkDescriptorImageInfo, 4> gbufferInfos = {{
+        {VK_NULL_HANDLE, position.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {VK_NULL_HANDLE, normal.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {VK_NULL_HANDLE, albedo.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {VK_NULL_HANDLE, pbr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+    }};
+    std::cout << "  gbufferInfos done" << std::endl; std::cout.flush();
 
+    std::cout << "  building uboInfo..." << std::endl; std::cout.flush();
     VkDescriptorBufferInfo uboInfo{uniformBuffer, 0, uboSize};
+    std::cout << "  building shadowInfo..." << std::endl; std::cout.flush();
     VkDescriptorImageInfo shadowInfo{shadowSampler, shadowView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    std::cout << "  building envInfo..." << std::endl; std::cout.flush();
     VkDescriptorImageInfo envInfo{envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     
+    std::cout << "  building ddgiUboInfo..." << std::endl; std::cout.flush();
     // Use environment map as fallback for DDGI textures if not provided
-    VkDescriptorBufferInfo ddgiUboInfo{};
-    if (ddgiUniformBuffer != VK_NULL_HANDLE) {
-        ddgiUboInfo = {ddgiUniformBuffer, 0, ddgiUboSize};
-    } else {
-        // Create a dummy buffer or use the main UBO as placeholder
-        ddgiUboInfo = {uniformBuffer, 0, sizeof(float) * 4}; // Minimal size
-    }
+    VkDescriptorBufferInfo ddgiUboInfo = (ddgiUniformBuffer != VK_NULL_HANDLE) 
+        ? VkDescriptorBufferInfo{ddgiUniformBuffer, 0, ddgiUboSize}
+        : VkDescriptorBufferInfo{uniformBuffer, 0, sizeof(float) * 4};
     
-    VkDescriptorImageInfo ddgiIrradianceInfo{};
-    if (ddgiIrradianceView != VK_NULL_HANDLE && ddgiSampler != VK_NULL_HANDLE) {
-        ddgiIrradianceInfo = {ddgiSampler, ddgiIrradianceView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    } else {
-        // Use environment map as placeholder
-        ddgiIrradianceInfo = {envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    }
+    std::cout << "  building ddgiIrradianceInfo..." << std::endl; std::cout.flush();
+    VkDescriptorImageInfo ddgiIrradianceInfo = (ddgiIrradianceView != VK_NULL_HANDLE && ddgiSampler != VK_NULL_HANDLE)
+        ? VkDescriptorImageInfo{ddgiSampler, ddgiIrradianceView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+        : VkDescriptorImageInfo{envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     
-    VkDescriptorImageInfo ddgiDepthInfo{};
-    if (ddgiDepthView != VK_NULL_HANDLE && ddgiSampler != VK_NULL_HANDLE) {
-        ddgiDepthInfo = {ddgiSampler, ddgiDepthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    } else {
-        // Use environment map as placeholder
-        ddgiDepthInfo = {envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    }
+    std::cout << "  building ddgiDepthInfo..." << std::endl; std::cout.flush();
+    VkDescriptorImageInfo ddgiDepthInfo = (ddgiDepthView != VK_NULL_HANDLE && ddgiSampler != VK_NULL_HANDLE)
+        ? VkDescriptorImageInfo{ddgiSampler, ddgiDepthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+        : VkDescriptorImageInfo{envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     
-    VkDescriptorImageInfo ssrInfo{};
-    if (ssrReflectionsView != VK_NULL_HANDLE && ssrSampler != VK_NULL_HANDLE) {
-        ssrInfo = {ssrSampler, ssrReflectionsView, VK_IMAGE_LAYOUT_GENERAL};
-    } else {
-        // Use environment map as placeholder
-        ssrInfo = {envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    }
+    std::cout << "  building ssrInfo..." << std::endl; std::cout.flush();
+    VkDescriptorImageInfo ssrInfo = (ssrReflectionsView != VK_NULL_HANDLE && ssrSampler != VK_NULL_HANDLE)
+        ? VkDescriptorImageInfo{ssrSampler, ssrReflectionsView, VK_IMAGE_LAYOUT_GENERAL}
+        : VkDescriptorImageInfo{envSampler, envView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
-    std::vector<VkWriteDescriptorSet> writes;
-    for(int i=0; i<4; ++i) {
-        writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
-                          (uint32_t)i, 0, 1, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, &gbufferInfos[i], nullptr, nullptr});
+    std::cout << "  building writes array..." << std::endl; std::cout.flush();
+    // Build all writes at once using a fixed-size array to avoid reallocation issues
+    std::array<VkWriteDescriptorSet, 11> writes{};
+    
+    // G-Buffer input attachments (bindings 0-3)
+    for (int i = 0; i < 4; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = compositionDescriptorSet;
+        writes[i].dstBinding = static_cast<uint32_t>(i);
+        writes[i].dstArrayElement = 0;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+        writes[i].pImageInfo = &gbufferInfos[i];
     }
-    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
-                      4, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &uboInfo, nullptr});
-    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
-                      5, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &shadowInfo, nullptr, nullptr});
-    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
-                      6, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &envInfo, nullptr, nullptr});
-    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
-                      7, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &ddgiUboInfo, nullptr});
-    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
-                      8, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ddgiIrradianceInfo, nullptr, nullptr});
-    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
-                      9, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ddgiDepthInfo, nullptr, nullptr});
-    writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, compositionDescriptorSet, 
-                      10, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ssrInfo, nullptr, nullptr});
+    std::cout << "  writes 0-3 done" << std::endl; std::cout.flush();
+    
+    // UBO (binding 4)
+    writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[4].dstSet = compositionDescriptorSet;
+    writes[4].dstBinding = 4;
+    writes[4].dstArrayElement = 0;
+    writes[4].descriptorCount = 1;
+    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[4].pBufferInfo = &uboInfo;
+    std::cout << "  write 4 done" << std::endl; std::cout.flush();
+    
+    // Shadow map (binding 5)
+    writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[5].dstSet = compositionDescriptorSet;
+    writes[5].dstBinding = 5;
+    writes[5].dstArrayElement = 0;
+    writes[5].descriptorCount = 1;
+    writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[5].pImageInfo = &shadowInfo;
+    std::cout << "  write 5 done" << std::endl; std::cout.flush();
+    
+    // Environment map (binding 6)
+    writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[6].dstSet = compositionDescriptorSet;
+    writes[6].dstBinding = 6;
+    writes[6].dstArrayElement = 0;
+    writes[6].descriptorCount = 1;
+    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[6].pImageInfo = &envInfo;
+    std::cout << "  write 6 done" << std::endl; std::cout.flush();
+    
+    // DDGI UBO (binding 7)
+    writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[7].dstSet = compositionDescriptorSet;
+    writes[7].dstBinding = 7;
+    writes[7].dstArrayElement = 0;
+    writes[7].descriptorCount = 1;
+    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[7].pBufferInfo = &ddgiUboInfo;
+    std::cout << "  write 7 done" << std::endl; std::cout.flush();
+    
+    // DDGI Irradiance (binding 8)
+    writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[8].dstSet = compositionDescriptorSet;
+    writes[8].dstBinding = 8;
+    writes[8].dstArrayElement = 0;
+    writes[8].descriptorCount = 1;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[8].pImageInfo = &ddgiIrradianceInfo;
+    std::cout << "  write 8 done" << std::endl; std::cout.flush();
+    
+    // DDGI Depth (binding 9)
+    writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[9].dstSet = compositionDescriptorSet;
+    writes[9].dstBinding = 9;
+    writes[9].dstArrayElement = 0;
+    writes[9].descriptorCount = 1;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[9].pImageInfo = &ddgiDepthInfo;
+    std::cout << "  write 9 done" << std::endl; std::cout.flush();
+    
+    // SSR Reflections (binding 10)
+    writes[10].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[10].dstSet = compositionDescriptorSet;
+    writes[10].dstBinding = 10;
+    writes[10].dstArrayElement = 0;
+    writes[10].descriptorCount = 1;
+    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[10].pImageInfo = &ssrInfo;
+    std::cout << "  write 10 done" << std::endl; std::cout.flush();
 
-    vkUpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
+    std::cout << "  calling vkUpdateDescriptorSets..." << std::endl; std::cout.flush();
+    vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    std::cout << "  updateCompositionDescriptorSet: EXIT" << std::endl; std::cout.flush();
 }
 
 void DeferredRenderer::render(VkCommandBuffer cmd, uint32_t imageIndex, const std::vector<GameObject>& gameObjects) {

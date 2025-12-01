@@ -1284,6 +1284,408 @@ void EditorManager::toggleWindow(const std::string& name) {
 }
 
 // ============================================================================
+// SPLINE EDITOR TOOL
+// ============================================================================
+
+SplineEditorTool::SplineEditorTool() = default;
+
+SplineEditorTool::~SplineEditorTool() = default;
+
+void SplineEditorTool::setSpline(SplineComponent* spline) {
+    selectedSpline_ = spline;
+    selectedPoint_ = -1;
+    pointHandles_.clear();
+    
+    if (spline) {
+        updatePointHandles();
+    }
+}
+
+void SplineEditorTool::update(const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                               const glm::vec2& viewportSize) {
+    viewMatrix_ = viewMatrix;
+    projMatrix_ = projMatrix;
+    viewportSize_ = viewportSize;
+    
+    // Extract camera position from inverse view matrix
+    glm::mat4 invView = glm::inverse(viewMatrix);
+    cameraPosition_ = glm::vec3(invView[3]);
+    cameraForward_ = -glm::vec3(invView[2]);
+    
+    if (selectedSpline_) {
+        updatePointHandles();
+    }
+}
+
+void SplineEditorTool::handleInput(const glm::vec2& mousePos, bool mouseDown,
+                                    const glm::vec2& mouseDelta, bool shiftHeld, bool ctrlHeld) {
+    if (!selectedSpline_) return;
+    
+    // Check for point selection on mouse down
+    if (mouseDown && !wasMouseDown_) {
+        int pickedPoint = pickPoint(mousePos);
+        if (pickedPoint >= 0) {
+            if (ctrlHeld) {
+                // Multi-select (toggle)
+                if (selectedPoint_ == pickedPoint) {
+                    selectedPoint_ = -1;
+                } else {
+                    selectedPoint_ = pickedPoint;
+                }
+            } else {
+                selectedPoint_ = pickedPoint;
+            }
+            isGizmoDragging_ = true;
+            gizmoDragStart_ = selectedSpline_->getControlPoint(selectedPoint_).position;
+            gizmoDragOffset_ = glm::vec3(0);
+        } else if (!ctrlHeld) {
+            // Clicked on empty space - deselect
+            selectedPoint_ = -1;
+        }
+    }
+    
+    // Handle dragging
+    if (isGizmoDragging_ && mouseDown && selectedPoint_ >= 0) {
+        glm::vec3 newPos = handleGizmoInput(gizmoDragStart_ + gizmoDragOffset_);
+        gizmoDragOffset_ = newPos - gizmoDragStart_;
+        
+        // Update spline point
+        auto& point = selectedSpline_->getControlPoint(selectedPoint_);
+        point.position = newPos;
+        selectedSpline_->rebuildDistanceTable();
+        notifySplineChanged();
+    }
+    
+    // End dragging
+    if (!mouseDown && wasMouseDown_) {
+        isGizmoDragging_ = false;
+    }
+    
+    lastMousePos_ = mousePos;
+    wasMouseDown_ = mouseDown;
+}
+
+void SplineEditorTool::draw() {
+    if (!selectedSpline_) return;
+    
+    drawSplineCurve();
+    drawControlPoints();
+    
+    if (config_.showTangentHandles) {
+        drawTangentHandles();
+    }
+    
+    // Draw gizmo for selected point
+    if (selectedPoint_ >= 0 && selectedPoint_ < static_cast<int>(selectedSpline_->getPointCount())) {
+        glm::vec3 pos = selectedSpline_->getControlPoint(selectedPoint_).position;
+        drawTranslateGizmo(pos, true);
+    }
+}
+
+bool SplineEditorTool::drawTranslateGizmo(const glm::vec3& worldPos, bool isSelected) {
+    if (!isSelected) return false;
+    
+    float gizmoSize = glm::length(worldPos - cameraPosition_) * 0.1f;
+    
+    // X axis (red)
+    drawGizmoArrow(worldPos, glm::vec3(1, 0, 0), gizmoSize, 
+                   glm::vec4(1, 0.2f, 0.2f, 1), 0);
+    
+    // Y axis (green)
+    drawGizmoArrow(worldPos, glm::vec3(0, 1, 0), gizmoSize,
+                   glm::vec4(0.2f, 1, 0.2f, 1), 1);
+    
+    // Z axis (blue)
+    drawGizmoArrow(worldPos, glm::vec3(0, 0, 1), gizmoSize,
+                   glm::vec4(0.2f, 0.2f, 1, 1), 2);
+    
+    return activeAxis_ >= 0;
+}
+
+glm::vec3 SplineEditorTool::handleGizmoInput(const glm::vec3& worldPos) {
+    if (!isGizmoDragging_) return worldPos;
+    
+    glm::vec3 rayOrigin, rayDir;
+    screenToWorldRay(lastMousePos_, rayDir);
+    rayOrigin = cameraPosition_;
+    
+    glm::vec3 result = worldPos;
+    
+    // Project mouse movement onto active axis or plane
+    if (activeAxis_ >= 0) {
+        glm::vec3 axisDir(0);
+        axisDir[activeAxis_] = 1.0f;
+        
+        // Find closest point on axis to ray
+        glm::vec3 w0 = rayOrigin - worldPos;
+        float a = glm::dot(axisDir, axisDir);
+        float b = glm::dot(axisDir, rayDir);
+        float c = glm::dot(rayDir, rayDir);
+        float d = glm::dot(axisDir, w0);
+        float e = glm::dot(rayDir, w0);
+        
+        float denom = a * c - b * b;
+        if (std::abs(denom) > 0.0001f) {
+            float t = (b * e - c * d) / denom;
+            result = worldPos + axisDir * t;
+        }
+    } else {
+        // Free movement on camera-facing plane
+        glm::vec3 planeNormal = cameraForward_;
+        float t;
+        if (rayPlaneIntersect(rayOrigin, rayDir, worldPos, planeNormal, t)) {
+            result = rayOrigin + rayDir * t;
+        }
+    }
+    
+    return applySnapping(result);
+}
+
+void SplineEditorTool::selectPoint(int index) {
+    if (selectedSpline_ && index >= 0 && 
+        index < static_cast<int>(selectedSpline_->getPointCount())) {
+        selectedPoint_ = index;
+    } else {
+        selectedPoint_ = -1;
+    }
+}
+
+void SplineEditorTool::addPoint(const glm::vec3& position) {
+    if (!selectedSpline_) return;
+    
+    SplinePoint point;
+    point.position = position;
+    point.rotation = glm::quat(1, 0, 0, 0);
+    point.scale = glm::vec3(1);
+    
+    selectedSpline_->addControlPoint(point);
+    selectedSpline_->rebuildDistanceTable();
+    
+    selectedPoint_ = static_cast<int>(selectedSpline_->getPointCount()) - 1;
+    updatePointHandles();
+    notifySplineChanged();
+}
+
+void SplineEditorTool::insertPointAfterSelected(const glm::vec3& position) {
+    if (!selectedSpline_ || selectedPoint_ < 0) {
+        addPoint(position);
+        return;
+    }
+    
+    SplinePoint point;
+    point.position = position;
+    point.rotation = glm::quat(1, 0, 0, 0);
+    point.scale = glm::vec3(1);
+    
+    selectedSpline_->insertControlPoint(selectedPoint_ + 1, point);
+    selectedSpline_->rebuildDistanceTable();
+    
+    selectedPoint_ = selectedPoint_ + 1;
+    updatePointHandles();
+    notifySplineChanged();
+}
+
+void SplineEditorTool::deleteSelectedPoint() {
+    if (!selectedSpline_ || selectedPoint_ < 0) return;
+    if (selectedSpline_->getPointCount() <= 2) return;  // Keep at least 2 points
+    
+    selectedSpline_->removeControlPoint(selectedPoint_);
+    selectedSpline_->rebuildDistanceTable();
+    
+    if (selectedPoint_ >= static_cast<int>(selectedSpline_->getPointCount())) {
+        selectedPoint_ = static_cast<int>(selectedSpline_->getPointCount()) - 1;
+    }
+    
+    updatePointHandles();
+    notifySplineChanged();
+}
+
+void SplineEditorTool::duplicateSelectedPoint() {
+    if (!selectedSpline_ || selectedPoint_ < 0) return;
+    
+    const auto& srcPoint = selectedSpline_->getControlPoint(selectedPoint_);
+    glm::vec3 offset = glm::vec3(10, 0, 0);  // Offset duplicated point
+    
+    insertPointAfterSelected(srcPoint.position + offset);
+}
+
+void SplineEditorTool::updatePointHandles() {
+    if (!selectedSpline_) return;
+    
+    size_t pointCount = selectedSpline_->getPointCount();
+    pointHandles_.resize(pointCount);
+    
+    for (size_t i = 0; i < pointCount; ++i) {
+        const auto& point = selectedSpline_->getControlPoint(static_cast<int>(i));
+        
+        pointHandles_[i].pointIndex = static_cast<int>(i);
+        pointHandles_[i].worldPosition = point.position;
+        pointHandles_[i].screenPosition = worldToScreen(point.position);
+        pointHandles_[i].isSelected = (static_cast<int>(i) == selectedPoint_);
+        pointHandles_[i].isHovered = false;
+    }
+}
+
+glm::vec2 SplineEditorTool::worldToScreen(const glm::vec3& worldPos) {
+    glm::vec4 clipSpace = projMatrix_ * viewMatrix_ * glm::vec4(worldPos, 1.0f);
+    
+    if (clipSpace.w <= 0.0f) {
+        return glm::vec2(-1000, -1000);  // Behind camera
+    }
+    
+    glm::vec3 ndc = glm::vec3(clipSpace) / clipSpace.w;
+    
+    return glm::vec2(
+        (ndc.x + 1.0f) * 0.5f * viewportSize_.x,
+        (1.0f - ndc.y) * 0.5f * viewportSize_.y  // Y is flipped
+    );
+}
+
+glm::vec3 SplineEditorTool::screenToWorldRay(const glm::vec2& screenPos, glm::vec3& rayDir) {
+    // Convert screen to NDC
+    float ndcX = (screenPos.x / viewportSize_.x) * 2.0f - 1.0f;
+    float ndcY = 1.0f - (screenPos.y / viewportSize_.y) * 2.0f;
+    
+    // Unproject
+    glm::mat4 invProjView = glm::inverse(projMatrix_ * viewMatrix_);
+    
+    glm::vec4 nearPoint = invProjView * glm::vec4(ndcX, ndcY, -1.0f, 1.0f);
+    glm::vec4 farPoint = invProjView * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+    
+    nearPoint /= nearPoint.w;
+    farPoint /= farPoint.w;
+    
+    rayDir = glm::normalize(glm::vec3(farPoint) - glm::vec3(nearPoint));
+    return glm::vec3(nearPoint);
+}
+
+bool SplineEditorTool::rayPlaneIntersect(const glm::vec3& rayOrigin, const glm::vec3& rayDir,
+                                          const glm::vec3& planePoint, const glm::vec3& planeNormal,
+                                          float& t) {
+    float denom = glm::dot(planeNormal, rayDir);
+    if (std::abs(denom) < 0.0001f) return false;
+    
+    t = glm::dot(planePoint - rayOrigin, planeNormal) / denom;
+    return t >= 0;
+}
+
+int SplineEditorTool::pickPoint(const glm::vec2& screenPos, float threshold) {
+    int closestPoint = -1;
+    float closestDist = threshold;
+    
+    for (const auto& handle : pointHandles_) {
+        float dist = glm::length(screenPos - handle.screenPosition);
+        if (dist < closestDist) {
+            closestDist = dist;
+            closestPoint = handle.pointIndex;
+        }
+    }
+    
+    return closestPoint;
+}
+
+void SplineEditorTool::drawSplineCurve() {
+    if (!selectedSpline_ || selectedSpline_->getPointCount() < 2) return;
+    
+    std::vector<glm::vec3> curvePoints;
+    int segments = config_.curveSegments * (static_cast<int>(selectedSpline_->getPointCount()) - 1);
+    
+    for (int i = 0; i <= segments; ++i) {
+        float t = static_cast<float>(i) / static_cast<float>(segments);
+        curvePoints.push_back(selectedSpline_->evaluatePosition(t));
+    }
+    
+    // Draw curve
+    glm::vec4 color = (selectedPoint_ >= 0) ? config_.selectedSplineColor : config_.splineColor;
+    DebugDraw::drawPath(curvePoints, color);
+    
+    // Draw distance markers if enabled
+    if (config_.showDistanceMarkers) {
+        float totalLength = selectedSpline_->getTotalLength();
+        for (float dist = 0; dist < totalLength; dist += config_.distanceMarkerInterval) {
+            float t = selectedSpline_->distanceToParameter(dist);
+            glm::vec3 pos = selectedSpline_->evaluatePosition(t);
+            DebugDraw::drawSphere(pos, 0.5f, glm::vec4(1, 1, 0, 0.5f), false);
+        }
+    }
+}
+
+void SplineEditorTool::drawControlPoints() {
+    for (const auto& handle : pointHandles_) {
+        glm::vec4 color = config_.pointColor;
+        float size = config_.pointHandleSize;
+        
+        if (handle.isSelected) {
+            color = config_.selectedPointColor;
+            size *= config_.handleHoverGrow;
+        } else if (handle.isHovered) {
+            color = config_.hoveredPointColor;
+            size *= config_.handleHoverGrow;
+        }
+        
+        // Draw point as sphere in 3D
+        DebugDraw::drawSphere(handle.worldPosition, size * 0.1f, color, true);
+    }
+}
+
+void SplineEditorTool::drawTangentHandles() {
+    if (!selectedSpline_ || selectedPoint_ < 0) return;
+    
+    // For Bezier splines, draw tangent handles
+    const auto& point = selectedSpline_->getControlPoint(selectedPoint_);
+    
+    // Calculate tangent at this point
+    int numPoints = static_cast<int>(selectedSpline_->getPointCount());
+    if (numPoints < 2) return;
+    
+    float t = static_cast<float>(selectedPoint_) / static_cast<float>(numPoints - 1);
+    glm::vec3 tangent = selectedSpline_->evaluateTangent(t);
+    
+    float handleLength = 20.0f;
+    glm::vec3 tangentIn = point.position - tangent * handleLength;
+    glm::vec3 tangentOut = point.position + tangent * handleLength;
+    
+    // Draw tangent lines
+    DebugDraw::drawLine(tangentIn, point.position, config_.tangentLineColor);
+    DebugDraw::drawLine(point.position, tangentOut, config_.tangentLineColor);
+    
+    // Draw tangent handles
+    DebugDraw::drawSphere(tangentIn, config_.tangentHandleSize * 0.05f, config_.tangentHandleColor, true);
+    DebugDraw::drawSphere(tangentOut, config_.tangentHandleSize * 0.05f, config_.tangentHandleColor, true);
+}
+
+void SplineEditorTool::drawGizmoArrow(const glm::vec3& origin, const glm::vec3& direction,
+                                       float length, const glm::vec4& color, int axis) {
+    glm::vec3 end = origin + direction * length;
+    
+    // Highlight if this is the active axis
+    glm::vec4 drawColor = color;
+    if (activeAxis_ == axis) {
+        drawColor = glm::vec4(1, 1, 0, 1);  // Yellow when active
+    }
+    
+    DebugDraw::drawArrow(origin, end, drawColor, length * 0.15f);
+}
+
+glm::vec3 SplineEditorTool::applySnapping(const glm::vec3& position) {
+    if (!config_.enableSnapping) return position;
+    
+    glm::vec3 snapped = position;
+    
+    snapped.x = std::round(snapped.x / config_.snapGridSize) * config_.snapGridSize;
+    snapped.y = std::round(snapped.y / config_.snapGridSize) * config_.snapGridSize;
+    snapped.z = std::round(snapped.z / config_.snapGridSize) * config_.snapGridSize;
+    
+    return snapped;
+}
+
+void SplineEditorTool::notifySplineChanged() {
+    for (auto& callback : changeCallbacks_) {
+        callback(selectedSpline_);
+    }
+}
+
+// ============================================================================
 // DEBUG DRAW
 // ============================================================================
 

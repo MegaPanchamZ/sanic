@@ -76,8 +76,8 @@ private:
     
     VkPipelineLayout compositionPipelineLayout;
     VkPipeline compositionPipeline;
-    VkDescriptorSetLayout compositionDescriptorSetLayout;
-    VkDescriptorSet compositionDescriptorSet;
+    VkDescriptorSetLayout compositionDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSet compositionDescriptorSet = VK_NULL_HANDLE;
 
     // Mesh Shader Function Pointer
     PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT;

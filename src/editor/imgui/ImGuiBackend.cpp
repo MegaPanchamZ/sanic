@@ -59,10 +59,12 @@ bool ImGuiBackend::initialize(const InitInfo& info) {
     vulkanInfo.QueueFamily = info.queueFamily;
     vulkanInfo.Queue = info.queue;
     vulkanInfo.DescriptorPool = imguiDescriptorPool_;
-    vulkanInfo.RenderPass = info.renderPass;
     vulkanInfo.MinImageCount = info.imageCount;
     vulkanInfo.ImageCount = info.imageCount;
-    vulkanInfo.MSAASamples = info.msaaSamples;
+    // New ImGui API: RenderPass and MSAASamples are in PipelineInfoMain
+    vulkanInfo.PipelineInfoMain.RenderPass = info.renderPass;
+    vulkanInfo.PipelineInfoMain.Subpass = 0;
+    vulkanInfo.PipelineInfoMain.MSAASamples = info.msaaSamples;
     
     if (!ImGui_ImplVulkan_Init(&vulkanInfo)) {
         return false;
@@ -110,8 +112,8 @@ void ImGuiBackend::render(VkCommandBuffer commandBuffer) {
 }
 
 void ImGuiBackend::rebuildFonts() {
-    ImGui_ImplVulkan_DestroyFontsTexture();
-    ImGui_ImplVulkan_CreateFontsTexture();
+    // Note: In the new ImGui Vulkan backend, fonts are uploaded automatically
+    // There is no need to explicitly create/destroy font textures
 }
 
 VkDescriptorSet ImGuiBackend::addTexture(VkSampler sampler, VkImageView imageView, VkImageLayout imageLayout) {

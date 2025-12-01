@@ -1,0 +1,16 @@
+{
+  "name": "KineticEdge",
+  "description": "High-speed Sonic Frontiers-style game prototype",
+  "engineVersion": "1.0",
+  "defaultWorld": "/Content/Levels/TestWorld.sworld",
+  "modules": [
+    "KineticEdgeGame"
+  ],
+  "plugins": [],
+  "settings": {
+    "targetFramerate": "60",
+    "maxPhysicsSubsteps": "8",
+    "defaultPlayerSpeed": "200",
+    "boostMultiplier": "3.5"
+  }
+}

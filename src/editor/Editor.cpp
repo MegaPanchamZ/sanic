@@ -9,13 +9,20 @@
 #include "viewport/Viewport.h"
 #include "panels/HierarchyPanel.h"
 #include "panels/InspectorPanel.h"
-#include "panels/AssetBrowserPanel.h"
+#include "panels/AssetBrowser.h"
 #include "panels/ConsolePanel.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
 #include <imgui_internal.h>
+#include <ImGuizmo.h>
+
+// Embedded font data (Inter Regular - a clean, modern UI font)
+// This is a subset of Inter containing common ASCII + extended Latin
+#include "fonts/InterRegular.h"
+#include "fonts/InterBold.h"
+#include "fonts/IconsMaterialDesign.h"
 
 #include <fstream>
 #include <algorithm>
@@ -144,13 +151,17 @@ bool Editor::initializeImGui(VkRenderPass renderPass, uint32_t imageCount) {
         return false;
     }
     
-    // Initialize ImGui
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    // Initialize ImGui (only create context if it doesn't already exist)
+    if (ImGui::GetCurrentContext() == nullptr) {
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+    }
+    
     ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
     
     // Setup style
     setupImGuiStyle();
@@ -173,16 +184,17 @@ bool Editor::initializeImGui(VkRenderPass renderPass, uint32_t imageCount) {
     initInfo.Queue = vulkanContext_->getGraphicsQueue();
     initInfo.PipelineCache = VK_NULL_HANDLE;
     initInfo.DescriptorPool = imguiDescriptorPool_;
-    initInfo.Subpass = 0;
     initInfo.MinImageCount = imageCount;
     initInfo.ImageCount = imageCount;
-    initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-    initInfo.RenderPass = renderPass;
+    
+    // New API: RenderPass, Subpass, MSAASamples moved to PipelineInfoMain
+    initInfo.PipelineInfoMain.RenderPass = renderPass;
+    initInfo.PipelineInfoMain.Subpass = 0;
+    initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     
     ImGui_ImplVulkan_Init(&initInfo);
     
-    // Upload fonts
-    ImGui_ImplVulkan_CreateFontsTexture();
+    // Note: In new ImGui, fonts are uploaded automatically on first render
     
     // Create default panels
     createDefaultPanels();
@@ -213,57 +225,277 @@ void Editor::shutdownImGui() {
 }
 
 void Editor::setupImGuiStyle() {
+    ImGuiIO& io = ImGui::GetIO();
     ImGuiStyle& style = ImGui::GetStyle();
     
-    if (config_.darkTheme) {
-        ImGui::StyleColorsDark();
-        
-        // Custom dark theme adjustments
-        ImVec4* colors = style.Colors;
-        colors[ImGuiCol_WindowBg] = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-        colors[ImGuiCol_Header] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-        colors[ImGuiCol_HeaderHovered] = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-        colors[ImGuiCol_HeaderActive] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-        colors[ImGuiCol_Button] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-        colors[ImGuiCol_ButtonHovered] = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-        colors[ImGuiCol_ButtonActive] = ImVec4(0.15f, 0.40f, 0.70f, 1.00f);
-        colors[ImGuiCol_FrameBg] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-        colors[ImGuiCol_FrameBgActive] = ImVec4(0.25f, 0.25f, 0.25f, 1.00f);
-        colors[ImGuiCol_Tab] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-        colors[ImGuiCol_TabHovered] = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-        colors[ImGuiCol_TabActive] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-        colors[ImGuiCol_TitleBg] = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-        colors[ImGuiCol_TitleBgActive] = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-        colors[ImGuiCol_MenuBarBg] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-        colors[ImGuiCol_DockingPreview] = ImVec4(0.15f, 0.40f, 0.70f, 0.70f);
-    } else {
-        ImGui::StyleColorsLight();
-    }
+    // ============================================
+    // FONT SETUP - Anti-aliased, crisp fonts
+    // ============================================
+    io.Fonts->Clear();
     
-    // Common style settings
-    style.WindowRounding = 4.0f;
-    style.FrameRounding = 2.0f;
-    style.GrabRounding = 2.0f;
-    style.TabRounding = 4.0f;
-    style.ScrollbarRounding = 4.0f;
-    style.WindowBorderSize = 1.0f;
-    style.FrameBorderSize = 0.0f;
-    style.PopupBorderSize = 1.0f;
-    style.WindowPadding = ImVec2(8, 8);
-    style.FramePadding = ImVec2(4, 3);
-    style.ItemSpacing = ImVec2(8, 4);
-    style.ItemInnerSpacing = ImVec2(4, 4);
-    style.IndentSpacing = 20.0f;
-    style.ScrollbarSize = 14.0f;
-    style.GrabMinSize = 10.0f;
+    // Font configuration for crisp rendering
+    ImFontConfig fontConfig;
+    fontConfig.OversampleH = 2;
+    fontConfig.OversampleV = 2;
+    fontConfig.PixelSnapH = true;
+    fontConfig.RasterizerDensity = 1.0f;
+    
+    // Main UI font - Inter Regular at 15px (good balance of readability and density)
+#ifdef SANIC_FONT_INTER_REGULAR
+    io.Fonts->AddFontFromMemoryCompressedTTF(
+        InterRegular_compressed_data, 
+        InterRegular_compressed_size, 
+        15.0f, 
+        &fontConfig
+    );
+    
+    // Icon font (Material Design Icons) - merge with Inter Regular
+#ifdef SANIC_FONT_MDI
+    ImFontConfig iconConfig;
+    iconConfig.MergeMode = true;
+    iconConfig.PixelSnapH = true;
+    iconConfig.GlyphMinAdvanceX = 16.0f;
+    iconConfig.GlyphOffset = ImVec2(0.0f, 2.0f);  // Slight vertical offset to align with text
+    // MDI uses Private Use Area starting at U+F0000
+    static const ImWchar iconRanges[] = { ICON_MIN_MDI, ICON_MAX_MDI, 0 };
+    io.Fonts->AddFontFromMemoryCompressedTTF(
+        MaterialDesignIcons_compressed_data,
+        MaterialDesignIcons_compressed_size,
+        15.0f,
+        &iconConfig,
+        iconRanges
+    );
+#endif
+
+#else
+    // Fallback: Load default font with better config
+    fontConfig.SizePixels = 15.0f;
+    io.Fonts->AddFontDefault(&fontConfig);
+#endif
+
+    // Bold font for headers (as a separate font, not merged)
+#ifdef SANIC_FONT_INTER_BOLD
+    ImFontConfig boldConfig;
+    boldConfig.OversampleH = 2;
+    boldConfig.OversampleV = 2;
+    boldConfig.PixelSnapH = true;
+    boldConfig.MergeMode = false;
+    io.Fonts->AddFontFromMemoryCompressedTTF(
+        InterBold_compressed_data,
+        InterBold_compressed_size,
+        15.0f,
+        &boldConfig
+    );
+#endif
+
+    // Note: Don't call io.Fonts->Build() manually - new ImGui backends handle this automatically
+    
+    // ============================================
+    // COLOR SCHEME - Modern Dark Theme
+    // Inspired by modern IDEs (VS Code Dark+, JetBrains Darcula)
+    // ============================================
+    
+    // Base colors
+    const ImVec4 bg_dark       = ImVec4(0.086f, 0.086f, 0.094f, 1.00f);  // #16161a - Very dark background
+    const ImVec4 bg_main       = ImVec4(0.110f, 0.114f, 0.129f, 1.00f);  // #1c1d21 - Main window bg
+    const ImVec4 bg_light      = ImVec4(0.145f, 0.149f, 0.169f, 1.00f);  // #25262b - Lighter panels
+    const ImVec4 bg_lighter    = ImVec4(0.180f, 0.184f, 0.208f, 1.00f);  // #2e2f35 - Hover states
+    const ImVec4 border        = ImVec4(0.220f, 0.224f, 0.251f, 1.00f);  // #383940 - Subtle borders
+    
+    // Text colors  
+    const ImVec4 text_primary  = ImVec4(0.925f, 0.937f, 0.957f, 1.00f);  // #eceff4 - Primary text
+    const ImVec4 text_secondary= ImVec4(0.600f, 0.620f, 0.680f, 1.00f);  // #999ead - Secondary text
+    const ImVec4 text_disabled = ImVec4(0.400f, 0.420f, 0.480f, 1.00f);  // #666b7a - Disabled text
+    
+    // Accent colors - Vibrant blue with purple tint
+    const ImVec4 accent        = ImVec4(0.318f, 0.549f, 0.988f, 1.00f);  // #518cfc - Primary accent
+    const ImVec4 accent_hover  = ImVec4(0.420f, 0.620f, 1.000f, 1.00f);  // #6b9eff - Lighter on hover
+    const ImVec4 accent_active = ImVec4(0.220f, 0.450f, 0.900f, 1.00f);  // #3873e6 - Darker on click
+    const ImVec4 accent_dim    = ImVec4(0.318f, 0.549f, 0.988f, 0.40f);  // Translucent accent
+    
+    // Success/Warning/Error
+    const ImVec4 success       = ImVec4(0.306f, 0.788f, 0.490f, 1.00f);  // #4ec97d - Green
+    const ImVec4 warning       = ImVec4(0.988f, 0.729f, 0.263f, 1.00f);  // #fcba43 - Orange/Yellow
+    const ImVec4 error         = ImVec4(0.937f, 0.325f, 0.314f, 1.00f);  // #ef5350 - Red
+    
+    ImVec4* colors = style.Colors;
+    
+    // Background colors
+    colors[ImGuiCol_WindowBg]              = bg_main;
+    colors[ImGuiCol_ChildBg]               = ImVec4(0, 0, 0, 0);
+    colors[ImGuiCol_PopupBg]               = ImVec4(bg_light.x, bg_light.y, bg_light.z, 0.98f);
+    colors[ImGuiCol_MenuBarBg]             = bg_dark;
+    colors[ImGuiCol_ScrollbarBg]           = ImVec4(0, 0, 0, 0);
+    
+    // Borders
+    colors[ImGuiCol_Border]                = border;
+    colors[ImGuiCol_BorderShadow]          = ImVec4(0, 0, 0, 0);
+    
+    // Frame backgrounds (input fields, checkboxes, etc.)
+    colors[ImGuiCol_FrameBg]               = bg_light;
+    colors[ImGuiCol_FrameBgHovered]        = bg_lighter;
+    colors[ImGuiCol_FrameBgActive]         = ImVec4(bg_lighter.x + 0.05f, bg_lighter.y + 0.05f, bg_lighter.z + 0.05f, 1.0f);
+    
+    // Title bar
+    colors[ImGuiCol_TitleBg]               = bg_dark;
+    colors[ImGuiCol_TitleBgActive]         = bg_dark;
+    colors[ImGuiCol_TitleBgCollapsed]      = bg_dark;
+    
+    // Scrollbar
+    colors[ImGuiCol_ScrollbarGrab]         = ImVec4(0.3f, 0.3f, 0.35f, 1.0f);
+    colors[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.4f, 0.4f, 0.45f, 1.0f);
+    colors[ImGuiCol_ScrollbarGrabActive]   = accent;
+    
+    // Buttons
+    colors[ImGuiCol_Button]                = bg_light;
+    colors[ImGuiCol_ButtonHovered]         = bg_lighter;
+    colors[ImGuiCol_ButtonActive]          = accent_active;
+    
+    // Headers (collapsing headers, tree nodes, selectable)
+    colors[ImGuiCol_Header]                = ImVec4(accent.x, accent.y, accent.z, 0.25f);
+    colors[ImGuiCol_HeaderHovered]         = ImVec4(accent.x, accent.y, accent.z, 0.40f);
+    colors[ImGuiCol_HeaderActive]          = ImVec4(accent.x, accent.y, accent.z, 0.55f);
+    
+    // Separators
+    colors[ImGuiCol_Separator]             = border;
+    colors[ImGuiCol_SeparatorHovered]      = accent;
+    colors[ImGuiCol_SeparatorActive]       = accent_active;
+    
+    // Resize grip
+    colors[ImGuiCol_ResizeGrip]            = ImVec4(accent.x, accent.y, accent.z, 0.20f);
+    colors[ImGuiCol_ResizeGripHovered]     = ImVec4(accent.x, accent.y, accent.z, 0.60f);
+    colors[ImGuiCol_ResizeGripActive]      = accent;
+    
+    // Tabs
+    colors[ImGuiCol_Tab]                   = bg_light;
+    colors[ImGuiCol_TabHovered]            = ImVec4(accent.x, accent.y, accent.z, 0.50f);
+    colors[ImGuiCol_TabActive]             = ImVec4(accent.x, accent.y, accent.z, 0.70f);
+    colors[ImGuiCol_TabUnfocused]          = bg_light;
+    colors[ImGuiCol_TabUnfocusedActive]    = bg_lighter;
+    colors[ImGuiCol_TabSelectedOverline]   = accent;  // New in ImGui 1.90+
+    
+    // Docking
+    colors[ImGuiCol_DockingPreview]        = ImVec4(accent.x, accent.y, accent.z, 0.70f);
+    colors[ImGuiCol_DockingEmptyBg]        = bg_dark;
+    
+    // Plot
+    colors[ImGuiCol_PlotLines]             = accent;
+    colors[ImGuiCol_PlotLinesHovered]      = accent_hover;
+    colors[ImGuiCol_PlotHistogram]         = accent;
+    colors[ImGuiCol_PlotHistogramHovered]  = accent_hover;
+    
+    // Tables
+    colors[ImGuiCol_TableHeaderBg]         = bg_light;
+    colors[ImGuiCol_TableBorderStrong]     = border;
+    colors[ImGuiCol_TableBorderLight]      = ImVec4(border.x, border.y, border.z, 0.5f);
+    colors[ImGuiCol_TableRowBg]            = ImVec4(0, 0, 0, 0);
+    colors[ImGuiCol_TableRowBgAlt]         = ImVec4(1.0f, 1.0f, 1.0f, 0.02f);
+    
+    // Text
+    colors[ImGuiCol_Text]                  = text_primary;
+    colors[ImGuiCol_TextDisabled]          = text_disabled;
+    colors[ImGuiCol_TextSelectedBg]        = ImVec4(accent.x, accent.y, accent.z, 0.35f);
+    
+    // Widgets
+    colors[ImGuiCol_CheckMark]             = accent;
+    colors[ImGuiCol_SliderGrab]            = accent;
+    colors[ImGuiCol_SliderGrabActive]      = accent_hover;
+    
+    // Nav highlight
+    colors[ImGuiCol_NavHighlight]          = accent;
+    colors[ImGuiCol_NavWindowingHighlight] = ImVec4(1.0f, 1.0f, 1.0f, 0.70f);
+    colors[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.2f, 0.2f, 0.2f, 0.20f);
+    
+    // Modal dim
+    colors[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.0f, 0.0f, 0.0f, 0.60f);
+    
+    // Drag and drop
+    colors[ImGuiCol_DragDropTarget]        = ImVec4(accent.x, accent.y, accent.z, 0.90f);
+    
+    // ============================================
+    // STYLE SETTINGS - Modern, polished look
+    // ============================================
+    
+    // Window
+    style.WindowPadding        = ImVec2(12.0f, 12.0f);
+    style.WindowRounding       = 8.0f;
+    style.WindowBorderSize     = 1.0f;
+    style.WindowMinSize        = ImVec2(100.0f, 100.0f);
+    style.WindowTitleAlign     = ImVec2(0.0f, 0.5f);
+    
+    // Frame (inputs, checkboxes, etc.)
+    style.FramePadding         = ImVec2(8.0f, 5.0f);
+    style.FrameRounding        = 6.0f;
+    style.FrameBorderSize      = 0.0f;
+    
+    // Items
+    style.ItemSpacing          = ImVec2(8.0f, 6.0f);
+    style.ItemInnerSpacing     = ImVec2(6.0f, 4.0f);
+    style.IndentSpacing        = 20.0f;
+    
+    // Touch/click
+    style.TouchExtraPadding    = ImVec2(0.0f, 0.0f);
+    
+    // Widgets
+    style.CellPadding          = ImVec2(6.0f, 4.0f);
+    style.GrabMinSize          = 12.0f;
+    style.GrabRounding         = 4.0f;
+    
+    // Scrollbar
+    style.ScrollbarSize        = 12.0f;
+    style.ScrollbarRounding    = 6.0f;
+    
+    // Tabs
+    style.TabRounding          = 6.0f;
+    style.TabBorderSize        = 0.0f;
+    style.TabBarBorderSize     = 1.0f;
+    
+    // Child/popup
+    style.ChildRounding        = 6.0f;
+    style.ChildBorderSize      = 0.0f;
+    style.PopupRounding        = 8.0f;
+    style.PopupBorderSize      = 1.0f;
+    
+    // Separator
+    style.SeparatorTextBorderSize = 2.0f;
+    
+    // Anti-aliasing
+    style.AntiAliasedLines     = true;
+    style.AntiAliasedLinesUseTex = true;
+    style.AntiAliasedFill      = true;
+    
+    // Curvature
+    style.CircleTessellationMaxError = 0.30f;
+    style.CurveTessellationTol = 1.25f;
+    
+    // Alignment
+    style.WindowMenuButtonPosition = ImGuiDir_None;  // Hide the collapse button
+    style.ColorButtonPosition  = ImGuiDir_Right;
+    style.ButtonTextAlign      = ImVec2(0.5f, 0.5f);
+    style.SelectableTextAlign  = ImVec2(0.0f, 0.0f);
+    
+    // Hover delays
+    style.HoverStationaryDelay = 0.15f;
+    style.HoverDelayShort      = 0.15f;
+    style.HoverDelayNormal     = 0.40f;
+    
+    // Docking
+    style.DockingSeparatorSize = 2.0f;
+    
+    // ============================================
+    // VIEWPORT SPECIFIC ADJUSTMENTS
+    // ============================================
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+        style.WindowRounding = 0.0f;
+        style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+    }
 }
 
 void Editor::createDefaultPanels() {
     panels_.push_back(std::make_unique<Viewport>());
     panels_.push_back(std::make_unique<HierarchyPanel>());
     panels_.push_back(std::make_unique<InspectorPanel>());
-    panels_.push_back(std::make_unique<AssetBrowserPanel>());
+    panels_.push_back(std::make_unique<AssetBrowser>());
     panels_.push_back(std::make_unique<ConsolePanel>());
     
     // Initialize all panels
@@ -276,6 +508,9 @@ void Editor::beginFrame() {
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+    
+    // Initialize ImGuizmo for this frame
+    ImGuizmo::BeginFrame();
 }
 
 void Editor::update(float deltaTime) {
@@ -358,6 +593,12 @@ void Editor::setupDocking() {
     
     ImGuiID dockspaceId = ImGui::GetID("MainDockSpace");
     ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
+    
+    // Setup default layout on first run
+    if (firstRun_) {
+        setupDefaultDockLayout();
+        firstRun_ = false;
+    }
     
     ImGui::End();
 }
@@ -452,110 +693,178 @@ void Editor::drawMainMenuBar() {
 void Editor::drawToolbar() {
     ImGuiWindowFlags toolbarFlags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings;
     
-    float toolbarHeight = 40.0f;
+    float toolbarHeight = 44.0f;
     
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 4));
+    // Toolbar styling
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 6));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 4));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.086f, 0.086f, 0.094f, 1.0f));  // Match menu bar
     
     if (ImGui::BeginViewportSideBar("##Toolbar", ImGui::GetMainViewport(), ImGuiDir_Up, toolbarHeight, toolbarFlags)) {
-        // Transform tools
-        ImGui::SameLine();
+        // Center alignment helper
+        float buttonSize = 34.0f;
+        float totalWidth = buttonSize * 2 + 8.0f;  // 2 buttons + spacing
+        float centerX = (ImGui::GetWindowWidth() - totalWidth) * 0.5f;
         
-        // Play/Pause/Stop buttons (centered)
-        float buttonSize = 32.0f;
-        float centerX = ImGui::GetWindowWidth() / 2.0f - (buttonSize * 3 + 8) / 2.0f;
+        // Left side: Transform mode buttons could go here
+        // (Leaving space for future gizmo mode toggles)
+        
+        // Center: Play/Pause/Stop controls
         ImGui::SetCursorPosX(centerX);
+        ImGui::SetCursorPosY((toolbarHeight - buttonSize) * 0.5f);
         
         bool isPlaying = mode_ == EditorMode::Play || mode_ == EditorMode::Simulate;
         bool isPaused = mode_ == EditorMode::Paused;
         
-        // Play button
+        // Play/Pause button with accent color when active
         if (isPlaying) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+            // Green tint when playing
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.45f, 0.25f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.55f, 0.30f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.12f, 0.40f, 0.20f, 1.0f));
+        } else if (isPaused) {
+            // Yellow tint when paused
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.50f, 0.15f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.65f, 0.60f, 0.20f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.50f, 0.45f, 0.12f, 1.0f));
         }
-        if (ImGui::Button(isPlaying ? "||" : ">", ImVec2(buttonSize, buttonSize))) {
+        
+        // Use unicode symbols for cleaner look
+        const char* playLabel = isPlaying ? "\xE2\x8F\xB8" : "\xE2\x96\xB6";  // ⏸ or ▶
+        if (ImGui::Button(playLabel, ImVec2(buttonSize, buttonSize))) {
             if (isPlaying) pause();
             else play();
         }
-        if (isPlaying) {
-            ImGui::PopStyleColor();
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(isPlaying ? "Pause" : "Play");
+        
+        if (isPlaying || isPaused) {
+            ImGui::PopStyleColor(3);
         }
         
-        ImGui::SameLine();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(isPlaying ? "Pause (Ctrl+P)" : isPaused ? "Resume (Ctrl+P)" : "Play (Ctrl+P)");
+        }
+        
+        ImGui::SameLine(0, 4);
         
         // Stop button
         bool canStop = isPlaying || isPaused;
         if (!canStop) {
             ImGui::BeginDisabled();
         }
-        if (ImGui::Button("[]", ImVec2(buttonSize, buttonSize))) {
+        
+        const char* stopLabel = "\xE2\x96\xA0";  // ■
+        if (ImGui::Button(stopLabel, ImVec2(buttonSize, buttonSize))) {
             stop();
         }
+        
         if (!canStop) {
             ImGui::EndDisabled();
         }
-        if (ImGui::IsItemHovered()) {
+        if (ImGui::IsItemHovered() && canStop) {
             ImGui::SetTooltip("Stop");
         }
+        
+        // Right side: Could add scene selection, etc.
         
         ImGui::End();
     }
     
+    ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
 }
 
 void Editor::drawStatusBar() {
     ImGuiWindowFlags statusFlags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings;
     
-    float statusHeight = 24.0f;
+    float statusHeight = 26.0f;
     
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 4));
+    // Status bar styling - subtle background
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 5));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.086f, 0.086f, 0.094f, 1.0f));
     
     if (ImGui::BeginViewportSideBar("##StatusBar", ImGui::GetMainViewport(), ImGuiDir_Down, statusHeight, statusFlags)) {
-        // Mode indicator
-        const char* modeStr = "Edit";
-        ImVec4 modeColor = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
+        // Mode indicator with colored badge
+        const char* modeStr = "EDIT";
+        ImVec4 modeColor = ImVec4(0.6f, 0.6f, 0.65f, 1.0f);
+        ImVec4 modeBgColor = ImVec4(0.15f, 0.15f, 0.17f, 1.0f);
+        
         switch (mode_) {
             case EditorMode::Edit:
-                modeStr = "Edit";
+                modeStr = "EDIT";
                 break;
             case EditorMode::Play:
-                modeStr = "Playing";
-                modeColor = ImVec4(0.2f, 0.8f, 0.2f, 1.0f);
+                modeStr = "PLAYING";
+                modeColor = ImVec4(0.30f, 0.85f, 0.45f, 1.0f);
+                modeBgColor = ImVec4(0.10f, 0.30f, 0.15f, 1.0f);
                 break;
             case EditorMode::Paused:
-                modeStr = "Paused";
-                modeColor = ImVec4(0.8f, 0.8f, 0.2f, 1.0f);
+                modeStr = "PAUSED";
+                modeColor = ImVec4(0.95f, 0.80f, 0.30f, 1.0f);
+                modeBgColor = ImVec4(0.30f, 0.25f, 0.10f, 1.0f);
                 break;
             case EditorMode::Simulate:
-                modeStr = "Simulating";
-                modeColor = ImVec4(0.2f, 0.6f, 0.8f, 1.0f);
+                modeStr = "SIMULATE";
+                modeColor = ImVec4(0.35f, 0.70f, 0.95f, 1.0f);
+                modeBgColor = ImVec4(0.10f, 0.20f, 0.30f, 1.0f);
                 break;
         }
-        ImGui::TextColored(modeColor, "[%s]", modeStr);
         
-        ImGui::SameLine();
-        ImGui::Separator();
-        ImGui::SameLine();
+        // Draw mode badge
+        ImVec2 textSize = ImGui::CalcTextSize(modeStr);
+        ImVec2 cursorPos = ImGui::GetCursorScreenPos();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        
+        float badgePadX = 6.0f;
+        float badgePadY = 2.0f;
+        float badgeRounding = 3.0f;
+        
+        drawList->AddRectFilled(
+            ImVec2(cursorPos.x - badgePadX, cursorPos.y - badgePadY),
+            ImVec2(cursorPos.x + textSize.x + badgePadX, cursorPos.y + textSize.y + badgePadY),
+            ImGui::ColorConvertFloat4ToU32(modeBgColor),
+            badgeRounding
+        );
+        
+        ImGui::TextColored(modeColor, "%s", modeStr);
+        
+        ImGui::SameLine(0, 16);
+        
+        // Separator
+        ImGui::TextColored(ImVec4(0.3f, 0.3f, 0.35f, 1.0f), "|");
+        ImGui::SameLine(0, 16);
         
         // Selection info
         size_t selCount = selection_->getSelectionCount();
         if (selCount > 0) {
-            ImGui::Text("%zu object(s) selected", selCount);
+            ImGui::TextColored(ImVec4(0.75f, 0.78f, 0.82f, 1.0f), "%zu selected", selCount);
         } else {
-            ImGui::TextDisabled("No selection");
+            ImGui::TextColored(ImVec4(0.45f, 0.47f, 0.52f, 1.0f), "No selection");
         }
         
-        // Right-aligned info
-        ImGui::SameLine(ImGui::GetWindowWidth() - 200);
-        ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+        // Right-aligned stats
+        float rightPadding = 16.0f;
+        char fpsText[32];
+        snprintf(fpsText, sizeof(fpsText), "%.0f FPS", ImGui::GetIO().Framerate);
+        float fpsTextWidth = ImGui::CalcTextSize(fpsText).x;
+        
+        ImGui::SameLine(ImGui::GetWindowWidth() - fpsTextWidth - rightPadding);
+        
+        // Color code FPS
+        float fps = ImGui::GetIO().Framerate;
+        ImVec4 fpsColor;
+        if (fps >= 55.0f) {
+            fpsColor = ImVec4(0.30f, 0.85f, 0.45f, 1.0f);  // Green - good
+        } else if (fps >= 30.0f) {
+            fpsColor = ImVec4(0.95f, 0.80f, 0.30f, 1.0f);  // Yellow - okay
+        } else {
+            fpsColor = ImVec4(0.95f, 0.35f, 0.30f, 1.0f);  // Red - bad
+        }
+        ImGui::TextColored(fpsColor, "%s", fpsText);
         
         ImGui::End();
     }
     
+    ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 }
 
@@ -563,8 +872,8 @@ void Editor::drawNotifications() {
     if (notifications_.empty()) return;
     
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    float padding = 16.0f;
-    float yOffset = 50.0f;  // Below toolbar
+    float padding = 20.0f;
+    float yOffset = 56.0f;  // Below toolbar
     
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - padding, 
                                     viewport->WorkPos.y + yOffset), 
@@ -574,39 +883,63 @@ void Editor::drawNotifications() {
                              ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                              ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
     
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 8));
+    // Toast-style notifications with subtle shadow effect
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 10));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.14f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.28f, 0.8f));
     
     if (ImGui::Begin("##Notifications", nullptr, flags)) {
         for (size_t i = 0; i < notifications_.size(); ++i) {
             const auto& notif = notifications_[i];
             
-            ImVec4 color;
+            // Icon and colors based on notification type
+            const char* icon = "";
+            ImVec4 iconColor;
+            ImVec4 textColor;
+            
             switch (notif.type) {
                 case Notification::Type::Info:
-                    color = ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
+                    icon = "\xE2\x84\xB9";  // ℹ
+                    iconColor = ImVec4(0.35f, 0.60f, 0.95f, 1.0f);
+                    textColor = ImVec4(0.85f, 0.87f, 0.90f, 1.0f);
                     break;
                 case Notification::Type::Warning:
-                    color = ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
+                    icon = "\xE2\x9A\xA0";  // ⚠
+                    iconColor = ImVec4(0.95f, 0.75f, 0.25f, 1.0f);
+                    textColor = ImVec4(0.95f, 0.85f, 0.65f, 1.0f);
                     break;
                 case Notification::Type::Error:
-                    color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                    icon = "\xE2\x9C\x96";  // ✖
+                    iconColor = ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+                    textColor = ImVec4(0.95f, 0.70f, 0.70f, 1.0f);
                     break;
             }
             
-            // Fade out effect
+            // Fade out effect (starts fading at 1 second remaining)
             float alpha = std::min(notif.timeRemaining, 1.0f);
-            color.w = alpha;
+            iconColor.w = alpha;
+            textColor.w = alpha;
             
-            ImGui::TextColored(color, "%s", notif.message.c_str());
+            // Draw icon
+            ImGui::TextColored(iconColor, "%s", icon);
+            ImGui::SameLine(0, 8);
+            
+            // Draw message
+            ImGui::TextColored(textColor, "%s", notif.message.c_str());
             
             if (i < notifications_.size() - 1) {
+                ImGui::Spacing();
+                ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(0.3f, 0.3f, 0.35f, 0.5f * alpha));
                 ImGui::Separator();
+                ImGui::PopStyleColor();
+                ImGui::Spacing();
             }
         }
     }
     ImGui::End();
     
+    ImGui::PopStyleColor(2);
     ImGui::PopStyleVar(2);
 }
 
@@ -758,7 +1091,37 @@ void Editor::saveLayout() {
 }
 
 void Editor::loadLayout() {
-    // ImGui handles this automatically if the file exists
+    // Check if layout file exists
+    std::ifstream file(config_.layoutPath);
+    if (!file.good()) {
+        // No saved layout, we'll create a default one in setupDocking on first run
+        firstRun_ = true;
+    }
+    // ImGui handles loading automatically if the file exists
+}
+
+void Editor::setupDefaultDockLayout() {
+    // Create default dock layout for first run
+    ImGuiID dockspaceId = ImGui::GetID("MainDockSpace");
+    
+    ImGui::DockBuilderRemoveNode(dockspaceId); // Clear existing layout
+    ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetMainViewport()->Size);
+    
+    // Split the dockspace
+    ImGuiID dockMainId = dockspaceId;
+    ImGuiID dockLeftId = ImGui::DockBuilderSplitNode(dockMainId, ImGuiDir_Left, 0.2f, nullptr, &dockMainId);
+    ImGuiID dockRightId = ImGui::DockBuilderSplitNode(dockMainId, ImGuiDir_Right, 0.25f, nullptr, &dockMainId);
+    ImGuiID dockBottomId = ImGui::DockBuilderSplitNode(dockMainId, ImGuiDir_Down, 0.25f, nullptr, &dockMainId);
+    
+    // Dock windows
+    ImGui::DockBuilderDockWindow("Hierarchy", dockLeftId);
+    ImGui::DockBuilderDockWindow("Inspector", dockRightId);
+    ImGui::DockBuilderDockWindow("Console", dockBottomId);
+    ImGui::DockBuilderDockWindow("Asset Browser", dockBottomId);
+    ImGui::DockBuilderDockWindow("Viewport", dockMainId);
+    
+    ImGui::DockBuilderFinish(dockspaceId);
 }
 
 void Editor::saveConfig() {

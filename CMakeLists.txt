@@ -291,6 +291,8 @@ set(SOURCES
     src/engine/VolumetricLighting.cpp
     src/engine/TextureStreamer.cpp
     src/engine/ScriptingSystem.cpp
+    src/engine/AssetSystem.cpp
+    src/engine/ProceduralAudio.cpp
     # Shader System
     src/engine/ShaderManager.cpp
     src/engine/shaders/ShaderCache.cpp
@@ -315,6 +317,40 @@ set(SOURCES
     # src/engine/materials/MaterialEditor.cpp
     # RHI Abstraction Layer
     src/engine/rhi/RHI.cpp
+    # Editor
+    src/editor/Editor.cpp
+    src/editor/EditorLayout.cpp
+    src/editor/EditorRenderer.cpp
+    src/editor/EditorWindow.cpp
+    src/editor/imgui/ImGuiBackend.cpp
+    # Editor Core
+    src/editor/core/Commands.cpp
+    src/editor/core/Selection.cpp
+    src/editor/core/Shortcuts.cpp
+    src/editor/core/UndoSystem.cpp
+    # Editor Panels
+    src/editor/panels/AssetBrowser.cpp
+    src/editor/panels/ConsolePanel.cpp
+    src/editor/panels/HierarchyPanel.cpp
+    src/editor/panels/InspectorPanel.cpp
+    src/editor/panels/Menubar.cpp
+    src/editor/panels/Toolbar.cpp
+    # Editor Viewport
+    src/editor/viewport/Gizmo.cpp
+    src/editor/viewport/Grid.cpp
+    src/editor/viewport/SelectionOutline.cpp
+    src/editor/viewport/Viewport.cpp
+    src/editor/viewport/ViewportCamera.cpp
+    # ImGui sources
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_demo.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+    # ImGuizmo sources
+    ${imguizmo_SOURCE_DIR}/ImGuizmo.cpp
 )
 
 # RHI Backend Sources (conditionally added)
@@ -351,6 +387,8 @@ target_include_directories(SanicEngineLib PRIVATE
     ${meshoptimizer_SOURCE_DIR}/src
     ${spirv-reflect_SOURCE_DIR}
     ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+    ${imguizmo_SOURCE_DIR}
     ${imnodes_SOURCE_DIR}
     $<$<BOOL:${SANIC_ENABLE_D3D12}>:${d3d12memoryallocator_SOURCE_DIR}/include>
 )
@@ -404,6 +442,8 @@ target_include_directories(SanicEngine PRIVATE
     ${VulkanMemoryAllocator_SOURCE_DIR}/include
     ${JoltPhysics_SOURCE_DIR}/..
     ${meshoptimizer_SOURCE_DIR}/src
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
 )
 
 target_compile_definitions(SanicEngine PRIVATE 

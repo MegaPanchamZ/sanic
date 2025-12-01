@@ -1,0 +1,150 @@
+{
+  "name": "Splines",
+  "type": "sublevel",
+  "actors": [
+    {
+      "guid": "{A1B2C3D4-1111-2222-3333-444455556666}",
+      "class": "RailSpline",
+      "name": "LoopDeLoop",
+      "transform": {
+        "position": [50, 0, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "splineType": "grinding",
+        "material": "/Content/Materials/Rails/GrindRail.smat",
+        "meshProfile": "round",
+        "radius": 0.15,
+        "speedBoost": 1.5,
+        "controlPoints": [
+          { "position": [0, 5, 0], "tangent": [10, 0, 0], "roll": 0 },
+          { "position": [30, 10, 0], "tangent": [10, 5, 0], "roll": 0 },
+          { "position": [50, 30, 0], "tangent": [0, 10, 0], "roll": 0 },
+          { "position": [30, 50, 0], "tangent": [-10, 5, 0], "roll": 180 },
+          { "position": [0, 50, 0], "tangent": [-10, 0, 0], "roll": 180 },
+          { "position": [-30, 30, 0], "tangent": [0, -10, 0], "roll": 180 },
+          { "position": [0, 10, 0], "tangent": [10, -5, 0], "roll": 360 },
+          { "position": [50, 5, 20], "tangent": [20, 0, 10], "roll": 0 }
+        ]
+      }
+    },
+    {
+      "guid": "{B2C3D4E5-2222-3333-4444-555566667777}",
+      "class": "BoostPad",
+      "name": "LaunchPad_01",
+      "transform": {
+        "position": [100, 2, 0],
+        "rotation": [0, 0, 0],
+        "scale": [5, 0.5, 5]
+      },
+      "properties": {
+        "boostForce": 500.0,
+        "launchAngle": 30.0,
+        "cooldown": 0.5,
+        "visualEffect": "/Content/Effects/BoostPad_FX.sfx"
+      }
+    },
+    {
+      "guid": "{C3D4E5F6-3333-4444-5555-666677778888}",
+      "class": "DashRing",
+      "name": "DashRing_01",
+      "transform": {
+        "position": [150, 30, 0],
+        "rotation": [0, 0, 0],
+        "scale": [4, 4, 4]
+      },
+      "properties": {
+        "launchSpeed": 200.0,
+        "lockPlayerRotation": true,
+        "lockDuration": 0.5,
+        "mesh": "/Content/Meshes/Gameplay/DashRing.smesh",
+        "effect": "/Content/Effects/DashRing_FX.sfx"
+      }
+    },
+    {
+      "guid": "{D4E5F6A7-4444-5555-6666-777788889999}",
+      "class": "SpringBoard",
+      "name": "Spring_01",
+      "transform": {
+        "position": [200, 5, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "launchForce": 50.0,
+        "mesh": "/Content/Meshes/Gameplay/Spring.smesh",
+        "compressAnimation": true,
+        "sound": "/Content/Audio/SFX/Spring_Boing.saudio"
+      }
+    },
+    {
+      "guid": "{E5F6A7B8-5555-6666-7777-88889999AAAA}",
+      "class": "SpeedPath",
+      "name": "MainSpeedway",
+      "transform": {
+        "position": [0, 0, 50],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "pathType": "run",
+        "width": 20.0,
+        "banking": true,
+        "autoSteer": 0.3,
+        "material": "/Content/Materials/Paths/SpeedPath.smat",
+        "controlPoints": [
+          { "position": [0, 5, 50], "width": 20, "banking": 0 },
+          { "position": [100, 10, 50], "width": 20, "banking": 0 },
+          { "position": [200, 20, 100], "width": 15, "banking": 15 },
+          { "position": [300, 30, 150], "width": 15, "banking": 30 },
+          { "position": [350, 50, 200], "width": 10, "banking": 45 },
+          { "position": [300, 70, 250], "width": 10, "banking": 30 },
+          { "position": [200, 60, 300], "width": 15, "banking": 15 },
+          { "position": [100, 50, 350], "width": 20, "banking": 0 }
+        ]
+      }
+    },
+    {
+      "guid": "{F6A7B8C9-6666-7777-8888-9999AAAABBBB}",
+      "class": "WallRunZone",
+      "name": "WallRun_Tower",
+      "transform": {
+        "position": [400, 0, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "height": 100.0,
+        "curvature": 0.0,
+        "minimumSpeed": 50.0,
+        "wallMesh": "/Content/Meshes/Structures/Tower_Wall.smesh",
+        "checkpoints": [
+          { "height": 25, "ring": true },
+          { "height": 50, "ring": true },
+          { "height": 75, "ring": true }
+        ]
+      }
+    },
+    {
+      "guid": "{11223344-7777-8888-9999-AAAABBBBCCCC}",
+      "class": "Collectible",
+      "name": "Ring_Line_01",
+      "transform": {
+        "position": [10, 3, 0],
+        "rotation": [0, 0, 0],
+        "scale": [1, 1, 1]
+      },
+      "properties": {
+        "type": "ring",
+        "value": 1,
+        "respawnTime": 30.0,
+        "pattern": "line",
+        "count": 20,
+        "spacing": 3.0,
+        "mesh": "/Content/Meshes/Collectibles/Ring.smesh",
+        "collectSound": "/Content/Audio/SFX/Ring_Collect.saudio"
+      }
+    }
+  ]
+}

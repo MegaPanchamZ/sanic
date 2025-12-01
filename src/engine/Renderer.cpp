@@ -18,6 +18,9 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 
+#include <imgui.h>
+#include <imgui_impl_vulkan.h>
+
 Renderer::Renderer(Window& window, PhysicsSystem& physicsSystem)
     : window(window)
     , physicsSystem(physicsSystem)
@@ -43,6 +46,9 @@ Renderer::Renderer(Window& window, PhysicsSystem& physicsSystem)
     
     // Forward render pass (needed for skybox after deferred)
     createRenderPass();
+    
+    // ImGui render pass (for editor overlay)
+    createImGuiRenderPass();
     
     // Descriptor layouts must be created before pipelines that use them
     createDescriptorSetLayout();
@@ -83,6 +89,9 @@ Renderer::Renderer(Window& window, PhysicsSystem& physicsSystem)
     
     // Forward framebuffers (for skybox pass)
     createFramebuffers();
+    
+    // ImGui framebuffers
+    createImGuiFramebuffers();
 
     // Pipelines
     createGraphicsPipeline(); // Keep basic graphics pipeline? It's unused in main loop now.
@@ -93,15 +102,23 @@ Renderer::Renderer(Window& window, PhysicsSystem& physicsSystem)
     createCommandBuffers();
     
     skybox = std::make_unique<Skybox>(physicalDevice, device, commandPool, graphicsQueue);
+    std::cout << "DEBUG: Skybox created, creating descriptor set..." << std::endl; std::cout.flush();
     skybox->createDescriptorSet(descriptorPool, skyboxDescriptorSetLayout, uniformBuffer, sizeof(UniformBufferObject));
+    std::cout << "DEBUG: Skybox descriptor set created" << std::endl; std::cout.flush();
     
     // Update Deferred Renderer Composition Descriptor Set
     // We need to call this AFTER skybox and shadow renderer are ready
+    std::cout << "DEBUG: About to call updateCompositionDescriptorSet..." << std::endl; std::cout.flush();
+    std::cout << "  shadowView=" << (void*)shadowRenderer->getShadowImageView() << std::endl; std::cout.flush();
+    std::cout << "  shadowSampler=" << (void*)shadowRenderer->getShadowSampler() << std::endl; std::cout.flush();
+    std::cout << "  cubemapView=" << (void*)skybox->getCubemapImageView() << std::endl; std::cout.flush();
+    std::cout << "  cubemapSampler=" << (void*)skybox->getCubemapSampler() << std::endl; std::cout.flush();
     deferredRenderer->updateCompositionDescriptorSet(
         uniformBuffer, sizeof(UniformBufferObject),
         shadowRenderer->getShadowImageView(), shadowRenderer->getShadowSampler(),
         skybox->getCubemapImageView(), skybox->getCubemapSampler()
     );
+    std::cout << "DEBUG: Deferred composition descriptors updated" << std::endl; std::cout.flush();
 
     createSyncObjects();
     
@@ -313,15 +330,15 @@ void Renderer::drawFrame() {
             swapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             1, &blitRegion, VK_FILTER_NEAREST);
 
-        // Transition swapchain back to PRESENT_SRC
+        // Transition swapchain to COLOR_ATTACHMENT_OPTIMAL for ImGui overlay
         swapBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        swapBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        swapBarrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         swapBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        swapBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        swapBarrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
         vkCmdPipelineBarrier(commandBuffer,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             0, 0, nullptr, 0, nullptr, 1, &swapBarrier);
             
     } else {
@@ -337,12 +354,8 @@ void Renderer::drawFrame() {
         // PASS 0.5: Virtual Shadow Map Update
         {
             glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, 2.0f, 1.0f));
-            // Use a large ortho projection for the light for now, or just the camera view for testing
-            // In reality, VSM needs a stable projection
             glm::mat4 lightViewProj = glm::mat4(1.0f); 
             virtualShadowMap->update(commandBuffer, lightViewProj, lightDir, depthImageView, uniformBuffer);
-            
-            // Render Nanite Shadows
             virtualShadowMap->renderNaniteShadows(commandBuffer, gameObjects);
         }
 
@@ -350,7 +363,6 @@ void Renderer::drawFrame() {
         shadowRenderer->render(commandBuffer, gameObjects);
         
         // PASS 1.5: SSR (Screen-Space Reflections) - needs G-Buffer from previous frame
-        // SSR runs before composition to provide reflection data
         if (ssrSystem && ssrEnabled) {
             ssrSystem->update(commandBuffer,
                               camera.getViewMatrix(),
@@ -365,16 +377,49 @@ void Renderer::drawFrame() {
                               deferredRenderer->getGBufferSampler());
         }
 
-        // PASS 2: Deferred Rendering (G-Buffer + Composition) via DeferredRenderer
-        // DeferredRenderer outputs directly to swapchain (attachment 5) with PRESENT_SRC layout
-        // Composition shader now samples DDGI for indirect diffuse lighting
+        // PASS 2: Deferred Rendering (G-Buffer + Composition)
         deferredRenderer->render(commandBuffer, imageIndex, gameObjects);
+    }
+
+    // PASS 3: ImGui UI Overlay
+    if (editorEnabled_) {
+        VkRenderPassBeginInfo imguiRenderPassInfo{};
+        imguiRenderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        imguiRenderPassInfo.renderPass = imguiRenderPass;
+        imguiRenderPassInfo.framebuffer = imguiFramebuffers[imageIndex];
+        imguiRenderPassInfo.renderArea.offset = {0, 0};
+        imguiRenderPassInfo.renderArea.extent = swapchainExtent;
+
+        vkCmdBeginRenderPass(commandBuffer, &imguiRenderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         
-        // VISIBILITY BUFFER RENDERER (experimental - currently disabled)
-        // The VisBuffer outputs to R32G32_UINT which can't be directly displayed.
-        // Needs material classification compute shader to shade and output to color buffer.
-        // meshletStreamer->update(commandBuffer, gameObjects);
-        // visBufferRenderer->render(commandBuffer, imageIndex, gameObjects);
+        // Render ImGui draw data
+        ImDrawData* drawData = ImGui::GetDrawData();
+        if (drawData) {
+            ImGui_ImplVulkan_RenderDrawData(drawData, commandBuffer);
+        }
+        
+        vkCmdEndRenderPass(commandBuffer);
+    } else {
+        // If editor disabled, just transition swapchain to PRESENT_SRC
+        VkImageMemoryBarrier presentBarrier{};
+        presentBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        presentBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        presentBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        presentBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        presentBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        presentBarrier.image = swapchainImages[imageIndex];
+        presentBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        presentBarrier.subresourceRange.baseMipLevel = 0;
+        presentBarrier.subresourceRange.levelCount = 1;
+        presentBarrier.subresourceRange.baseArrayLayer = 0;
+        presentBarrier.subresourceRange.layerCount = 1;
+        presentBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        presentBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &presentBarrier);
     }
 
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
@@ -1566,10 +1611,20 @@ Renderer::~Renderer() {
         vkDestroyFramebuffer(device, framebuffer, nullptr);
     }
     
+    // Cleanup ImGui framebuffers
+    for (auto framebuffer : imguiFramebuffers) {
+        vkDestroyFramebuffer(device, framebuffer, nullptr);
+    }
+    
     // Cleanup pipeline
     vkDestroyPipeline(device, graphicsPipeline, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyRenderPass(device, renderPass, nullptr);
+    
+    // Cleanup ImGui render pass
+    if (imguiRenderPass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device, imguiRenderPass, nullptr);
+    }
     
     // Cleanup depth
     vkDestroyImageView(device, depthImageView, nullptr);
@@ -1703,6 +1758,70 @@ void Renderer::createRenderPass() {
     if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
         throw std::runtime_error("failed to create render pass!");
     }
+}
+
+void Renderer::createImGuiRenderPass() {
+    // ImGui render pass - loads existing content and renders on top
+    VkAttachmentDescription colorAttachment{};
+    colorAttachment.format = swapchainImageFormat;
+    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // Keep existing content
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;  // Transition to present
+
+    VkAttachmentReference colorAttachmentRef{};
+    colorAttachmentRef.attachment = 0;
+    colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorAttachmentRef;
+
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    renderPassInfo.attachmentCount = 1;
+    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.subpassCount = 1;
+    renderPassInfo.pSubpasses = &subpass;
+    renderPassInfo.dependencyCount = 1;
+    renderPassInfo.pDependencies = &dependency;
+
+    if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &imguiRenderPass) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create ImGui render pass!");
+    }
+    std::cout << "ImGui render pass created" << std::endl;
+}
+
+void Renderer::createImGuiFramebuffers() {
+    imguiFramebuffers.resize(swapchainImageViews.size());
+
+    for (size_t i = 0; i < swapchainImageViews.size(); i++) {
+        VkFramebufferCreateInfo framebufferInfo{};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = imguiRenderPass;
+        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.pAttachments = &swapchainImageViews[i];
+        framebufferInfo.width = swapchainExtent.width;
+        framebufferInfo.height = swapchainExtent.height;
+        framebufferInfo.layers = 1;
+
+        if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &imguiFramebuffers[i]) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create ImGui framebuffer!");
+        }
+    }
+    std::cout << "ImGui framebuffers created: " << imguiFramebuffers.size() << std::endl;
 }
 
 void Renderer::createCommandPool() {

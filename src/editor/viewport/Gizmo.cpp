@@ -5,6 +5,7 @@
  */
 
 #include "Gizmo.h"
+#include <imgui.h>
 #include <ImGuizmo.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/matrix_decompose.hpp>

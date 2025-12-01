@@ -94,26 +94,26 @@ void Menubar::drawFileMenu() {
 
 void Menubar::drawEditMenu() {
     if (ImGui::BeginMenu("Edit")) {
-        auto* undoSystem = editor_->getUndoSystem();
+        auto& undoSystem = editor_->getUndoSystem();
         
-        bool canUndo = undoSystem && undoSystem->canUndo();
-        bool canRedo = undoSystem && undoSystem->canRedo();
+        bool canUndo = undoSystem.canUndo();
+        bool canRedo = undoSystem.canRedo();
         
         std::string undoLabel = "Undo";
         std::string redoLabel = "Redo";
         
         if (canUndo) {
-            undoLabel += " " + undoSystem->getUndoActionName();
+            undoLabel += " " + undoSystem.getUndoDescription();
         }
         if (canRedo) {
-            redoLabel += " " + undoSystem->getRedoActionName();
+            redoLabel += " " + undoSystem.getRedoDescription();
         }
         
         if (ImGui::MenuItem(undoLabel.c_str(), "Ctrl+Z", false, canUndo)) {
-            undoSystem->undo();
+            undoSystem.undo();
         }
         if (ImGui::MenuItem(redoLabel.c_str(), "Ctrl+Y", false, canRedo)) {
-            undoSystem->redo();
+            undoSystem.redo();
         }
         
         ImGui::Separator();
@@ -140,7 +140,7 @@ void Menubar::drawEditMenu() {
             // TODO: Select all entities
         }
         if (ImGui::MenuItem("Deselect All", "Escape")) {
-            editor_->getSelection()->clearSelection();
+            editor_->getSelection().clearSelection();
         }
         
         ImGui::Separator();
