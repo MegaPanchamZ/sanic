@@ -13,6 +13,7 @@
 #pragma once
 
 #include "EditorWindow.h"
+#include "EditorRenderer.h"
 #include "core/Selection.h"
 #include "core/UndoSystem.h"
 #include "core/Shortcuts.h"
@@ -120,6 +121,10 @@ public:
     const Sanic::World* getWorld() const { return world_; }
     VulkanContext* getVulkanContext() { return vulkanContext_; }
     
+    // Editor renderer for viewport
+    EditorRenderer* getEditorRenderer() { return editorRenderer_.get(); }
+    const EditorRenderer* getEditorRenderer() const { return editorRenderer_.get(); }
+    
     // Configuration
     EditorConfig& getConfig() { return config_; }
     const EditorConfig& getConfig() const { return config_; }
@@ -165,6 +170,7 @@ private:
     std::unique_ptr<Selection> selection_;
     std::unique_ptr<UndoSystem> undoSystem_;
     std::unique_ptr<ShortcutManager> shortcuts_;
+    std::unique_ptr<EditorRenderer> editorRenderer_;
     
     std::vector<std::unique_ptr<EditorWindow>> panels_;
     

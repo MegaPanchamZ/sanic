@@ -6,6 +6,7 @@
 
 #include "EditorRenderer.h"
 #include "imgui/ImGuiBackend.h"
+#include <imgui_impl_vulkan.h>
 #include <stdexcept>
 #include <array>
 
@@ -385,14 +386,25 @@ bool EditorRenderer::createRenderTarget(uint32_t width, uint32_t height) {
             renderTarget_.imageView,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         );
+    } else {
+        // Use ImGui_ImplVulkan directly when no custom backend
+        renderTarget_.descriptorSet = ImGui_ImplVulkan_AddTexture(
+            renderTarget_.sampler,
+            renderTarget_.imageView,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        );
     }
     
     return true;
 }
 
 void EditorRenderer::destroyRenderTarget() {
-    if (info_.imguiBackend && renderTarget_.descriptorSet != VK_NULL_HANDLE) {
-        info_.imguiBackend->removeTexture(renderTarget_.descriptorSet);
+    if (renderTarget_.descriptorSet != VK_NULL_HANDLE) {
+        if (info_.imguiBackend) {
+            info_.imguiBackend->removeTexture(renderTarget_.descriptorSet);
+        } else {
+            ImGui_ImplVulkan_RemoveTexture(renderTarget_.descriptorSet);
+        }
         renderTarget_.descriptorSet = VK_NULL_HANDLE;
     }
     

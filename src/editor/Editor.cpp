@@ -26,6 +26,7 @@
 
 #include <fstream>
 #include <algorithm>
+#include <iostream>
 
 namespace Sanic::Editor {
 
@@ -201,6 +202,24 @@ bool Editor::initializeImGui(VkRenderPass renderPass, uint32_t imageCount) {
     
     // Load layout
     loadLayout();
+    
+    // Initialize EditorRenderer for viewport offscreen rendering
+    editorRenderer_ = std::make_unique<EditorRenderer>();
+    EditorRenderer::InitInfo editorRendererInfo;
+    editorRendererInfo.device = device;
+    editorRendererInfo.physicalDevice = vulkanContext_->getPhysicalDevice();
+    editorRendererInfo.commandPool = vulkanContext_->getCommandPool();
+    editorRendererInfo.graphicsQueue = vulkanContext_->getGraphicsQueue();
+    editorRendererInfo.imguiBackend = nullptr; // We'll use ImGui_ImplVulkan directly
+    
+    if (!editorRenderer_->initialize(editorRendererInfo)) {
+        std::cerr << "Warning: Failed to initialize EditorRenderer for viewport" << std::endl;
+    } else {
+        // Connect the viewport texture to the Viewport panel
+        if (auto* viewport = getPanel<Viewport>()) {
+            viewport->setViewportTexture(editorRenderer_->getViewportTexture());
+        }
+    }
     
     imguiInitialized_ = true;
     return true;

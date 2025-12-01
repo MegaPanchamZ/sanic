@@ -49,6 +49,10 @@ public:
     void beginViewportRender(VkCommandBuffer cmd);
     void endViewportRender(VkCommandBuffer cmd);
     
+    // Blit from source image to viewport render target
+    void blitToViewport(VkCommandBuffer cmd, VkImage srcImage, VkImageLayout srcLayout,
+                        uint32_t srcWidth, uint32_t srcHeight);
+    
     // Render pass for viewport
     VkRenderPass getViewportRenderPass() const { return viewportRenderPass_; }
     VkFramebuffer getViewportFramebuffer() const { return viewportFramebuffer_; }

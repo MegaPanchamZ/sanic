@@ -86,6 +86,14 @@ public:
     glm::vec2 getViewportPos() const { return viewportPos_; }
     glm::vec2 getViewportSize() const { return viewportSize_; }
     
+    // Render target texture (set by EditorRenderer)
+    void setViewportTexture(VkDescriptorSet texture) { viewportTexture_ = texture; }
+    VkDescriptorSet getViewportTexture() const { return viewportTexture_; }
+    
+    // Current viewport dimensions (for render target sizing)
+    uint32_t getViewportWidth() const { return viewportWidth_; }
+    uint32_t getViewportHeight() const { return viewportHeight_; }
+    
 private:
     void handleInput(float deltaTime);
     void handleMousePicking();

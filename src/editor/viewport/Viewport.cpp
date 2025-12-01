@@ -2,10 +2,15 @@
  * Viewport.cpp
  * 
  * Implementation of the 3D viewport panel.
+ * 
+ * The viewport renders the 3D scene to an offscreen texture using EditorRenderer,
+ * then displays that texture in the ImGui panel. This is the same approach used
+ * by Unreal Engine (FSceneViewport -> SViewport -> ImGui equivalent).
  */
 
 #include "Viewport.h"
 #include "../Editor.h"
+#include "../EditorRenderer.h"
 #include "../core/Selection.h"
 #include "../core/UndoSystem.h"
 #include <ImGuizmo.h>
@@ -56,11 +61,7 @@ void Viewport::update(float deltaTime) {
 void Viewport::draw() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     
-    // Make the viewport window completely transparent so the 3D scene shows through
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
-    
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground;
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
     
     if (beginPanel(flags)) {
         // Get viewport dimensions
@@ -79,10 +80,46 @@ void Viewport::draw() {
         isFocused_ = ImGui::IsWindowFocused();
         isHovered_ = ImGui::IsWindowHovered();
         
+        // Request resize if viewport size changed
+        uint32_t newWidth = static_cast<uint32_t>(viewportSize_.x);
+        uint32_t newHeight = static_cast<uint32_t>(viewportSize_.y);
+        if (newWidth > 0 && newHeight > 0 && (newWidth != viewportWidth_ || newHeight != viewportHeight_)) {
+            viewportWidth_ = newWidth;
+            viewportHeight_ = newHeight;
+            // Resize will be handled by the editor's EditorRenderer
+        }
+        
+        // Draw the rendered scene texture
+        // The EditorRenderer provides the texture via getViewportTexture()
+        if (viewportTexture_ != VK_NULL_HANDLE) {
+            // ImGui::Image displays the offscreen rendered scene
+            ImGui::Image(
+                (ImTextureID)viewportTexture_,
+                viewportPanelSize,
+                ImVec2(0, 0),  // UV start
+                ImVec2(1, 1)   // UV end
+            );
+        } else {
+            // Fallback: show a placeholder with instructions
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
+            ImGui::BeginChild("ViewportPlaceholder", viewportPanelSize, false);
+            
+            // Center the text
+            ImVec2 textSize = ImGui::CalcTextSize("Scene rendering to viewport...");
+            ImGui::SetCursorPos(ImVec2(
+                (viewportPanelSize.x - textSize.x) * 0.5f,
+                (viewportPanelSize.y - textSize.y) * 0.5f
+            ));
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.55f, 1.0f), "Scene rendering to viewport...");
+            
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+        }
+        
+        // Now draw overlays on top of the image
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         
-        // The 3D scene is rendered underneath - we just draw UI overlays here
-        // Draw a subtle border to show the viewport bounds when focused
+        // Draw a subtle border when focused
         if (isFocused_) {
             drawList->AddRect(
                 ImVec2(viewportPos_.x, viewportPos_.y),
@@ -124,7 +161,6 @@ void Viewport::draw() {
     }
     endPanel();
     
-    ImGui::PopStyleColor(2);  // WindowBg, ChildBg
     ImGui::PopStyleVar();
 }
 
