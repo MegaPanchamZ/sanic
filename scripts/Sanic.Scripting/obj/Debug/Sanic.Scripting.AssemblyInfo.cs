@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Sanic.Scripting")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+cc893dc8b75d1dfc5885c937024765d309968117")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+398f99aa1314bfd548e553902fb9702fbf77920f")]
 [assembly: System.Reflection.AssemblyProductAttribute("Sanic.Scripting")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Sanic.Scripting")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -1,0 +1,268 @@
+/**
+ * megalights_sample.comp
+ * 
+ * Stochastic light sampling compute shader.
+ * Samples N lights per pixel based on importance weighting.
+ * 
+ * Based on Unreal Engine 5 MegaLights sampling approach.
+ */
+
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// ============================================================================
+// STRUCTURES
+// ============================================================================
+
+struct MegaLight {
+    vec4 positionAndType;      // xyz = position, w = type
+    vec4 directionAndRange;    // xyz = direction, w = range
+    vec4 colorAndIntensity;    // xyz = color, w = intensity
+    vec4 spotParams;           // x = innerCos, y = outerCos, z = falloff, w = importance
+};
+
+struct LightCluster {
+    uint offset;
+    uint count;
+};
+
+struct LightSample {
+    uint lightIndex;
+    float pdf;
+    float weight;
+    float pad;
+};
+
+// ============================================================================
+// BINDINGS
+// ============================================================================
+
+layout(set = 0, binding = 0, scalar) uniform Uniforms {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    mat4 invViewMatrix;
+    mat4 invProjMatrix;
+    mat4 viewProjMatrix;
+    mat4 prevViewProjMatrix;
+    
+    vec4 cameraPosition;
+    vec4 screenParams;
+    
+    ivec4 clusterDims;
+    vec4 depthParams;
+    
+    uint lightCount;
+    uint samplesPerPixel;
+    uint frameIndex;
+    uint flags;
+} uniforms;
+
+layout(set = 0, binding = 1, scalar) readonly buffer LightBuffer {
+    MegaLight lights[];
+};
+
+layout(set = 0, binding = 2, scalar) readonly buffer ClusterBuffer {
+    LightCluster clusters[];
+};
+
+layout(set = 0, binding = 3, scalar) readonly buffer LightIndexBuffer {
+    uint lightIndices[];
+};
+
+layout(set = 0, binding = 4, scalar) writeonly buffer SampleBuffer {
+    LightSample samples[];
+};
+
+layout(set = 0, binding = 10) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 11) uniform sampler2D normalBuffer;
+layout(set = 0, binding = 12) uniform sampler2D blueNoiseTexture;
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const float PI = 3.14159265359;
+const uint MAX_LIGHTS_PER_CLUSTER = 256;
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+// Linear depth from depth buffer value
+float linearizeDepth(float depth) {
+    float near = uniforms.depthParams.x;
+    float far = uniforms.depthParams.y;
+    return near * far / (far - depth * (far - near));
+}
+
+// World position from depth
+vec3 worldPositionFromDepth(vec2 uv, float depth) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 viewPos = uniforms.invProjMatrix * clipPos;
+    viewPos /= viewPos.w;
+    vec4 worldPos = uniforms.invViewMatrix * viewPos;
+    return worldPos.xyz;
+}
+
+// Get cluster index from screen position and depth
+ivec3 getClusterIndex(vec2 screenPos, float linearDepth) {
+    ivec2 tileIndex = ivec2(screenPos * vec2(uniforms.clusterDims.xy) / uniforms.screenParams.xy);
+    
+    float near = uniforms.depthParams.x;
+    float far = uniforms.depthParams.y;
+    float power = uniforms.depthParams.z;
+    
+    float normalizedDepth = (linearDepth - near) / (far - near);
+    int zIndex = int(pow(normalizedDepth, 1.0 / power) * float(uniforms.clusterDims.z));
+    
+    return clamp(ivec3(tileIndex, zIndex), ivec3(0), uniforms.clusterDims.xyz - 1);
+}
+
+// Blue noise sampling
+vec2 getBlueNoise(ivec2 pixel) {
+    ivec2 noiseSize = textureSize(blueNoiseTexture, 0);
+    ivec2 noiseCoord = (pixel + ivec2(uniforms.frameIndex * 7, uniforms.frameIndex * 11)) % noiseSize;
+    return texelFetch(blueNoiseTexture, noiseCoord, 0).rg;
+}
+
+// Calculate light importance for a surface point
+float calculateLightImportance(MegaLight light, vec3 worldPos, vec3 worldNormal) {
+    vec3 toLight = light.positionAndType.xyz - worldPos;
+    float distSq = dot(toLight, toLight);
+    float dist = sqrt(distSq);
+    float range = light.directionAndRange.w;
+    
+    if (dist > range) return 0.0;
+    
+    vec3 L = toLight / dist;
+    float NdotL = max(0.0, dot(worldNormal, L));
+    
+    if (NdotL <= 0.0) return 0.0;
+    
+    // Distance attenuation
+    float attenuation = 1.0 / (distSq + 0.01);
+    float rangeFalloff = 1.0 - pow(dist / range, 4.0);
+    rangeFalloff = max(0.0, rangeFalloff);
+    
+    // Light power
+    vec3 color = light.colorAndIntensity.xyz;
+    float intensity = light.colorAndIntensity.w;
+    float luminance = dot(color, vec3(0.299, 0.587, 0.114));
+    float power = luminance * intensity;
+    
+    // Spotlight falloff
+    float spotFalloff = 1.0;
+    uint lightType = uint(light.positionAndType.w);
+    if (lightType == 1) { // Spot
+        vec3 spotDir = light.directionAndRange.xyz;
+        float cosTheta = dot(-L, spotDir);
+        float innerCos = light.spotParams.x;
+        float outerCos = light.spotParams.y;
+        spotFalloff = clamp((cosTheta - outerCos) / (innerCos - outerCos + 0.0001), 0.0, 1.0);
+    }
+    
+    return power * attenuation * rangeFalloff * NdotL * spotFalloff;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (any(greaterThanEqual(pixelCoord, ivec2(uniforms.screenParams.xy)))) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) / uniforms.screenParams.xy;
+    
+    // Sample G-buffer
+    float depth = texture(depthBuffer, uv).r;
+    
+    // Sky pixels
+    if (depth >= 1.0) {
+        uint sampleIdx = (pixelCoord.x + pixelCoord.y * uint(uniforms.screenParams.x)) * uniforms.samplesPerPixel;
+        for (uint s = 0; s < uniforms.samplesPerPixel; ++s) {
+            samples[sampleIdx + s].lightIndex = 0xFFFFFFFF;
+            samples[sampleIdx + s].pdf = 0.0;
+            samples[sampleIdx + s].weight = 0.0;
+        }
+        return;
+    }
+    
+    vec3 worldNormal = texture(normalBuffer, uv).xyz * 2.0 - 1.0;
+    worldNormal = normalize(worldNormal);
+    
+    // Reconstruct world position
+    vec3 worldPos = worldPositionFromDepth(uv, depth);
+    
+    // Get cluster
+    float linearDepth = linearizeDepth(depth);
+    ivec3 clusterIdx = getClusterIndex(vec2(pixelCoord), linearDepth);
+    uint flatClusterIdx = clusterIdx.x + 
+                          clusterIdx.y * uniforms.clusterDims.x + 
+                          clusterIdx.z * uniforms.clusterDims.x * uniforms.clusterDims.y;
+    
+    LightCluster cluster = clusters[flatClusterIdx];
+    
+    // Get blue noise for this pixel
+    vec2 noise = getBlueNoise(pixelCoord);
+    
+    // Calculate importance for each light in cluster
+    float totalImportance = 0.0;
+    float importanceList[MAX_LIGHTS_PER_CLUSTER];
+    float cdf[MAX_LIGHTS_PER_CLUSTER];
+    
+    for (uint i = 0; i < cluster.count && i < MAX_LIGHTS_PER_CLUSTER; ++i) {
+        uint lightIdx = lightIndices[cluster.offset + i];
+        MegaLight light = lights[lightIdx];
+        
+        float importance = calculateLightImportance(light, worldPos, worldNormal);
+        importanceList[i] = importance;
+        totalImportance += importance;
+        cdf[i] = totalImportance;
+    }
+    
+    // Normalize CDF
+    if (totalImportance > 0.0) {
+        for (uint i = 0; i < cluster.count && i < MAX_LIGHTS_PER_CLUSTER; ++i) {
+            cdf[i] /= totalImportance;
+        }
+    }
+    
+    // Sample lights based on importance
+    uint sampleIdx = (pixelCoord.x + pixelCoord.y * uint(uniforms.screenParams.x)) * uniforms.samplesPerPixel;
+    
+    for (uint s = 0; s < uniforms.samplesPerPixel; ++s) {
+        // Stratified sampling with jitter
+        float xi = (float(s) + noise.x) / float(uniforms.samplesPerPixel);
+        xi = fract(xi + noise.y * 0.1);
+        
+        // Binary search in CDF
+        uint selectedIdx = 0;
+        if (cluster.count > 0 && totalImportance > 0.0) {
+            for (uint i = 0; i < cluster.count && i < MAX_LIGHTS_PER_CLUSTER; ++i) {
+                if (cdf[i] >= xi) {
+                    selectedIdx = i;
+                    break;
+                }
+                selectedIdx = i;
+            }
+            
+            uint lightIdx = lightIndices[cluster.offset + selectedIdx];
+            float pdf = importanceList[selectedIdx] / totalImportance;
+            float weight = (pdf > 0.0001) ? (1.0 / pdf) : 0.0;
+            
+            samples[sampleIdx + s].lightIndex = lightIdx;
+            samples[sampleIdx + s].pdf = pdf;
+            samples[sampleIdx + s].weight = weight;
+        } else {
+            samples[sampleIdx + s].lightIndex = 0xFFFFFFFF;
+            samples[sampleIdx + s].pdf = 0.0;
+            samples[sampleIdx + s].weight = 0.0;
+        }
+    }
+}

@@ -1,0 +1,128 @@
+/**
+ * tsr_sharpen.comp
+ * 
+ * Temporal Super Resolution - Sharpening pass.
+ * Applies contrast-adaptive sharpening to enhance detail
+ * while avoiding artifacts.
+ */
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 0) uniform TSRData {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    mat4 viewProjMatrix;
+    mat4 invViewProjMatrix;
+    mat4 prevViewProjMatrix;
+    
+    vec4 jitterOffset;
+    vec4 screenParams;
+    vec4 outputParams;
+    
+    float upscaleRatio;
+    float historyBlend;
+    float sharpening;
+    uint frameIndex;
+    
+    uint flags;
+    float time;
+    float deltaTime;
+    float pad;
+} tsr;
+
+layout(set = 0, binding = 6) uniform sampler2D reconstructedInput;
+layout(set = 0, binding = 7, rgba16f) uniform image2D finalOutput;
+
+// Contrast Adaptive Sharpening (CAS) kernel
+// Based on AMD FidelityFX CAS
+vec3 sharpenCAS(vec2 uv, vec2 texelSize, float sharpness) {
+    // Sample 3x3 neighborhood
+    vec3 a = texture(reconstructedInput, uv + vec2(-1, -1) * texelSize).rgb;
+    vec3 b = texture(reconstructedInput, uv + vec2( 0, -1) * texelSize).rgb;
+    vec3 c = texture(reconstructedInput, uv + vec2( 1, -1) * texelSize).rgb;
+    vec3 d = texture(reconstructedInput, uv + vec2(-1,  0) * texelSize).rgb;
+    vec3 e = texture(reconstructedInput, uv).rgb;
+    vec3 f = texture(reconstructedInput, uv + vec2( 1,  0) * texelSize).rgb;
+    vec3 g = texture(reconstructedInput, uv + vec2(-1,  1) * texelSize).rgb;
+    vec3 h = texture(reconstructedInput, uv + vec2( 0,  1) * texelSize).rgb;
+    vec3 i = texture(reconstructedInput, uv + vec2( 1,  1) * texelSize).rgb;
+    
+    // Soft min and max (per channel)
+    vec3 minRGB = min(min(min(d, e), min(f, b)), h);
+    vec3 minRGB2 = min(min(minRGB, a), min(min(c, g), i));
+    minRGB += minRGB2;
+    
+    vec3 maxRGB = max(max(max(d, e), max(f, b)), h);
+    vec3 maxRGB2 = max(max(maxRGB, a), max(max(c, g), i));
+    maxRGB += maxRGB2;
+    
+    // Sharpening amount based on local contrast
+    vec3 ampRGB = clamp(min(minRGB, 2.0 - maxRGB) / maxRGB, 0.0, 1.0);
+    ampRGB = inversesqrt(ampRGB);
+    
+    // Filter weights
+    float peak = 8.0 - 3.0 * sharpness;
+    vec3 wRGB = -1.0 / (ampRGB * peak);
+    vec3 rcpWeightRGB = 1.0 / (1.0 + 4.0 * wRGB);
+    
+    // Apply sharpening
+    vec3 result = ((b * wRGB + d * wRGB + f * wRGB + h * wRGB + e) * rcpWeightRGB);
+    
+    return result;
+}
+
+// Simple unsharp mask as fallback
+vec3 unsharpMask(vec2 uv, vec2 texelSize, float amount) {
+    vec3 center = texture(reconstructedInput, uv).rgb;
+    
+    vec3 blur = vec3(0.0);
+    blur += texture(reconstructedInput, uv + vec2(-1, -1) * texelSize).rgb * 0.0625;
+    blur += texture(reconstructedInput, uv + vec2( 0, -1) * texelSize).rgb * 0.125;
+    blur += texture(reconstructedInput, uv + vec2( 1, -1) * texelSize).rgb * 0.0625;
+    blur += texture(reconstructedInput, uv + vec2(-1,  0) * texelSize).rgb * 0.125;
+    blur += center * 0.25;
+    blur += texture(reconstructedInput, uv + vec2( 1,  0) * texelSize).rgb * 0.125;
+    blur += texture(reconstructedInput, uv + vec2(-1,  1) * texelSize).rgb * 0.0625;
+    blur += texture(reconstructedInput, uv + vec2( 0,  1) * texelSize).rgb * 0.125;
+    blur += texture(reconstructedInput, uv + vec2( 1,  1) * texelSize).rgb * 0.0625;
+    
+    vec3 diff = center - blur;
+    return center + diff * amount;
+}
+
+void main() {
+    ivec2 outputCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 outputSize = tsr.outputParams.xy;
+    
+    if (outputCoord.x >= int(outputSize.x) || outputCoord.y >= int(outputSize.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(outputCoord) + 0.5) / outputSize;
+    vec2 texelSize = 1.0 / outputSize;
+    
+    vec3 result;
+    
+    if (tsr.sharpening > 0.0) {
+        // Use CAS for high-quality sharpening
+        result = sharpenCAS(uv, texelSize, tsr.sharpening);
+        
+        // Clamp to avoid ringing
+        vec3 original = texture(reconstructedInput, uv).rgb;
+        float luma = dot(original, vec3(0.299, 0.587, 0.114));
+        float maxSharpening = mix(0.5, 0.2, luma); // Less sharpening in bright areas
+        
+        vec3 diff = result - original;
+        diff = clamp(diff, -maxSharpening, maxSharpening);
+        result = original + diff;
+    } else {
+        result = texture(reconstructedInput, uv).rgb;
+    }
+    
+    // Ensure non-negative
+    result = max(result, vec3(0.0));
+    
+    imageStore(finalOutput, outputCoord, vec4(result, 1.0));
+}

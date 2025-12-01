@@ -1,0 +1,346 @@
+/**
+ * volumetric_clouds.comp
+ * 
+ * Ray-marched volumetric cloud rendering compute shader.
+ * Based on UE5's volumetric cloud implementation.
+ * 
+ * Features:
+ * - Noise-based cloud density
+ * - Weather map for coverage control
+ * - Beer-Lambert light absorption
+ * - Multiple octaves of detail noise
+ * - Temporal reprojection for performance
+ */
+
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Output
+layout(set = 0, binding = 0, rgba16f) writeonly uniform image2D cloudOutput;
+
+// Input textures
+layout(set = 0, binding = 1) uniform sampler3D shapeNoise;       // Base cloud shape (low frequency)
+layout(set = 0, binding = 2) uniform sampler3D detailNoise;      // Erosion detail (high frequency)
+layout(set = 0, binding = 3) uniform sampler2D weatherMap;        // Coverage and cloud type
+layout(set = 0, binding = 4) uniform sampler2D blueNoise;         // For ray offset
+layout(set = 0, binding = 5) uniform sampler2D depthBuffer;       // Scene depth for occlusion
+layout(set = 0, binding = 6) uniform sampler2D transmittanceLUT;  // Atmosphere transmittance
+
+// Previous frame for temporal reprojection
+layout(set = 0, binding = 7) uniform sampler2D prevClouds;
+
+// Uniforms
+layout(set = 0, binding = 8) uniform CloudUniforms {
+    mat4 invViewProjection;
+    mat4 prevViewProjection;
+    vec3 cameraPos;
+    float time;
+    
+    vec3 sunDirection;
+    float sunIntensity;
+    
+    vec3 sunColor;
+    float cloudLayerBottom;      // km
+    
+    float cloudLayerTop;         // km
+    float cloudDensity;
+    float cloudCoverage;
+    float cloudType;             // 0 = stratus, 1 = cumulus, 2 = cumulonimbus
+    
+    vec3 windDirection;
+    float windSpeed;
+    
+    vec3 ambientColor;
+    float ambientStrength;
+    
+    float extinction;            // Light extinction coefficient
+    float scatterForward;        // Forward scattering amount
+    float scatterBack;           // Back scattering amount  
+    float silverIntensity;       // Silver lining intensity
+    
+    vec2 resolution;
+    float earthRadius;
+    float frameNumber;
+    
+    float temporalBlend;         // Blend with previous frame
+    float rayOffsetStrength;     // Blue noise ray offset
+    float detailScale;
+    float shapeScale;
+} cloud;
+
+const float PI = 3.14159265359;
+const int MAX_STEPS = 64;
+const int LIGHT_STEPS = 6;
+const float MARCH_STEP = 100.0;  // meters
+
+// Ray-sphere intersection
+vec2 raySphereIntersect(vec3 origin, vec3 dir, vec3 center, float radius) {
+    vec3 oc = origin - center;
+    float a = dot(dir, dir);
+    float b = 2.0 * dot(oc, dir);
+    float c = dot(oc, oc) - radius * radius;
+    float discriminant = b * b - 4.0 * a * c;
+    
+    if (discriminant < 0.0) {
+        return vec2(-1.0);
+    }
+    
+    float sqrtD = sqrt(discriminant);
+    float t1 = (-b - sqrtD) / (2.0 * a);
+    float t2 = (-b + sqrtD) / (2.0 * a);
+    
+    return vec2(t1, t2);
+}
+
+// Height gradient for cloud type
+float heightGradient(float heightFraction, float cloudType) {
+    // Different gradients for different cloud types
+    if (cloudType < 0.5) {
+        // Stratus - flat layer
+        return smoothstep(0.0, 0.1, heightFraction) * smoothstep(1.0, 0.8, heightFraction);
+    } else if (cloudType < 1.5) {
+        // Cumulus - puffy
+        float bottom = smoothstep(0.0, 0.2, heightFraction);
+        float top = smoothstep(1.0, 0.6, heightFraction);
+        return bottom * top;
+    } else {
+        // Cumulonimbus - towering
+        float bottom = smoothstep(0.0, 0.1, heightFraction);
+        float top = smoothstep(1.0, 0.95, heightFraction);
+        return bottom * top;
+    }
+}
+
+// Remap utility
+float remap(float value, float oldMin, float oldMax, float newMin, float newMax) {
+    return newMin + (value - oldMin) / (oldMax - oldMin) * (newMax - newMin);
+}
+
+// Sample cloud density at a point
+float sampleCloudDensity(vec3 pos, bool sampleDetail) {
+    // World position to UV
+    vec3 worldPos = pos / 1000.0;  // Convert to km
+    
+    // Apply wind animation
+    vec3 windOffset = cloud.windDirection * cloud.windSpeed * cloud.time * 0.001;
+    worldPos += windOffset;
+    
+    // Weather map (controls coverage and type)
+    vec2 weatherUV = worldPos.xz * 0.0001;  // Very large scale
+    vec4 weather = texture(weatherMap, weatherUV);
+    float coverage = weather.r * cloud.cloudCoverage;
+    float precipType = weather.g;
+    float localType = mix(cloud.cloudType, precipType * 2.0, 0.5);
+    
+    // Height within cloud layer
+    float altitude = length(pos) - cloud.earthRadius * 1000.0;  // meters
+    float cloudBottom = cloud.cloudLayerBottom * 1000.0;
+    float cloudTop = cloud.cloudLayerTop * 1000.0;
+    float heightFraction = (altitude - cloudBottom) / (cloudTop - cloudBottom);
+    
+    // Early out if outside cloud layer
+    if (heightFraction < 0.0 || heightFraction > 1.0) {
+        return 0.0;
+    }
+    
+    // Height gradient
+    float heightGrad = heightGradient(heightFraction, localType);
+    
+    // Sample base shape noise
+    vec3 shapeUV = worldPos * cloud.shapeScale * 0.001;
+    float baseNoise = texture(shapeNoise, shapeUV).r;
+    
+    // Add FBM layers
+    float fbm = 0.0;
+    fbm += texture(shapeNoise, shapeUV * 2.0).g * 0.5;
+    fbm += texture(shapeNoise, shapeUV * 4.0).b * 0.25;
+    fbm += texture(shapeNoise, shapeUV * 8.0).a * 0.125;
+    
+    // Combine base and FBM
+    float baseCloud = remap(baseNoise, fbm, 1.0, 0.0, 1.0);
+    baseCloud = baseCloud * heightGrad;
+    
+    // Apply coverage (Remap to make clouds appear/disappear smoothly)
+    float cloudWithCoverage = remap(baseCloud, 1.0 - coverage, 1.0, 0.0, 1.0);
+    cloudWithCoverage = max(0.0, cloudWithCoverage);
+    
+    float density = cloudWithCoverage;
+    
+    // Detail erosion (only if base density is significant)
+    if (sampleDetail && density > 0.01) {
+        vec3 detailUV = worldPos * cloud.detailScale * 0.01;
+        float detailNoiseSample = texture(detailNoise, detailUV).r;
+        
+        // Erode based on height (more erosion at edges)
+        float erosionAmount = mix(0.0, 0.4, 1.0 - heightGrad);
+        density = remap(density, detailNoiseSample * erosionAmount, 1.0, 0.0, 1.0);
+        density = max(0.0, density);
+    }
+    
+    return density * cloud.cloudDensity;
+}
+
+// Henyey-Greenstein phase function
+float henyeyGreenstein(float cosTheta, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5));
+}
+
+// Dual-lobe phase function
+float cloudPhase(float cosTheta) {
+    float forward = henyeyGreenstein(cosTheta, cloud.scatterForward);
+    float backward = henyeyGreenstein(cosTheta, -cloud.scatterBack);
+    return mix(backward, forward, 0.7);
+}
+
+// Light marching toward sun
+float lightMarch(vec3 pos) {
+    float stepSize = (cloud.cloudLayerTop - cloud.cloudLayerBottom) * 1000.0 / float(LIGHT_STEPS);
+    vec3 sunDir = normalize(cloud.sunDirection);
+    
+    float totalDensity = 0.0;
+    
+    for (int i = 0; i < LIGHT_STEPS; i++) {
+        vec3 samplePos = pos + sunDir * (float(i) + 0.5) * stepSize;
+        float density = sampleCloudDensity(samplePos, false);  // No detail for light march
+        totalDensity += density * stepSize;
+    }
+    
+    return exp(-totalDensity * cloud.extinction);
+}
+
+// Main cloud ray marching
+vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoiseOffset) {
+    // Earth center
+    vec3 earthCenter = vec3(0.0, -cloud.earthRadius * 1000.0, 0.0);
+    
+    // Find intersection with cloud layer spheres
+    float cloudBottomRadius = cloud.earthRadius * 1000.0 + cloud.cloudLayerBottom * 1000.0;
+    float cloudTopRadius = cloud.earthRadius * 1000.0 + cloud.cloudLayerTop * 1000.0;
+    
+    vec2 bottomHit = raySphereIntersect(rayOrigin, rayDir, earthCenter, cloudBottomRadius);
+    vec2 topHit = raySphereIntersect(rayOrigin, rayDir, earthCenter, cloudTopRadius);
+    
+    // Determine start and end
+    float tStart, tEnd;
+    
+    float cameraAltitude = length(rayOrigin - earthCenter) - cloud.earthRadius * 1000.0;
+    
+    if (cameraAltitude < cloud.cloudLayerBottom * 1000.0) {
+        // Below clouds
+        tStart = bottomHit.y;  // Entry through bottom
+        tEnd = topHit.y;       // Exit through top
+    } else if (cameraAltitude > cloud.cloudLayerTop * 1000.0) {
+        // Above clouds
+        tStart = topHit.x;     // Entry through top
+        tEnd = bottomHit.x;    // Exit through bottom
+    } else {
+        // Inside cloud layer
+        tStart = 0.0;
+        tEnd = min(topHit.y, bottomHit.x);
+        if (tEnd < 0.0) tEnd = topHit.y;
+    }
+    
+    if (tStart < 0.0 || tEnd < 0.0 || tStart >= tEnd) {
+        return vec4(0.0);
+    }
+    
+    // Clamp to max distance
+    tEnd = min(tEnd, maxDist);
+    
+    // Offset start with blue noise for temporal stability
+    tStart += blueNoiseOffset * MARCH_STEP;
+    
+    // Ray marching
+    vec3 sunDir = normalize(cloud.sunDirection);
+    float cosAngle = dot(rayDir, sunDir);
+    float phase = cloudPhase(cosAngle);
+    
+    vec3 luminance = vec3(0.0);
+    float transmittance = 1.0;
+    
+    float t = tStart;
+    float stepSize = MARCH_STEP;
+    
+    for (int i = 0; i < MAX_STEPS && t < tEnd && transmittance > 0.01; i++) {
+        vec3 pos = rayOrigin + rayDir * t;
+        
+        float density = sampleCloudDensity(pos, true);
+        
+        if (density > 0.001) {
+            // Light marching
+            float lightTransmittance = lightMarch(pos);
+            
+            // Direct lighting
+            vec3 directLight = cloud.sunColor * cloud.sunIntensity * lightTransmittance;
+            
+            // Ambient lighting (sky contribution)
+            vec3 ambient = cloud.ambientColor * cloud.ambientStrength;
+            
+            // Silver lining effect
+            float silverLining = pow(clamp(1.0 - density, 0.0, 1.0), 8.0) * cloud.silverIntensity;
+            directLight += cloud.sunColor * silverLining * lightTransmittance;
+            
+            // Combine lighting
+            vec3 scattering = (directLight * phase + ambient) * density;
+            
+            // Beer-Lambert
+            float extinction = density * stepSize * cloud.extinction;
+            float segmentTransmittance = exp(-extinction);
+            
+            // Integrate
+            luminance += scattering * transmittance * (1.0 - segmentTransmittance) / max(0.001, density * cloud.extinction);
+            transmittance *= segmentTransmittance;
+        }
+        
+        t += stepSize;
+    }
+    
+    return vec4(luminance, 1.0 - transmittance);
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 resolution = cloud.resolution;
+    
+    if (pixelCoord.x >= int(resolution.x) || pixelCoord.y >= int(resolution.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) / resolution;
+    
+    // Reconstruct ray
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+    vec4 worldPos4 = cloud.invViewProjection * clipPos;
+    vec3 worldPos = worldPos4.xyz / worldPos4.w;
+    vec3 rayDir = normalize(worldPos - cloud.cameraPos);
+    
+    // Sample scene depth for max distance
+    float sceneDepth = texture(depthBuffer, uv).r;
+    float maxDist = 100000.0;  // 100km default
+    
+    // Blue noise offset for temporal stability
+    vec2 blueNoiseUV = fract(vec2(pixelCoord) / 64.0 + vec2(cloud.frameNumber * 0.618, cloud.frameNumber * 0.382));
+    float blueNoiseOffset = texture(blueNoise, blueNoiseUV).r;
+    blueNoiseOffset = fract(blueNoiseOffset + cloud.frameNumber * 0.618) * cloud.rayOffsetStrength;
+    
+    // March clouds
+    vec4 clouds = raymarchClouds(cloud.cameraPos, rayDir, maxDist, blueNoiseOffset);
+    
+    // Temporal reprojection
+    if (cloud.temporalBlend > 0.0) {
+        vec4 prevClipPos = cloud.prevViewProjection * vec4(worldPos, 1.0);
+        vec2 prevUV = prevClipPos.xy / prevClipPos.w * 0.5 + 0.5;
+        
+        if (prevUV.x >= 0.0 && prevUV.x <= 1.0 && prevUV.y >= 0.0 && prevUV.y <= 1.0) {
+            vec4 prevClouds = texture(prevClouds, prevUV);
+            
+            // Blend with previous frame
+            clouds = mix(clouds, prevClouds, cloud.temporalBlend);
+        }
+    }
+    
+    imageStore(cloudOutput, pixelCoord, clouds);
+}

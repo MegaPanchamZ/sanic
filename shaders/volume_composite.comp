@@ -1,0 +1,48 @@
+/**
+ * volume_composite.comp
+ * 
+ * Composites volume scattering and transmittance with scene color.
+ * Handles proper alpha blending and color space conversion.
+ */
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform CompositeUniforms {
+    vec4 screenParams;
+    float exposureScale;
+    float saturation;
+    uint flags;
+    uint pad;
+};
+
+layout(set = 0, binding = 1) uniform sampler2D sceneColor;
+layout(set = 0, binding = 2) uniform sampler2D volumeScattering;
+layout(set = 0, binding = 3) uniform sampler2D volumeTransmittance;
+layout(set = 0, binding = 4, rgba16f) uniform image2D outputColor;
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 screenSize = screenParams.xy;
+    
+    if (pixelCoord.x >= int(screenSize.x) || pixelCoord.y >= int(screenSize.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) / screenSize;
+    
+    // Sample inputs
+    vec3 scene = texture(sceneColor, uv).rgb;
+    vec3 scattering = texture(volumeScattering, uv).rgb;
+    vec3 transmittance = texture(volumeTransmittance, uv).rgb;
+    
+    // Apply volume contribution
+    // Scene is attenuated by transmittance, then scattering is added
+    vec3 result = scene * transmittance + scattering;
+    
+    // Apply exposure
+    result *= exposureScale;
+    
+    imageStore(outputColor, pixelCoord, vec4(result, 1.0));
+}

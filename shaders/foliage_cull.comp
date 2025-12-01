@@ -1,0 +1,317 @@
+/**
+ * foliage_cull.comp
+ * 
+ * GPU-driven foliage instance culling compute shader.
+ * Performs hierarchical culling: clusters first, then instances.
+ * 
+ * Features:
+ * - Frustum culling with sphere and AABB tests
+ * - HZB occlusion culling
+ * - Distance-based LOD selection
+ * - Dithered LOD transitions
+ * - Wind animation phase assignment
+ */
+
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Instance data structure
+struct FoliageInstance {
+    vec4 positionScale;     // xyz: position, w: scale
+    vec4 rotationLOD;       // xyz: rotation (euler), w: LOD/fade
+    uint typeId;
+    uint clusterIndex;
+    uint flags;
+    uint padding;
+};
+
+// Cluster data structure
+struct FoliageCluster {
+    vec4 boundsSphere;      // xyz: center, w: radius
+    vec4 boundsMin;
+    vec4 boundsMax;
+    uint instanceOffset;
+    uint instanceCount;
+    uint typeId;
+    uint flags;
+};
+
+// Indirect draw command
+struct DrawIndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+// Type configuration
+struct FoliageTypeConfig {
+    float cullDistance;
+    float fadeDistance;
+    float lodDistances[4];
+    uint meshLODCount;
+    float windStrength;
+    uint flags;
+    uint padding;
+};
+
+// Culling uniforms
+layout(set = 0, binding = 0) uniform CullUniforms {
+    mat4 viewProjection;
+    vec4 frustumPlanes[6];
+    vec3 cameraPosition;
+    float time;
+    vec3 cameraForward;
+    float lodBias;
+    uint totalClusters;
+    uint totalInstances;
+    uint maxVisibleInstances;
+    float hzbWidth;
+    float hzbHeight;
+    uint frameNumber;
+    vec2 padding;
+} ubo;
+
+// Buffers
+layout(set = 0, binding = 1) readonly buffer Clusters {
+    FoliageCluster clusters[];
+};
+
+layout(set = 0, binding = 2) readonly buffer Instances {
+    FoliageInstance instances[];
+};
+
+layout(set = 0, binding = 3) writeonly buffer VisibleInstances {
+    FoliageInstance visibleInstances[];
+};
+
+layout(set = 0, binding = 4) buffer DrawCommands {
+    DrawIndirectCommand drawCommands[];  // One per LOD per type
+};
+
+layout(set = 0, binding = 5) buffer Counters {
+    uint visibleCount;
+    uint visibleClusterCount;
+    uint culledByFrustum;
+    uint culledByOcclusion;
+    uint culledByDistance;
+};
+
+layout(set = 0, binding = 6) readonly buffer TypeConfigs {
+    FoliageTypeConfig typeConfigs[];
+};
+
+// HZB texture for occlusion culling
+layout(set = 0, binding = 7) uniform sampler2D hzbTexture;
+
+// Cluster visibility buffer (set by cluster cull pass)
+layout(set = 0, binding = 8) buffer ClusterVisibility {
+    uint clusterVisible[];  // Bitfield
+};
+
+// Frustum test for sphere
+bool frustumTestSphere(vec3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        float dist = dot(ubo.frustumPlanes[i].xyz, center) + ubo.frustumPlanes[i].w;
+        if (dist < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Frustum test for AABB
+bool frustumTestAABB(vec3 minBounds, vec3 maxBounds) {
+    for (int i = 0; i < 6; i++) {
+        vec3 positive = minBounds;
+        if (ubo.frustumPlanes[i].x >= 0) positive.x = maxBounds.x;
+        if (ubo.frustumPlanes[i].y >= 0) positive.y = maxBounds.y;
+        if (ubo.frustumPlanes[i].z >= 0) positive.z = maxBounds.z;
+        
+        if (dot(ubo.frustumPlanes[i].xyz, positive) + ubo.frustumPlanes[i].w < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// HZB occlusion test
+bool hzbOcclusionTest(vec3 boundsMin, vec3 boundsMax) {
+    // Project AABB corners to screen space
+    vec4 corners[8];
+    corners[0] = ubo.viewProjection * vec4(boundsMin.x, boundsMin.y, boundsMin.z, 1.0);
+    corners[1] = ubo.viewProjection * vec4(boundsMax.x, boundsMin.y, boundsMin.z, 1.0);
+    corners[2] = ubo.viewProjection * vec4(boundsMin.x, boundsMax.y, boundsMin.z, 1.0);
+    corners[3] = ubo.viewProjection * vec4(boundsMax.x, boundsMax.y, boundsMin.z, 1.0);
+    corners[4] = ubo.viewProjection * vec4(boundsMin.x, boundsMin.y, boundsMax.z, 1.0);
+    corners[5] = ubo.viewProjection * vec4(boundsMax.x, boundsMin.y, boundsMax.z, 1.0);
+    corners[6] = ubo.viewProjection * vec4(boundsMin.x, boundsMax.y, boundsMax.z, 1.0);
+    corners[7] = ubo.viewProjection * vec4(boundsMax.x, boundsMax.y, boundsMax.z, 1.0);
+    
+    // Find screen-space AABB and nearest depth
+    vec2 screenMin = vec2(1.0);
+    vec2 screenMax = vec2(-1.0);
+    float nearZ = 1.0;
+    
+    bool anyInFront = false;
+    for (int i = 0; i < 8; i++) {
+        if (corners[i].w > 0.0) {
+            anyInFront = true;
+            vec3 ndc = corners[i].xyz / corners[i].w;
+            screenMin = min(screenMin, ndc.xy);
+            screenMax = max(screenMax, ndc.xy);
+            nearZ = min(nearZ, ndc.z);
+        }
+    }
+    
+    if (!anyInFront) {
+        return true;  // All behind camera = occluded
+    }
+    
+    // Clamp to valid screen range
+    screenMin = clamp(screenMin, vec2(-1.0), vec2(1.0));
+    screenMax = clamp(screenMax, vec2(-1.0), vec2(1.0));
+    
+    // Calculate appropriate mip level based on screen-space size
+    vec2 screenSize = (screenMax - screenMin) * 0.5 * vec2(ubo.hzbWidth, ubo.hzbHeight);
+    float mipLevel = ceil(log2(max(screenSize.x, screenSize.y)));
+    mipLevel = clamp(mipLevel, 0.0, 10.0);
+    
+    // Sample HZB at center of screen AABB
+    vec2 uv = (screenMin + screenMax) * 0.25 + 0.5;
+    float hzbDepth = textureLod(hzbTexture, uv, mipLevel).r;
+    
+    // Object is occluded if its nearest depth is behind HZB depth
+    return nearZ > hzbDepth;
+}
+
+// Calculate LOD based on distance
+uint calculateLOD(float distance, uint typeId) {
+    FoliageTypeConfig config = typeConfigs[typeId];
+    
+    for (uint i = 0; i < config.meshLODCount - 1; i++) {
+        if (distance < config.lodDistances[i] * ubo.lodBias) {
+            return i;
+        }
+    }
+    
+    return config.meshLODCount - 1;
+}
+
+// Calculate fade factor for LOD transitions and distance fade
+float calculateFade(float distance, uint lod, uint typeId) {
+    FoliageTypeConfig config = typeConfigs[typeId];
+    
+    // Distance fade near cull distance
+    float distFade = 1.0 - smoothstep(
+        config.cullDistance - config.fadeDistance,
+        config.cullDistance,
+        distance
+    );
+    
+    // LOD transition fade (dithered)
+    float lodFade = 1.0;
+    if (lod < config.meshLODCount - 1) {
+        float lodDist = config.lodDistances[lod] * ubo.lodBias;
+        float transitionRange = lodDist * 0.1;  // 10% of LOD distance
+        float transitionStart = lodDist - transitionRange;
+        
+        if (distance > transitionStart) {
+            lodFade = 1.0 - (distance - transitionStart) / transitionRange;
+        }
+    }
+    
+    return distFade * lodFade;
+}
+
+// Shared memory for workgroup reduction
+shared uint sharedVisibleCount;
+
+void main() {
+    uint globalIdx = gl_GlobalInvocationID.x;
+    
+    // Initialize shared memory
+    if (gl_LocalInvocationID.x == 0) {
+        sharedVisibleCount = 0;
+    }
+    barrier();
+    
+    if (globalIdx >= ubo.totalInstances) {
+        return;
+    }
+    
+    FoliageInstance instance = instances[globalIdx];
+    
+    // Check if cluster is visible (set by cluster cull pass)
+    uint clusterWord = instance.clusterIndex / 32;
+    uint clusterBit = instance.clusterIndex % 32;
+    if ((clusterVisible[clusterWord] & (1u << clusterBit)) == 0) {
+        atomicAdd(culledByFrustum, 1);
+        return;
+    }
+    
+    // Get type configuration
+    FoliageTypeConfig config = typeConfigs[instance.typeId];
+    
+    // Calculate distance to camera
+    vec3 instancePos = instance.positionScale.xyz;
+    float distToCamera = length(instancePos - ubo.cameraPosition);
+    
+    // Distance culling
+    if (distToCamera > config.cullDistance) {
+        atomicAdd(culledByDistance, 1);
+        return;
+    }
+    
+    // Per-instance frustum culling (sphere test)
+    float instanceRadius = instance.positionScale.w * 2.0;  // Approximate bounding sphere
+    if (!frustumTestSphere(instancePos, instanceRadius)) {
+        atomicAdd(culledByFrustum, 1);
+        return;
+    }
+    
+    // HZB occlusion culling for larger instances
+    if (instanceRadius > 1.0) {
+        vec3 boundsMin = instancePos - vec3(instanceRadius);
+        vec3 boundsMax = instancePos + vec3(instanceRadius);
+        
+        if (hzbOcclusionTest(boundsMin, boundsMax)) {
+            atomicAdd(culledByOcclusion, 1);
+            return;
+        }
+    }
+    
+    // Calculate LOD
+    uint lod = calculateLOD(distToCamera, instance.typeId);
+    
+    // Calculate fade factor
+    float fade = calculateFade(distToCamera, lod, instance.typeId);
+    
+    // Apply dithering for fade (screen-space stable)
+    uint ditherPattern = uint(instancePos.x * 17.0 + instancePos.z * 31.0) ^ ubo.frameNumber;
+    float dither = fract(float(ditherPattern) * 0.0625);  // 1/16
+    
+    if (fade < dither) {
+        atomicAdd(culledByDistance, 1);
+        return;
+    }
+    
+    // Write visible instance
+    uint visibleIdx = atomicAdd(visibleCount, 1);
+    
+    if (visibleIdx < ubo.maxVisibleInstances) {
+        // Update instance with LOD info
+        FoliageInstance visInstance = instance;
+        visInstance.rotationLOD.w = float(lod) + fade * 0.01;  // Pack LOD and fade
+        
+        visibleInstances[visibleIdx] = visInstance;
+        
+        // Increment draw command instance count for this LOD
+        uint drawCmdIdx = instance.typeId * 4 + lod;  // Assuming max 4 LODs
+        atomicAdd(drawCommands[drawCmdIdx].instanceCount, 1);
+    }
+}

@@ -1,0 +1,225 @@
+/**
+ * megalights_denoise.comp
+ * 
+ * Temporal denoising for stochastic MegaLights shadows.
+ * Implements variance-guided temporal accumulation with spatial filtering.
+ * 
+ * Based on Unreal Engine 5 MegaLights denoising approach.
+ */
+
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// ============================================================================
+// BINDINGS
+// ============================================================================
+
+layout(set = 0, binding = 0, scalar) uniform Uniforms {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    mat4 invViewMatrix;
+    mat4 invProjMatrix;
+    mat4 viewProjMatrix;
+    mat4 prevViewProjMatrix;
+    
+    vec4 cameraPosition;
+    vec4 screenParams;
+    
+    ivec4 clusterDims;
+    vec4 depthParams;
+    
+    uint lightCount;
+    uint samplesPerPixel;
+    uint frameIndex;
+    uint flags;
+} uniforms;
+
+// Current frame shadow mask (input)
+layout(set = 0, binding = 5, rgba16f) readonly uniform image2D shadowMaskIn;
+
+// Denoised output
+layout(set = 0, binding = 7, rgba16f) writeonly uniform image2D denoisedShadowOut;
+
+// History buffer (ping-pong)
+layout(set = 0, binding = 8) uniform sampler2D historyBuffer;
+
+// Variance buffer
+layout(set = 0, binding = 9, rg16f) uniform image2D varianceBuffer;
+
+// G-Buffer inputs
+layout(set = 0, binding = 10) uniform sampler2D depthBuffer;
+layout(set = 0, binding = 11) uniform sampler2D normalBuffer;
+layout(set = 0, binding = 13) uniform sampler2D velocityBuffer;
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const float PI = 3.14159265359;
+const int SPATIAL_RADIUS = 3;
+const float VARIANCE_CLIP_GAMMA = 1.5;
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+float linearizeDepth(float depth) {
+    float near = uniforms.depthParams.x;
+    float far = uniforms.depthParams.y;
+    return near * far / (far - depth * (far - near));
+}
+
+// Bilateral weight based on depth and normal similarity
+float bilateralWeight(float centerDepth, float sampleDepth, 
+                      vec3 centerNormal, vec3 sampleNormal) {
+    float depthWeight = exp(-abs(centerDepth - sampleDepth) * 10.0);
+    float normalWeight = pow(max(0.0, dot(centerNormal, sampleNormal)), 16.0);
+    return depthWeight * normalWeight;
+}
+
+// Variance clipping for temporal stability
+vec4 clipToAABB(vec4 history, vec4 minColor, vec4 maxColor) {
+    vec4 center = (minColor + maxColor) * 0.5;
+    vec4 extents = (maxColor - minColor) * 0.5;
+    
+    vec4 offset = history - center;
+    vec4 absOffset = abs(offset);
+    
+    // Find the largest component that exceeds extents
+    vec4 scale = absOffset / max(extents, vec4(0.0001));
+    float maxScale = max(max(scale.x, scale.y), max(scale.z, scale.w));
+    
+    if (maxScale > 1.0) {
+        return center + offset / maxScale;
+    }
+    return history;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 screenSize = uniforms.screenParams.xy;
+    
+    if (any(greaterThanEqual(pixelCoord, ivec2(screenSize)))) {
+        return;
+    }
+    
+    vec2 uv = (vec2(pixelCoord) + 0.5) / screenSize;
+    
+    // Sample current frame
+    vec4 currentShadow = imageLoad(shadowMaskIn, pixelCoord);
+    
+    // Sample G-buffer
+    float depth = texture(depthBuffer, uv).r;
+    vec3 normal = normalize(texture(normalBuffer, uv).xyz * 2.0 - 1.0);
+    vec2 velocity = texture(velocityBuffer, uv).xy;
+    
+    // Handle sky pixels
+    if (depth >= 1.0) {
+        imageStore(denoisedShadowOut, pixelCoord, vec4(1.0));
+        return;
+    }
+    
+    float linearDepth = linearizeDepth(depth);
+    
+    // ========================================================================
+    // SPATIAL FILTER (Edge-aware blur)
+    // ========================================================================
+    
+    vec4 spatialSum = vec4(0.0);
+    vec4 spatialSumSq = vec4(0.0);
+    float totalWeight = 0.0;
+    int sampleCount = 0;
+    
+    for (int dy = -SPATIAL_RADIUS; dy <= SPATIAL_RADIUS; ++dy) {
+        for (int dx = -SPATIAL_RADIUS; dx <= SPATIAL_RADIUS; ++dx) {
+            ivec2 sampleCoord = pixelCoord + ivec2(dx, dy);
+            
+            if (any(lessThan(sampleCoord, ivec2(0))) || 
+                any(greaterThanEqual(sampleCoord, ivec2(screenSize)))) {
+                continue;
+            }
+            
+            vec2 sampleUV = (vec2(sampleCoord) + 0.5) / screenSize;
+            
+            float sampleDepth = texture(depthBuffer, sampleUV).r;
+            vec3 sampleNormal = normalize(texture(normalBuffer, sampleUV).xyz * 2.0 - 1.0);
+            float sampleLinearDepth = linearizeDepth(sampleDepth);
+            
+            // Bilateral weight
+            float weight = bilateralWeight(linearDepth, sampleLinearDepth, normal, sampleNormal);
+            
+            // Gaussian spatial weight
+            float gaussWeight = exp(-float(dx*dx + dy*dy) / (2.0 * SPATIAL_RADIUS * SPATIAL_RADIUS));
+            weight *= gaussWeight;
+            
+            vec4 sampleValue = imageLoad(shadowMaskIn, sampleCoord);
+            
+            spatialSum += sampleValue * weight;
+            spatialSumSq += sampleValue * sampleValue * weight;
+            totalWeight += weight;
+            sampleCount++;
+        }
+    }
+    
+    vec4 spatialFiltered = spatialSum / max(totalWeight, 0.0001);
+    vec4 spatialVariance = (spatialSumSq / max(totalWeight, 0.0001)) - spatialFiltered * spatialFiltered;
+    spatialVariance = max(spatialVariance, vec4(0.0));
+    
+    // ========================================================================
+    // TEMPORAL ACCUMULATION
+    // ========================================================================
+    
+    // Reproject using velocity
+    vec2 historyUV = uv - velocity;
+    
+    // Check if history is valid
+    bool historyValid = historyUV.x >= 0.0 && historyUV.x <= 1.0 &&
+                        historyUV.y >= 0.0 && historyUV.y <= 1.0;
+    
+    vec4 historySample = texture(historyBuffer, historyUV);
+    
+    // Variance clipping
+    vec4 stdDev = sqrt(spatialVariance);
+    vec4 clipMin = spatialFiltered - stdDev * VARIANCE_CLIP_GAMMA;
+    vec4 clipMax = spatialFiltered + stdDev * VARIANCE_CLIP_GAMMA;
+    
+    vec4 clippedHistory = clipToAABB(historySample, clipMin, clipMax);
+    
+    // Calculate blend factor based on variance and motion
+    float velocityMagnitude = length(velocity * screenSize);
+    float motionFactor = clamp(1.0 - velocityMagnitude * 0.1, 0.0, 1.0);
+    
+    // Higher variance = less history weight
+    float avgVariance = (spatialVariance.r + spatialVariance.g + spatialVariance.b) / 3.0;
+    float varianceFactor = 1.0 / (1.0 + avgVariance * 10.0);
+    
+    // Base temporal blend
+    float temporalBlend = 0.9; // From config
+    temporalBlend *= motionFactor * varianceFactor;
+    
+    // Disable history for disoccluded pixels
+    if (!historyValid) {
+        temporalBlend = 0.0;
+    }
+    
+    // Blend
+    vec4 result = mix(spatialFiltered, clippedHistory, temporalBlend);
+    
+    // ========================================================================
+    // OUTPUT
+    // ========================================================================
+    
+    // Update variance buffer for next frame
+    vec2 currentVariance = imageLoad(varianceBuffer, pixelCoord).rg;
+    vec2 newVariance = vec2(spatialVariance.r, avgVariance);
+    imageStore(varianceBuffer, pixelCoord, vec4(mix(currentVariance, newVariance, 0.1), 0.0, 0.0));
+    
+    // Write denoised result
+    imageStore(denoisedShadowOut, pixelCoord, result);
+}

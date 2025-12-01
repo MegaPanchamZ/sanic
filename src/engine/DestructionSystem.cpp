@@ -3,6 +3,7 @@
  * 
  * Implementation of Chaos-style destruction system.
  * Uses Voronoi tessellation with strain-based fracturing.
+ * Extended with high-speed collision support for Sonic-style gameplay.
  */
 
 #include "DestructionSystem.h"
@@ -22,6 +23,7 @@
 namespace {
     constexpr float kEpsilon = 1e-6f;
     constexpr uint32_t kMaxIterations = 100;
+    constexpr float kMphToMs = 0.44704f; // mph to m/s conversion
 }
 
 DestructionSystem::DestructionSystem() = default;
@@ -55,6 +57,7 @@ void DestructionSystem::shutdown() {
     fractureData_.clear();
     pendingBreaks_.clear();
     debris_.clear();
+    spatialGrid_.clear();
     
     initialized_ = false;
 }
@@ -543,6 +546,10 @@ uint32_t DestructionSystem::createInstance(
     instance.clusters = data.hierarchy;
     
     instances_[instanceId] = std::move(instance);
+    
+    // Add to spatial grid for quick lookups
+    addToSpatialGrid(instanceId, position);
+    
     return instanceId;
 }
 
@@ -713,9 +720,27 @@ void DestructionSystem::releasePiece(uint32_t objectId, uint32_t pieceId) {
     // Create physics body for this piece
     createPieceBody(objectId, pieceId);
     
-    // Track as debris
+    // Track as debris with enhanced info
     const FractureData& data = fractureData_[instance.fractureDataId];
-    debris_.push_back({objectId, pieceId, data.config.debrisLifetime});
+    float volume = 0.0f;
+    if (pieceId < data.voronoi.cells.size()) {
+        volume = data.voronoi.cells[pieceId].volume;
+    }
+    
+    // Apply size-based lifetime modifier
+    float lifetime = debrisSettings_.lifetime;
+    if (volume < debrisSettings_.smallDebrisThreshold) {
+        lifetime *= debrisSettings_.smallDebrisLifetimeMultiplier;
+    }
+    
+    debris_.push_back({
+        objectId,
+        pieceId,
+        lifetime,
+        volume,
+        false,  // isSleeping
+        piece.position  // lastPosition
+    });
 }
 
 void DestructionSystem::createPieceBody(uint32_t objectId, uint32_t pieceId) {
@@ -751,6 +776,9 @@ void DestructionSystem::createPieceBody(uint32_t objectId, uint32_t pieceId) {
 void DestructionSystem::update(float deltaTime) {
     if (!initialized_) return;
     
+    // Reset frame counters
+    highSpeedBreaksThisFrame_ = 0;
+    
     // Process any pending breaks
     for (const auto& pending : pendingBreaks_) {
         processBreaking(pending.objectId);
@@ -773,29 +801,104 @@ void DestructionSystem::update(float deltaTime) {
 }
 
 void DestructionSystem::cleanupDebris(float deltaTime) {
+    // Sort debris by distance for LOD processing
+    std::sort(debris_.begin(), debris_.end(),
+              [this](const Debris& a, const Debris& b) {
+                  auto itA = instances_.find(a.objectId);
+                  auto itB = instances_.find(b.objectId);
+                  if (itA == instances_.end() || itB == instances_.end()) return false;
+                  
+                  glm::vec3 posA = itA->second.pieces[a.pieceId].position;
+                  glm::vec3 posB = itB->second.pieces[b.pieceId].position;
+                  
+                  float distA = glm::length(posA - playerPosition_);
+                  float distB = glm::length(posB - playerPosition_);
+                  return distA < distB;
+              });
+    
+    uint32_t activeCount = 0;
     auto it = debris_.begin();
+    
     while (it != debris_.end()) {
         it->lifetime -= deltaTime;
         
-        if (it->lifetime <= 0.0f) {
-            // Find and deactivate the piece
-            auto instanceIt = instances_.find(it->objectId);
-            if (instanceIt != instances_.end()) {
-                auto& instance = instanceIt->second;
-                if (it->pieceId < instance.pieces.size()) {
-                    FracturePiece& piece = instance.pieces[it->pieceId];
-                    piece.isActive = false;
-                    
-                    // Remove physics body
-                    if (piece.bodyId && physics_) {
-                        // physics_->unregisterBody(piece.bodyId);
-                        piece.bodyId = nullptr;
-                    }
-                }
+        // Find the piece
+        auto instanceIt = instances_.find(it->objectId);
+        if (instanceIt == instances_.end()) {
+            it = debris_.erase(it);
+            continue;
+        }
+        
+        auto& instance = instanceIt->second;
+        if (it->pieceId >= instance.pieces.size()) {
+            it = debris_.erase(it);
+            continue;
+        }
+        
+        FracturePiece& piece = instance.pieces[it->pieceId];
+        glm::vec3 debrisPos = piece.position;
+        float distToPlayer = glm::length(debrisPos - playerPosition_);
+        
+        // Apply size-based lifetime modifier
+        float lifetimeModifier = (it->volume < debrisSettings_.smallDebrisThreshold) 
+            ? debrisSettings_.smallDebrisLifetimeMultiplier 
+            : 1.0f;
+        
+        // Check for despawn conditions
+        bool shouldDespawn = false;
+        
+        // Lifetime expired
+        if (it->lifetime <= 0) {
+            shouldDespawn = true;
+        }
+        
+        // Too far from player
+        if (distToPlayer > debrisSettings_.despawnDistance) {
+            shouldDespawn = true;
+        }
+        
+        // Max active debris limit (despawn oldest/farthest first)
+        if (activeCount >= debrisSettings_.maxActiveDebris && !it->isSleeping) {
+            shouldDespawn = true;
+        }
+        
+        if (shouldDespawn) {
+            piece.isActive = false;
+            
+            // Remove physics body
+            if (piece.bodyId && physics_) {
+                // physics_->unregisterBody(piece.bodyId);
+                piece.bodyId = nullptr;
             }
             
             it = debris_.erase(it);
         } else {
+            // Distance-based LOD for physics
+            if (debrisSettings_.freezeDistantDebris) {
+                bool shouldSleep = distToPlayer > debrisSettings_.lodDistanceMid;
+                
+                if (shouldSleep && !it->isSleeping) {
+                    // Put to sleep
+                    it->isSleeping = true;
+                    it->lastPosition = piece.position;
+                    // Disable physics simulation
+                    // if (piece.bodyId && physics_) {
+                    //     physics_->setBodyActive(piece.bodyId, false);
+                    // }
+                } else if (!shouldSleep && it->isSleeping) {
+                    // Wake up
+                    it->isSleeping = false;
+                    // Re-enable physics simulation
+                    // if (piece.bodyId && physics_) {
+                    //     physics_->setBodyActive(piece.bodyId, true);
+                    // }
+                }
+            }
+            
+            if (!it->isSleeping) {
+                activeCount++;
+            }
+            
             ++it;
         }
     }
@@ -854,16 +957,217 @@ void DestructionSystem::getActiveTransforms(
     }
 }
 
+// ============================================================================
+// Spatial Grid Helpers
+// ============================================================================
+
+uint64_t DestructionSystem::getSpatialKey(const glm::vec3& position) const {
+    int32_t x = static_cast<int32_t>(std::floor(position.x / spatialCellSize_));
+    int32_t y = static_cast<int32_t>(std::floor(position.y / spatialCellSize_));
+    int32_t z = static_cast<int32_t>(std::floor(position.z / spatialCellSize_));
+    
+    // Pack into 64-bit key (20 bits per component)
+    uint64_t ux = static_cast<uint64_t>(x + 524288) & 0xFFFFF;
+    uint64_t uy = static_cast<uint64_t>(y + 524288) & 0xFFFFF;
+    uint64_t uz = static_cast<uint64_t>(z + 524288) & 0xFFFFF;
+    
+    return (ux << 40) | (uy << 20) | uz;
+}
+
+void DestructionSystem::addToSpatialGrid(uint32_t objectId, const glm::vec3& position) {
+    uint64_t key = getSpatialKey(position);
+    spatialGrid_[key].objectIds.push_back(objectId);
+}
+
+void DestructionSystem::removeFromSpatialGrid(uint32_t objectId, const glm::vec3& position) {
+    uint64_t key = getSpatialKey(position);
+    auto it = spatialGrid_.find(key);
+    if (it != spatialGrid_.end()) {
+        auto& ids = it->second.objectIds;
+        ids.erase(std::remove(ids.begin(), ids.end(), objectId), ids.end());
+        if (ids.empty()) {
+            spatialGrid_.erase(it);
+        }
+    }
+}
+
+std::vector<uint32_t> DestructionSystem::getObjectsInRadius(
+    const glm::vec3& center,
+    float radius) const {
+    
+    std::vector<uint32_t> result;
+    
+    // Check all cells within radius
+    int cellRadius = static_cast<int>(std::ceil(radius / spatialCellSize_)) + 1;
+    glm::vec3 baseCell(
+        std::floor(center.x / spatialCellSize_),
+        std::floor(center.y / spatialCellSize_),
+        std::floor(center.z / spatialCellSize_)
+    );
+    
+    for (int dx = -cellRadius; dx <= cellRadius; ++dx) {
+        for (int dy = -cellRadius; dy <= cellRadius; ++dy) {
+            for (int dz = -cellRadius; dz <= cellRadius; ++dz) {
+                glm::vec3 checkPos = (baseCell + glm::vec3(dx, dy, dz)) * spatialCellSize_;
+                uint64_t key = getSpatialKey(checkPos);
+                
+                auto it = spatialGrid_.find(key);
+                if (it != spatialGrid_.end()) {
+                    for (uint32_t objId : it->second.objectIds) {
+                        // Verify actual distance
+                        auto instIt = instances_.find(objId);
+                        if (instIt != instances_.end() && !instIt->second.isDestroyed) {
+                            glm::vec3 objPos = glm::vec3(instIt->second.transform[3]);
+                            if (glm::length(objPos - center) <= radius) {
+                                result.push_back(objId);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    return result;
+}
+
+bool DestructionSystem::isObjectIntact(uint32_t objectId) const {
+    auto it = instances_.find(objectId);
+    if (it == instances_.end()) return false;
+    return !it->second.isDestroyed;
+}
+
+// ============================================================================
+// High-Speed Collision System
+// ============================================================================
+
+bool DestructionSystem::applyHighSpeedCollision(
+    uint32_t objectId,
+    const glm::vec3& characterPosition,
+    const glm::vec3& characterVelocity) {
+    
+    auto it = instances_.find(objectId);
+    if (it == instances_.end()) return false;
+    
+    DestructibleInstance& instance = it->second;
+    if (instance.isDestroyed) return false;
+    
+    // Calculate impact force from velocity
+    float speed = glm::length(characterVelocity);
+    if (speed < highSpeedSettings_.minVelocityToBreak) {
+        return false;
+    }
+    
+    // Impact force = mass * velocity * multiplier
+    float impactForce = highSpeedSettings_.characterMass * speed * 
+                        highSpeedSettings_.velocityToForceMultiplier;
+    
+    // Direction from character to object center
+    glm::vec3 objectCenter = glm::vec3(instance.transform[3]);
+    glm::vec3 impactDir = glm::normalize(characterVelocity);
+    
+    // Find impact point (closest point on object surface to character)
+    glm::vec3 impactPoint = characterPosition;
+    
+    // Apply damage with enhanced impact radius for high-speed
+    const FractureData& data = fractureData_[instance.fractureDataId];
+    float impactRadius = highSpeedSettings_.impactRadius;
+    bool anyBroke = false;
+    
+    for (auto& piece : instance.pieces) {
+        if (piece.isReleased) continue;
+        
+        float dist = glm::distance(piece.position, impactPoint);
+        if (dist < impactRadius) {
+            // Calculate strain with distance falloff
+            float falloff = 1.0f - (dist / impactRadius);
+            falloff = falloff * falloff; // Quadratic falloff
+            float strainAmount = impactForce * falloff * data.config.impactMultiplier;
+            
+            piece.strain += strainAmount;
+            instance.totalStrain += strainAmount;
+            
+            // High-speed impacts always check for breaking
+            if (piece.strain >= piece.strainThreshold) {
+                pendingBreaks_.push_back({objectId, piece.id, piece.strain});
+                
+                // Apply impulse to debris if enabled
+                if (highSpeedSettings_.applyImpulseToDebris) {
+                    glm::vec3 debrisDir = glm::normalize(piece.position - impactPoint);
+                    // Mix impact direction with radial direction
+                    glm::vec3 impulseDir = glm::normalize(impactDir * 0.3f + debrisDir * 0.7f);
+                    piece.velocity = impulseDir * speed * highSpeedSettings_.debrisImpulseMultiplier;
+                    
+                    // Add some angular velocity for visual interest
+                    piece.angularVelocity = glm::vec3(
+                        (std::rand() / float(RAND_MAX) - 0.5f) * 10.0f,
+                        (std::rand() / float(RAND_MAX) - 0.5f) * 10.0f,
+                        (std::rand() / float(RAND_MAX) - 0.5f) * 10.0f
+                    );
+                }
+            }
+        }
+    }
+    
+    // Process breaks
+    if (!pendingBreaks_.empty()) {
+        processBreaking(objectId);
+        anyBroke = true;
+        highSpeedBreaksThisFrame_++;
+        
+        // Fire high-speed callback
+        if (highSpeedCallback_) {
+            highSpeedCallback_(objectId, impactPoint, impactForce);
+        }
+    }
+    
+    return anyBroke;
+}
+
+std::vector<uint32_t> DestructionSystem::checkHighSpeedCollisions(
+    const glm::vec3& center,
+    float radius,
+    const glm::vec3& velocity) {
+    
+    std::vector<uint32_t> damagedObjects;
+    
+    float speed = glm::length(velocity);
+    if (speed < highSpeedSettings_.minVelocityToBreak) {
+        return damagedObjects;
+    }
+    
+    // Get all objects in detection radius
+    std::vector<uint32_t> nearbyObjects = getObjectsInRadius(center, radius);
+    
+    for (uint32_t objectId : nearbyObjects) {
+        if (applyHighSpeedCollision(objectId, center, velocity)) {
+            damagedObjects.push_back(objectId);
+        }
+    }
+    
+    return damagedObjects;
+}
+
 DestructionSystem::Stats DestructionSystem::getStats() const {
     Stats stats = {};
     stats.totalFracturedObjects = static_cast<uint32_t>(fractureData_.size());
     stats.pendingBreaks = static_cast<uint32_t>(pendingBreaks_.size());
+    stats.highSpeedBreaksThisFrame = highSpeedBreaksThisFrame_;
     
     for (const auto& [id, instance] : instances_) {
         for (const auto& piece : instance.pieces) {
             if (piece.isActive) stats.activePieces++;
         }
         stats.totalStrainAccumulated += instance.totalStrain;
+    }
+    
+    // Count debris states
+    for (const auto& d : debris_) {
+        if (d.isSleeping) {
+            stats.sleepingDebrisCount++;
+        } else {
+            stats.activeDebrisCount++;
+        }
     }
     
     return stats;

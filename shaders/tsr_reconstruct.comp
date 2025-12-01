@@ -1,0 +1,135 @@
+/**
+ * tsr_reconstruct.comp
+ * 
+ * Temporal Super Resolution - Subpixel reconstruction pass.
+ * Uses reprojected history and current samples to reconstruct
+ * high-resolution output with subpixel detail.
+ */
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 0) uniform TSRData {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    mat4 viewProjMatrix;
+    mat4 invViewProjMatrix;
+    mat4 prevViewProjMatrix;
+    
+    vec4 jitterOffset;
+    vec4 screenParams;
+    vec4 outputParams;
+    
+    float upscaleRatio;
+    float historyBlend;
+    float sharpening;
+    uint frameIndex;
+    
+    uint flags;
+    float time;
+    float deltaTime;
+    float pad;
+} tsr;
+
+layout(set = 0, binding = 1) uniform sampler2D colorInput;
+layout(set = 0, binding = 5) uniform sampler2D reprojectedInput;
+layout(set = 0, binding = 6, rgba16f) uniform image2D reconstructedOutput;
+layout(set = 0, binding = 8, rgba16f) uniform image2D historyOutput;
+
+const uint FLAG_SUBPIXEL = 2;
+
+// Lanczos2 kernel
+float lanczos2(float x) {
+    if (abs(x) < 0.0001) return 1.0;
+    if (abs(x) >= 2.0) return 0.0;
+    float pi_x = 3.14159265 * x;
+    return (sin(pi_x) / pi_x) * (sin(pi_x * 0.5) / (pi_x * 0.5));
+}
+
+// Mitchell-Netravali B-spline
+float mitchell(float x) {
+    const float B = 1.0 / 3.0;
+    const float C = 1.0 / 3.0;
+    
+    x = abs(x);
+    float x2 = x * x;
+    float x3 = x2 * x;
+    
+    if (x < 1.0) {
+        return ((12.0 - 9.0 * B - 6.0 * C) * x3 +
+                (-18.0 + 12.0 * B + 6.0 * C) * x2 +
+                (6.0 - 2.0 * B)) / 6.0;
+    } else if (x < 2.0) {
+        return ((-B - 6.0 * C) * x3 +
+                (6.0 * B + 30.0 * C) * x2 +
+                (-12.0 * B - 48.0 * C) * x +
+                (8.0 * B + 24.0 * C)) / 6.0;
+    }
+    return 0.0;
+}
+
+void main() {
+    ivec2 outputCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 outputSize = tsr.outputParams.xy;
+    
+    if (outputCoord.x >= int(outputSize.x) || outputCoord.y >= int(outputSize.y)) {
+        return;
+    }
+    
+    vec2 outputUV = (vec2(outputCoord) + 0.5) / outputSize;
+    vec2 inputSize = tsr.screenParams.xy;
+    
+    // Sample reprojected result
+    vec3 reprojected = texture(reprojectedInput, outputUV).rgb;
+    
+    vec3 result = reprojected;
+    
+    // Subpixel reconstruction using current frame samples
+    if ((tsr.flags & FLAG_SUBPIXEL) != 0) {
+        // Find the corresponding input pixel
+        vec2 inputCoord = outputUV * inputSize - 0.5;
+        ivec2 baseCoord = ivec2(floor(inputCoord));
+        vec2 frac = inputCoord - vec2(baseCoord);
+        
+        // Offset by jitter
+        vec2 jitteredFrac = frac + tsr.jitterOffset.xy;
+        
+        // Sample current frame with high-quality filter
+        vec3 currentContribution = vec3(0.0);
+        float totalWeight = 0.0;
+        
+        for (int y = -1; y <= 2; ++y) {
+            for (int x = -1; x <= 2; ++x) {
+                vec2 samplePos = vec2(baseCoord + ivec2(x, y)) + 0.5;
+                vec2 sampleUV = samplePos / inputSize;
+                
+                if (sampleUV.x >= 0.0 && sampleUV.x <= 1.0 &&
+                    sampleUV.y >= 0.0 && sampleUV.y <= 1.0) {
+                    
+                    vec3 sample_color = texture(colorInput, sampleUV).rgb;
+                    
+                    // Distance from this sample to the output pixel
+                    vec2 dist = vec2(x, y) - jitteredFrac;
+                    float weight = mitchell(dist.x) * mitchell(dist.y);
+                    
+                    currentContribution += sample_color * weight;
+                    totalWeight += weight;
+                }
+            }
+        }
+        
+        if (totalWeight > 0.0) {
+            currentContribution /= totalWeight;
+            
+            // Blend filtered current with reprojected history
+            // Higher weight to current for detail, history for stability
+            float detailWeight = 1.0 - tsr.historyBlend;
+            result = mix(reprojected, currentContribution, detailWeight * 0.5);
+        }
+    }
+    
+    // Write output and update history
+    imageStore(reconstructedOutput, outputCoord, vec4(result, 1.0));
+    imageStore(historyOutput, outputCoord, vec4(result, 1.0));
+}

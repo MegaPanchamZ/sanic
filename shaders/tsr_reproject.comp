@@ -1,0 +1,189 @@
+/**
+ * tsr_reproject.comp
+ * 
+ * Temporal Super Resolution - History reprojection pass.
+ * Reprojects previous frame's history using motion vectors,
+ * validates against current frame, and handles disocclusion.
+ */
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const uint FLAG_ANTI_GHOSTING = 1;
+const uint FLAG_SUBPIXEL = 2;
+const uint FLAG_DILATE_MOTION = 4;
+const uint FLAG_CAMERA_RESET = 8;
+
+// ============================================================================
+// UNIFORMS
+// ============================================================================
+
+layout(std140, set = 0, binding = 0) uniform TSRData {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    mat4 viewProjMatrix;
+    mat4 invViewProjMatrix;
+    mat4 prevViewProjMatrix;
+    
+    vec4 jitterOffset;      // xy = current, zw = previous
+    vec4 screenParams;      // xy = render size, zw = 1/size
+    vec4 outputParams;      // xy = output size, zw = 1/size
+    
+    float upscaleRatio;
+    float historyBlend;
+    float sharpening;
+    uint frameIndex;
+    
+    uint flags;
+    float time;
+    float deltaTime;
+    float pad;
+} tsr;
+
+layout(set = 0, binding = 1) uniform sampler2D colorInput;
+layout(set = 0, binding = 2) uniform sampler2D depthInput;
+layout(set = 0, binding = 3) uniform sampler2D motionInput;
+layout(set = 0, binding = 4) uniform sampler2D historyInput;
+layout(set = 0, binding = 5, rgba16f) uniform image2D reprojectedOutput;
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+vec3 RGB_to_YCoCg(vec3 rgb) {
+    float Y  = dot(rgb, vec3(0.25, 0.5, 0.25));
+    float Co = dot(rgb, vec3(0.5, 0.0, -0.5));
+    float Cg = dot(rgb, vec3(-0.25, 0.5, -0.25));
+    return vec3(Y, Co, Cg);
+}
+
+vec3 YCoCg_to_RGB(vec3 ycocg) {
+    float Y = ycocg.x;
+    float Co = ycocg.y;
+    float Cg = ycocg.z;
+    float r = Y + Co - Cg;
+    float g = Y + Cg;
+    float b = Y - Co - Cg;
+    return vec3(r, g, b);
+}
+
+// Tonemap for accumulation (reversible)
+vec3 tonemap(vec3 color) {
+    return color / (1.0 + max(max(color.r, color.g), color.b));
+}
+
+vec3 inverseTonemap(vec3 color) {
+    return color / max(1.0 - max(max(color.r, color.g), color.b), 0.001);
+}
+
+// Clip color to AABB in YCoCg space
+vec3 clipAABB(vec3 aabbMin, vec3 aabbMax, vec3 color) {
+    vec3 center = (aabbMin + aabbMax) * 0.5;
+    vec3 extents = (aabbMax - aabbMin) * 0.5;
+    
+    vec3 offset = color - center;
+    vec3 absOffset = abs(offset);
+    
+    vec3 scale = extents / max(absOffset, vec3(0.0001));
+    float minScale = min(min(scale.x, scale.y), scale.z);
+    
+    if (minScale < 1.0) {
+        return center + offset * minScale;
+    }
+    return color;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    ivec2 outputCoord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 outputSize = tsr.outputParams.xy;
+    
+    if (outputCoord.x >= int(outputSize.x) || outputCoord.y >= int(outputSize.y)) {
+        return;
+    }
+    
+    // Output UV
+    vec2 outputUV = (vec2(outputCoord) + 0.5) / outputSize;
+    
+    // Input (render resolution) UV
+    vec2 inputSize = tsr.screenParams.xy;
+    vec2 inputUV = outputUV; // Same due to bilinear sampling
+    
+    // Remove jitter for motion vector lookup
+    vec2 unjitteredUV = inputUV - tsr.jitterOffset.xy / inputSize;
+    
+    // Sample motion vector
+    vec2 motion = texture(motionInput, unjitteredUV).xy;
+    
+    // Reproject to previous frame
+    vec2 historyUV = outputUV - motion;
+    
+    // Check if reprojected UV is valid
+    bool validReproject = historyUV.x >= 0.0 && historyUV.x <= 1.0 &&
+                          historyUV.y >= 0.0 && historyUV.y <= 1.0;
+    
+    // Sample current color (with jitter)
+    vec3 currentColor = texture(colorInput, inputUV).rgb;
+    currentColor = tonemap(currentColor);
+    
+    // Sample history
+    vec3 historyColor = vec3(0.0);
+    if (validReproject && (tsr.flags & FLAG_CAMERA_RESET) == 0) {
+        historyColor = texture(historyInput, historyUV).rgb;
+    } else {
+        historyColor = currentColor;
+    }
+    
+    // Anti-ghosting: neighborhood clamping
+    if ((tsr.flags & FLAG_ANTI_GHOSTING) != 0 && validReproject) {
+        // Sample 3x3 neighborhood
+        vec3 neighborMin = vec3(1e10);
+        vec3 neighborMax = vec3(-1e10);
+        vec3 neighborSum = vec3(0.0);
+        
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                vec2 sampleUV = inputUV + vec2(x, y) / inputSize;
+                vec3 sample_rgb = tonemap(texture(colorInput, sampleUV).rgb);
+                vec3 sample_ycocg = RGB_to_YCoCg(sample_rgb);
+                
+                neighborMin = min(neighborMin, sample_ycocg);
+                neighborMax = max(neighborMax, sample_ycocg);
+                neighborSum += sample_rgb;
+            }
+        }
+        
+        // Expand bounds slightly for stability
+        vec3 center = (neighborMin + neighborMax) * 0.5;
+        neighborMin = center + (neighborMin - center) * 1.25;
+        neighborMax = center + (neighborMax - center) * 1.25;
+        
+        // Clip history to neighborhood bounds
+        vec3 historyYCoCg = RGB_to_YCoCg(historyColor);
+        historyYCoCg = clipAABB(neighborMin, neighborMax, historyYCoCg);
+        historyColor = YCoCg_to_RGB(historyYCoCg);
+    }
+    
+    // Velocity-based blend weight adjustment
+    float motionLength = length(motion * outputSize);
+    float velocityWeight = clamp(1.0 - motionLength * 0.1, 0.5, 1.0);
+    
+    // Final blend
+    float blend = tsr.historyBlend * velocityWeight;
+    if (!validReproject || (tsr.flags & FLAG_CAMERA_RESET) != 0) {
+        blend = 0.0;
+    }
+    
+    vec3 result = mix(currentColor, historyColor, blend);
+    result = inverseTonemap(result);
+    
+    imageStore(reprojectedOutput, outputCoord, vec4(result, 1.0));
+}

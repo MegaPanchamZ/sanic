@@ -1,0 +1,77 @@
+/**
+ * tsr_dilate_motion.comp
+ * 
+ * Motion vector dilation pass.
+ * Dilates motion vectors to handle disocclusion at object edges.
+ * Uses depth-aware dilation to prefer foreground motion.
+ */
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 0) uniform TSRData {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    mat4 viewProjMatrix;
+    mat4 invViewProjMatrix;
+    mat4 prevViewProjMatrix;
+    
+    vec4 jitterOffset;
+    vec4 screenParams;
+    vec4 outputParams;
+    
+    float upscaleRatio;
+    float historyBlend;
+    float sharpening;
+    uint frameIndex;
+    
+    uint flags;
+    float time;
+    float deltaTime;
+    float pad;
+} tsr;
+
+layout(set = 0, binding = 2) uniform sampler2D depthInput;
+layout(set = 0, binding = 3) uniform sampler2D motionInput;
+layout(rgba16f, set = 0, binding = 5) uniform image2D dilatedMotionOutput;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    vec2 size = tsr.screenParams.xy;
+    
+    if (coord.x >= int(size.x) || coord.y >= int(size.y)) {
+        return;
+    }
+    
+    vec2 uv = (vec2(coord) + 0.5) / size;
+    vec2 texelSize = 1.0 / size;
+    
+    // Find the closest (foreground) depth in a 3x3 neighborhood
+    float closestDepth = 0.0; // Reverse-Z: 0 is far, 1 is near
+    vec2 closestMotion = vec2(0.0);
+    ivec2 closestOffset = ivec2(0);
+    
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec2 sampleUV = uv + vec2(x, y) * texelSize;
+            
+            if (sampleUV.x < 0.0 || sampleUV.x > 1.0 ||
+                sampleUV.y < 0.0 || sampleUV.y > 1.0) {
+                continue;
+            }
+            
+            float depth = texture(depthInput, sampleUV).r;
+            
+            // Reverse-Z: higher value = closer
+            if (depth > closestDepth) {
+                closestDepth = depth;
+                closestMotion = texture(motionInput, sampleUV).xy;
+                closestOffset = ivec2(x, y);
+            }
+        }
+    }
+    
+    // Store dilated motion vector
+    imageStore(dilatedMotionOutput, coord, vec4(closestMotion, 0.0, 1.0));
+}

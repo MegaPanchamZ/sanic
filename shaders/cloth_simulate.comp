@@ -1,0 +1,369 @@
+/**
+ * cloth_simulate.comp
+ * 
+ * GPU Cloth Simulation using Verlet Integration
+ * 
+ * Features:
+ * - Position-based dynamics
+ * - Distance constraints
+ * - Bending constraints
+ * - Self-collision
+ * - Wind/gravity forces
+ * - Fixed point anchors
+ */
+
+#version 450
+
+layout(local_size_x = 64) in;
+
+// ============================================================================
+// STRUCTURES
+// ============================================================================
+
+struct Particle {
+    vec4 position;      // xyz = position, w = inverse mass (0 = pinned)
+    vec4 prevPosition;  // xyz = previous position, w = unused
+    vec4 velocity;      // xyz = velocity, w = unused
+    vec4 normal;        // xyz = normal, w = unused
+};
+
+struct Constraint {
+    uint particleA;
+    uint particleB;
+    float restLength;
+    float stiffness;
+};
+
+struct CollisionSphere {
+    vec4 positionRadius; // xyz = position, w = radius
+};
+
+struct CollisionCapsule {
+    vec4 pointA;         // xyz = point A, w = radius
+    vec4 pointB;         // xyz = point B, w = unused
+};
+
+// ============================================================================
+// UNIFORMS
+// ============================================================================
+
+layout(set = 0, binding = 0) uniform SimulationParams {
+    vec4 gravity;           // xyz = gravity vector, w = deltaTime
+    vec4 wind;              // xyz = wind direction, w = wind strength
+    float damping;
+    float friction;
+    float selfCollisionRadius;
+    uint numParticles;
+    uint numConstraints;
+    uint numCollisionSpheres;
+    uint numCollisionCapsules;
+    uint iteration;         // Current constraint iteration
+    uint totalIterations;   // Total iterations per frame
+    float bendingStiffness;
+    float stretchStiffness;
+    float compressionLimit;
+} params;
+
+// ============================================================================
+// BUFFERS
+// ============================================================================
+
+layout(set = 0, binding = 1) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+layout(set = 0, binding = 2) buffer ConstraintBuffer {
+    Constraint constraints[];
+};
+
+layout(set = 0, binding = 3) buffer CollisionSpheresBuffer {
+    CollisionSphere collisionSpheres[];
+};
+
+layout(set = 0, binding = 4) buffer CollisionCapsulesBuffer {
+    CollisionCapsule collisionCapsules[];
+};
+
+// Grid for spatial hashing (self-collision)
+layout(set = 0, binding = 5) buffer GridCells {
+    uint cellStart[];
+};
+
+layout(set = 0, binding = 6) buffer GridParticles {
+    uint particleIndices[];
+};
+
+// Push constants for per-dispatch parameters
+layout(push_constant) uniform PushConstants {
+    uint phase; // 0 = integrate, 1 = constraints, 2 = collision, 3 = normals
+} pushConsts;
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Compute grid cell index for spatial hashing
+ */
+uint getCellIndex(vec3 position, float cellSize) {
+    ivec3 cell = ivec3(floor(position / cellSize));
+    // Simple hash
+    return uint(cell.x * 73856093 ^ cell.y * 19349663 ^ cell.z * 83492791) % 65536;
+}
+
+/**
+ * Apply distance constraint between two particles
+ */
+void solveDistanceConstraint(uint idxA, uint idxB, float restLength, float stiffness) {
+    vec3 posA = particles[idxA].position.xyz;
+    vec3 posB = particles[idxB].position.xyz;
+    float invMassA = particles[idxA].position.w;
+    float invMassB = particles[idxB].position.w;
+    
+    vec3 delta = posB - posA;
+    float dist = length(delta);
+    
+    if (dist < 0.0001) return;
+    
+    float diff = (dist - restLength) / dist;
+    
+    // Limit compression
+    if (diff < -params.compressionLimit) {
+        diff = -params.compressionLimit;
+    }
+    
+    float totalMass = invMassA + invMassB;
+    if (totalMass < 0.0001) return;
+    
+    vec3 correction = delta * diff * stiffness;
+    
+    particles[idxA].position.xyz += correction * (invMassA / totalMass);
+    particles[idxB].position.xyz -= correction * (invMassB / totalMass);
+}
+
+/**
+ * Collision with sphere
+ */
+void collideSphere(uint idx, vec3 spherePos, float radius) {
+    vec3 pos = particles[idx].position.xyz;
+    float invMass = particles[idx].position.w;
+    
+    if (invMass < 0.0001) return; // Pinned
+    
+    vec3 delta = pos - spherePos;
+    float dist = length(delta);
+    
+    if (dist < radius) {
+        vec3 normal = delta / max(dist, 0.0001);
+        float penetration = radius - dist;
+        particles[idx].position.xyz += normal * penetration;
+        
+        // Friction
+        vec3 vel = particles[idx].velocity.xyz;
+        vec3 velNormal = dot(vel, normal) * normal;
+        vec3 velTangent = vel - velNormal;
+        particles[idx].velocity.xyz = velTangent * (1.0 - params.friction) - velNormal * 0.1;
+    }
+}
+
+/**
+ * Collision with capsule
+ */
+void collideCapsule(uint idx, vec3 pointA, vec3 pointB, float radius) {
+    vec3 pos = particles[idx].position.xyz;
+    float invMass = particles[idx].position.w;
+    
+    if (invMass < 0.0001) return;
+    
+    vec3 ab = pointB - pointA;
+    float t = clamp(dot(pos - pointA, ab) / dot(ab, ab), 0.0, 1.0);
+    vec3 closest = pointA + t * ab;
+    
+    vec3 delta = pos - closest;
+    float dist = length(delta);
+    
+    if (dist < radius) {
+        vec3 normal = delta / max(dist, 0.0001);
+        float penetration = radius - dist;
+        particles[idx].position.xyz += normal * penetration;
+        
+        // Friction
+        vec3 vel = particles[idx].velocity.xyz;
+        vec3 velNormal = dot(vel, normal) * normal;
+        vec3 velTangent = vel - velNormal;
+        particles[idx].velocity.xyz = velTangent * (1.0 - params.friction) - velNormal * 0.1;
+    }
+}
+
+/**
+ * Self-collision between two particles
+ */
+void selfCollide(uint idxA, uint idxB) {
+    if (idxA == idxB) return;
+    
+    vec3 posA = particles[idxA].position.xyz;
+    vec3 posB = particles[idxB].position.xyz;
+    float invMassA = particles[idxA].position.w;
+    float invMassB = particles[idxB].position.w;
+    
+    float totalMass = invMassA + invMassB;
+    if (totalMass < 0.0001) return;
+    
+    vec3 delta = posB - posA;
+    float dist = length(delta);
+    float minDist = params.selfCollisionRadius * 2.0;
+    
+    if (dist < minDist && dist > 0.0001) {
+        vec3 normal = delta / dist;
+        float penetration = minDist - dist;
+        
+        particles[idxA].position.xyz -= normal * penetration * (invMassA / totalMass) * 0.5;
+        particles[idxB].position.xyz += normal * penetration * (invMassB / totalMass) * 0.5;
+    }
+}
+
+// ============================================================================
+// MAIN PHASES
+// ============================================================================
+
+/**
+ * Phase 0: Integrate forces (gravity, wind, damping)
+ */
+void integrateForces() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.numParticles) return;
+    
+    float invMass = particles[idx].position.w;
+    if (invMass < 0.0001) return; // Pinned particle
+    
+    float dt = params.gravity.w;
+    vec3 pos = particles[idx].position.xyz;
+    vec3 prevPos = particles[idx].prevPosition.xyz;
+    
+    // Verlet integration
+    vec3 velocity = (pos - prevPos) * params.damping;
+    
+    // External forces
+    vec3 acceleration = params.gravity.xyz;
+    
+    // Wind force (simple model)
+    vec3 normal = particles[idx].normal.xyz;
+    float windFactor = max(0.0, dot(normal, params.wind.xyz));
+    acceleration += params.wind.xyz * params.wind.w * windFactor * invMass;
+    
+    // Store previous position
+    particles[idx].prevPosition.xyz = pos;
+    
+    // Update position
+    vec3 newPos = pos + velocity + acceleration * dt * dt;
+    particles[idx].position.xyz = newPos;
+    
+    // Update velocity for collision response
+    particles[idx].velocity.xyz = (newPos - pos) / dt;
+}
+
+/**
+ * Phase 1: Solve constraints (distance + bending)
+ */
+void solveConstraints() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.numConstraints) return;
+    
+    Constraint c = constraints[idx];
+    solveDistanceConstraint(c.particleA, c.particleB, c.restLength, c.stiffness);
+}
+
+/**
+ * Phase 2: Handle collisions
+ */
+void handleCollisions() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.numParticles) return;
+    
+    // Collision with spheres
+    for (uint i = 0; i < params.numCollisionSpheres; ++i) {
+        collideSphere(idx, 
+                      collisionSpheres[i].positionRadius.xyz,
+                      collisionSpheres[i].positionRadius.w);
+    }
+    
+    // Collision with capsules
+    for (uint i = 0; i < params.numCollisionCapsules; ++i) {
+        collideCapsule(idx,
+                       collisionCapsules[i].pointA.xyz,
+                       collisionCapsules[i].pointB.xyz,
+                       collisionCapsules[i].pointA.w);
+    }
+    
+    // Self-collision using spatial hash
+    if (params.selfCollisionRadius > 0.0) {
+        float cellSize = params.selfCollisionRadius * 4.0;
+        vec3 pos = particles[idx].position.xyz;
+        
+        // Check neighboring cells
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    vec3 offset = vec3(dx, dy, dz) * cellSize;
+                    uint cellIdx = getCellIndex(pos + offset, cellSize);
+                    
+                    uint start = cellStart[cellIdx];
+                    uint end = cellStart[cellIdx + 1];
+                    
+                    for (uint i = start; i < end; ++i) {
+                        uint otherIdx = particleIndices[i];
+                        selfCollide(idx, otherIdx);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Ground plane collision (y = 0)
+    if (particles[idx].position.y < 0.01) {
+        particles[idx].position.y = 0.01;
+        particles[idx].velocity.y = 0.0;
+        particles[idx].velocity.xz *= (1.0 - params.friction);
+    }
+}
+
+/**
+ * Phase 3: Compute normals
+ */
+void computeNormals() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.numParticles) return;
+    
+    // Simple normal computation from neighbors
+    // In practice, would use triangle adjacency
+    vec3 normal = vec3(0.0, 1.0, 0.0);
+    
+    // Use velocity direction as approximation for now
+    vec3 vel = particles[idx].velocity.xyz;
+    if (length(vel) > 0.0001) {
+        normal = normalize(vel);
+    }
+    
+    particles[idx].normal = vec4(normal, 0.0);
+}
+
+// ============================================================================
+// ENTRY POINT
+// ============================================================================
+
+void main() {
+    switch (pushConsts.phase) {
+        case 0:
+            integrateForces();
+            break;
+        case 1:
+            solveConstraints();
+            break;
+        case 2:
+            handleCollisions();
+            break;
+        case 3:
+            computeNormals();
+            break;
+    }
+}

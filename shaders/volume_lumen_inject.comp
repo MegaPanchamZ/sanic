@@ -1,0 +1,117 @@
+/**
+ * volume_lumen_inject.comp
+ * 
+ * Injects heterogeneous volume emission into Lumen's radiance cache.
+ * Allows volumes to contribute to global illumination.
+ */
+
+#version 450
+#extension GL_EXT_scalar_block_layout : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ============================================================================
+// STRUCTURES
+// ============================================================================
+
+struct RadianceCacheProbe {
+    vec4 position;      // xyz = world position, w = radius
+    vec4 radiance[6];   // SH coefficients for 6 directions
+};
+
+struct HeterogeneousVolume {
+    mat4 worldMatrix;
+    mat4 invWorldMatrix;
+    
+    vec4 boundsMin;
+    vec4 boundsMax;
+    
+    vec4 scatteringAbsorption;
+    vec4 absorptionEmission;
+    vec4 emissionPhase;
+    
+    uvec4 resolutionBrickCount;
+    uvec4 atlasParams;
+};
+
+layout(std140, set = 0, binding = 0) uniform InjectUniforms {
+    uint volumeCount;
+    uint probeCount;
+    float injectionScale;
+    uint frameIndex;
+};
+
+layout(scalar, set = 0, binding = 1) readonly buffer VolumeBuffer {
+    HeterogeneousVolume volumes[];
+};
+
+layout(scalar, set = 0, binding = 2) buffer RadianceCacheBuffer {
+    RadianceCacheProbe probes[];
+};
+
+layout(set = 0, binding = 3) uniform sampler3D volumeAtlas;
+
+// ============================================================================
+// VOLUME SAMPLING
+// ============================================================================
+
+bool isInsideVolume(uint volIdx, vec3 worldPos) {
+    HeterogeneousVolume vol = volumes[volIdx];
+    vec3 localPos = (vol.invWorldMatrix * vec4(worldPos, 1.0)).xyz;
+    
+    return all(greaterThanEqual(localPos, vol.boundsMin.xyz)) &&
+           all(lessThanEqual(localPos, vol.boundsMax.xyz));
+}
+
+vec3 sampleVolumeEmission(uint volIdx, vec3 worldPos) {
+    HeterogeneousVolume vol = volumes[volIdx];
+    vec3 localPos = (vol.invWorldMatrix * vec4(worldPos, 1.0)).xyz;
+    
+    vec3 uvw = (localPos - vol.boundsMin.xyz) / (vol.boundsMax.xyz - vol.boundsMin.xyz);
+    
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
+        return vec3(0.0);
+    }
+    
+    float density = texture(volumeAtlas, uvw).r;
+    density *= vol.boundsMin.w; // densityScale
+    
+    vec3 emission = vec3(vol.absorptionEmission.ba, vol.emissionPhase.r);
+    
+    return emission * density;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    uint probeIdx = gl_GlobalInvocationID.x;
+    
+    if (probeIdx >= probeCount) {
+        return;
+    }
+    
+    RadianceCacheProbe probe = probes[probeIdx];
+    vec3 probePos = probe.position.xyz;
+    float probeRadius = probe.position.w;
+    
+    // Accumulate emission from all volumes at this probe
+    vec3 totalEmission = vec3(0.0);
+    
+    for (uint volIdx = 0; volIdx < volumeCount; volIdx++) {
+        if (isInsideVolume(volIdx, probePos)) {
+            totalEmission += sampleVolumeEmission(volIdx, probePos);
+        }
+    }
+    
+    // Inject into probe radiance (simplified - adds to all directions)
+    totalEmission *= injectionScale;
+    
+    if (length(totalEmission) > 0.001) {
+        // Add emission to all SH directions (simplified isotropic injection)
+        for (int i = 0; i < 6; i++) {
+            probes[probeIdx].radiance[i].rgb += totalEmission * (1.0 / 6.0);
+        }
+    }
+}

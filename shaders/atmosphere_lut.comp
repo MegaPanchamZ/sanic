@@ -1,0 +1,337 @@
+/**
+ * atmosphere_lut.comp
+ * 
+ * Precomputes atmosphere LUTs for physically-based sky rendering.
+ * Based on Bruneton's atmosphere model used in UE5.
+ * 
+ * Generates:
+ * - Transmittance LUT (optical depth)
+ * - Multi-scattering LUT
+ * - Sky-View LUT
+ */
+
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Output LUTs
+layout(set = 0, binding = 0, rgba16f) writeonly uniform image2D transmittanceLUT;
+layout(set = 0, binding = 1, rgba16f) writeonly uniform image3D scatteringLUT;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D multiScatteringLUT;
+
+// Atmosphere parameters
+layout(set = 0, binding = 3) uniform AtmosphereParams {
+    vec3 rayleighScattering;        // Rayleigh scattering coefficients
+    float rayleighScaleHeight;      // Rayleigh scale height (km)
+    
+    vec3 mieScattering;             // Mie scattering coefficients
+    float mieScaleHeight;           // Mie scale height (km)
+    
+    vec3 mieAbsorption;             // Mie absorption
+    float mieAnisotropy;            // Mie phase function anisotropy (g)
+    
+    vec3 ozoneAbsorption;           // Ozone absorption coefficients
+    float ozoneLayerHeight;         // Ozone layer center height (km)
+    float ozoneLayerWidth;          // Ozone layer width (km)
+    
+    float earthRadius;              // Earth radius (km)
+    float atmosphereHeight;         // Atmosphere height (km)
+    float sunAngularRadius;         // Sun angular radius (radians)
+    
+    vec3 groundAlbedo;              // Average ground albedo
+    float padding;
+} atmo;
+
+// Push constants for LUT generation mode
+layout(push_constant) uniform PushConstants {
+    uint mode;  // 0: transmittance, 1: scattering, 2: multi-scattering
+    uint slice; // For 3D LUTs
+} pc;
+
+const float PI = 3.14159265359;
+const int TRANSMITTANCE_SAMPLES = 40;
+const int SCATTERING_SAMPLES = 32;
+const int MULTI_SCATTER_SAMPLES = 64;
+
+// Get density at height for Rayleigh
+float rayleighDensity(float altitude) {
+    return exp(-altitude / atmo.rayleighScaleHeight);
+}
+
+// Get density at height for Mie
+float mieDensity(float altitude) {
+    return exp(-altitude / atmo.mieScaleHeight);
+}
+
+// Get density at height for Ozone
+float ozoneDensity(float altitude) {
+    float diff = abs(altitude - atmo.ozoneLayerHeight);
+    return max(0.0, 1.0 - diff / atmo.ozoneLayerWidth);
+}
+
+// Ray-sphere intersection (returns distance to intersection, -1 if no hit)
+float raySphereIntersect(vec3 origin, vec3 dir, float radius) {
+    float a = dot(dir, dir);
+    float b = 2.0 * dot(origin, dir);
+    float c = dot(origin, origin) - radius * radius;
+    float discriminant = b * b - 4.0 * a * c;
+    
+    if (discriminant < 0.0) {
+        return -1.0;
+    }
+    
+    return (-b + sqrt(discriminant)) / (2.0 * a);
+}
+
+// Compute optical depth along a ray
+vec3 computeOpticalDepth(vec3 rayOrigin, vec3 rayDir, float rayLength) {
+    vec3 opticalDepth = vec3(0.0);
+    float stepSize = rayLength / float(TRANSMITTANCE_SAMPLES);
+    
+    for (int i = 0; i < TRANSMITTANCE_SAMPLES; i++) {
+        float t = (float(i) + 0.5) * stepSize;
+        vec3 pos = rayOrigin + rayDir * t;
+        float altitude = length(pos) - atmo.earthRadius;
+        
+        // Accumulate extinction
+        float rayleighDens = rayleighDensity(altitude);
+        float mieDens = mieDensity(altitude);
+        float ozoneDens = ozoneDensity(altitude);
+        
+        vec3 extinction = atmo.rayleighScattering * rayleighDens
+                        + (atmo.mieScattering + atmo.mieAbsorption) * mieDens
+                        + atmo.ozoneAbsorption * ozoneDens;
+        
+        opticalDepth += extinction * stepSize;
+    }
+    
+    return opticalDepth;
+}
+
+// Compute transmittance along a ray
+vec3 computeTransmittance(vec3 rayOrigin, vec3 rayDir, float rayLength) {
+    vec3 opticalDepth = computeOpticalDepth(rayOrigin, rayDir, rayLength);
+    return exp(-opticalDepth);
+}
+
+// Rayleigh phase function
+float rayleighPhase(float cosTheta) {
+    return 3.0 / (16.0 * PI) * (1.0 + cosTheta * cosTheta);
+}
+
+// Mie phase function (Henyey-Greenstein)
+float miePhase(float cosTheta, float g) {
+    float g2 = g * g;
+    float num = (1.0 - g2);
+    float denom = 4.0 * PI * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5);
+    return num / denom;
+}
+
+// Generate transmittance LUT
+// UV parameterization: x = cos(zenith), y = altitude
+void generateTransmittanceLUT(ivec2 coord, ivec2 size) {
+    vec2 uv = (vec2(coord) + 0.5) / vec2(size);
+    
+    // Remap UV to physical parameters
+    float altitude = uv.y * atmo.atmosphereHeight;
+    
+    // Cosine zenith angle uses non-linear mapping for better precision near horizon
+    float mu = uv.x * 2.0 - 1.0;
+    float cosZenith = sign(mu) * sqrt(abs(mu));
+    
+    // Ray origin at altitude
+    vec3 rayOrigin = vec3(0.0, atmo.earthRadius + altitude, 0.0);
+    
+    // Ray direction from zenith angle
+    float sinZenith = sqrt(max(0.0, 1.0 - cosZenith * cosZenith));
+    vec3 rayDir = vec3(sinZenith, cosZenith, 0.0);
+    
+    // Find intersection with atmosphere top
+    float atmosphereRadius = atmo.earthRadius + atmo.atmosphereHeight;
+    float rayLength = raySphereIntersect(rayOrigin, rayDir, atmosphereRadius);
+    
+    // Check for ground intersection
+    float groundDist = raySphereIntersect(rayOrigin, rayDir, atmo.earthRadius);
+    if (groundDist > 0.0 && groundDist < rayLength) {
+        rayLength = groundDist;
+    }
+    
+    if (rayLength < 0.0) {
+        imageStore(transmittanceLUT, coord, vec4(1.0, 1.0, 1.0, 1.0));
+        return;
+    }
+    
+    vec3 transmittance = computeTransmittance(rayOrigin, rayDir, rayLength);
+    imageStore(transmittanceLUT, coord, vec4(transmittance, 1.0));
+}
+
+// Sample transmittance LUT
+vec3 sampleTransmittanceLUT(sampler2D lut, float altitude, float cosZenith) {
+    float u = (sign(cosZenith) * sqrt(abs(cosZenith)) + 1.0) * 0.5;
+    float v = altitude / atmo.atmosphereHeight;
+    return texture(lut, vec2(u, v)).rgb;
+}
+
+// Generate single scattering (integrated into 3D LUT)
+// Parameterization: XY = view direction, Z = sun-zenith
+void generateScatteringLUT(ivec3 coord, ivec3 size) {
+    vec3 uvw = (vec3(coord) + 0.5) / vec3(size);
+    
+    // Sun zenith angle
+    float cosSunZenith = uvw.z * 2.0 - 1.0;
+    vec3 sunDir = vec3(sqrt(max(0.0, 1.0 - cosSunZenith * cosSunZenith)), cosSunZenith, 0.0);
+    
+    // View direction (spherical coordinates)
+    float viewZenith = uvw.x * PI;
+    float viewAzimuth = uvw.y * 2.0 * PI;
+    
+    vec3 viewDir;
+    viewDir.x = sin(viewZenith) * cos(viewAzimuth);
+    viewDir.y = cos(viewZenith);
+    viewDir.z = sin(viewZenith) * sin(viewAzimuth);
+    
+    // Fixed altitude for this example (could be another dimension)
+    float altitude = 0.0;  // Sea level
+    vec3 rayOrigin = vec3(0.0, atmo.earthRadius + altitude, 0.0);
+    
+    // Integrate scattering along view ray
+    float atmosphereRadius = atmo.earthRadius + atmo.atmosphereHeight;
+    float rayLength = raySphereIntersect(rayOrigin, viewDir, atmosphereRadius);
+    
+    if (rayLength < 0.0) {
+        imageStore(scatteringLUT, coord, vec4(0.0));
+        return;
+    }
+    
+    // Check ground intersection
+    float groundDist = raySphereIntersect(rayOrigin, viewDir, atmo.earthRadius);
+    if (groundDist > 0.0 && groundDist < rayLength) {
+        rayLength = groundDist;
+    }
+    
+    float cosViewSun = dot(viewDir, sunDir);
+    float stepSize = rayLength / float(SCATTERING_SAMPLES);
+    
+    vec3 rayleighScatter = vec3(0.0);
+    vec3 mieScatter = vec3(0.0);
+    vec3 transmittance = vec3(1.0);
+    
+    for (int i = 0; i < SCATTERING_SAMPLES; i++) {
+        float t = (float(i) + 0.5) * stepSize;
+        vec3 pos = rayOrigin + viewDir * t;
+        float posAltitude = length(pos) - atmo.earthRadius;
+        
+        // Density at this point
+        float rayleighDens = rayleighDensity(posAltitude);
+        float mieDens = mieDensity(posAltitude);
+        
+        // Extinction at this segment
+        vec3 extinction = atmo.rayleighScattering * rayleighDens
+                        + (atmo.mieScattering + atmo.mieAbsorption) * mieDens;
+        vec3 segmentTransmittance = exp(-extinction * stepSize);
+        
+        // Transmittance toward sun
+        vec3 posNorm = normalize(pos);
+        float sunCos = dot(posNorm, sunDir);
+        float sunRayLength = raySphereIntersect(pos, sunDir, atmosphereRadius);
+        
+        // Skip if sun is below horizon at this point
+        if (raySphereIntersect(pos, sunDir, atmo.earthRadius) > 0.0) {
+            transmittance *= segmentTransmittance;
+            continue;
+        }
+        
+        vec3 sunTransmittance = computeTransmittance(pos, sunDir, sunRayLength);
+        
+        // Scattering contribution
+        vec3 rayleighContrib = atmo.rayleighScattering * rayleighDens * rayleighPhase(cosViewSun);
+        vec3 mieContrib = atmo.mieScattering * mieDens * miePhase(cosViewSun, atmo.mieAnisotropy);
+        
+        vec3 scatter = (rayleighContrib + mieContrib) * sunTransmittance * transmittance * stepSize;
+        
+        rayleighScatter += scatter;
+        transmittance *= segmentTransmittance;
+    }
+    
+    // Combine Rayleigh and Mie
+    vec3 totalScatter = rayleighScatter + mieScatter;
+    imageStore(scatteringLUT, coord, vec4(totalScatter, 1.0));
+}
+
+// Generate multi-scattering LUT (second+ order scattering)
+void generateMultiScatteringLUT(ivec2 coord, ivec2 size) {
+    vec2 uv = (vec2(coord) + 0.5) / vec2(size);
+    
+    float altitude = uv.y * atmo.atmosphereHeight;
+    float cosSunZenith = uv.x * 2.0 - 1.0;
+    
+    vec3 rayOrigin = vec3(0.0, atmo.earthRadius + altitude, 0.0);
+    vec3 sunDir = vec3(sqrt(max(0.0, 1.0 - cosSunZenith * cosSunZenith)), cosSunZenith, 0.0);
+    
+    // Integrate over all directions (spherical integral)
+    vec3 multiScatter = vec3(0.0);
+    
+    float atmosphereRadius = atmo.earthRadius + atmo.atmosphereHeight;
+    
+    for (int i = 0; i < MULTI_SCATTER_SAMPLES; i++) {
+        // Uniform sphere sampling
+        float u = (float(i) + 0.5) / float(MULTI_SCATTER_SAMPLES);
+        float v = (float(i % 8) + 0.5) / 8.0;
+        
+        float theta = acos(1.0 - 2.0 * u);
+        float phi = 2.0 * PI * v;
+        
+        vec3 dir;
+        dir.x = sin(theta) * cos(phi);
+        dir.y = cos(theta);
+        dir.z = sin(theta) * sin(phi);
+        
+        float rayLength = raySphereIntersect(rayOrigin, dir, atmosphereRadius);
+        if (rayLength < 0.0) continue;
+        
+        // Ground intersection
+        float groundDist = raySphereIntersect(rayOrigin, dir, atmo.earthRadius);
+        if (groundDist > 0.0 && groundDist < rayLength) {
+            // Add ground reflection contribution
+            vec3 groundPos = rayOrigin + dir * groundDist;
+            vec3 groundNormal = normalize(groundPos);
+            float groundNdotL = max(0.0, dot(groundNormal, sunDir));
+            
+            // Ground contribution
+            multiScatter += atmo.groundAlbedo * groundNdotL / PI;
+            rayLength = groundDist;
+        }
+        
+        // Integrate scattering along ray
+        // (Simplified - full implementation would recursively use lower-order LUT)
+    }
+    
+    multiScatter /= float(MULTI_SCATTER_SAMPLES);
+    imageStore(multiScatteringLUT, coord, vec4(multiScatter, 1.0));
+}
+
+void main() {
+    ivec2 coord2D = ivec2(gl_GlobalInvocationID.xy);
+    ivec3 coord3D = ivec3(gl_GlobalInvocationID.xyz);
+    
+    if (pc.mode == 0) {
+        // Transmittance LUT (256 x 64)
+        ivec2 size = imageSize(transmittanceLUT);
+        if (coord2D.x < size.x && coord2D.y < size.y) {
+            generateTransmittanceLUT(coord2D, size);
+        }
+    } else if (pc.mode == 1) {
+        // Scattering LUT (32 x 32 x 32)
+        ivec3 size = imageSize(scatteringLUT);
+        if (coord3D.x < size.x && coord3D.y < size.y && coord3D.z < size.z) {
+            generateScatteringLUT(coord3D, size);
+        }
+    } else if (pc.mode == 2) {
+        // Multi-scattering LUT (32 x 32)
+        ivec2 size = imageSize(multiScatteringLUT);
+        if (coord2D.x < size.x && coord2D.y < size.y) {
+            generateMultiScatteringLUT(coord2D, size);
+        }
+    }
+}

@@ -1,0 +1,222 @@
+/**
+ * megalights_cluster.comp
+ * 
+ * Light clustering compute shader.
+ * Assigns lights to 3D frustum clusters for efficient lookup.
+ * 
+ * Based on Unreal Engine 5 MegaLights clustering approach.
+ */
+
+#version 460
+#extension GL_EXT_scalar_block_layout : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+
+// ============================================================================
+// STRUCTURES
+// ============================================================================
+
+struct MegaLight {
+    vec4 positionAndType;      // xyz = position, w = type
+    vec4 directionAndRange;    // xyz = direction, w = range
+    vec4 colorAndIntensity;    // xyz = color, w = intensity
+    vec4 spotParams;           // x = innerCos, y = outerCos, z = falloff, w = importance
+};
+
+struct LightCluster {
+    uint offset;    // Offset into light index list
+    uint count;     // Number of lights in this cluster
+};
+
+// ============================================================================
+// BINDINGS
+// ============================================================================
+
+layout(set = 0, binding = 0, scalar) uniform Uniforms {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    mat4 invViewMatrix;
+    mat4 invProjMatrix;
+    mat4 viewProjMatrix;
+    mat4 prevViewProjMatrix;
+    
+    vec4 cameraPosition;
+    vec4 screenParams;     // width, height, 1/width, 1/height
+    
+    ivec4 clusterDims;     // x, y, z, total
+    vec4 depthParams;      // near, far, exponent, time
+    
+    uint lightCount;
+    uint samplesPerPixel;
+    uint frameIndex;
+    uint flags;
+} uniforms;
+
+layout(set = 0, binding = 1, scalar) readonly buffer LightBuffer {
+    MegaLight lights[];
+};
+
+layout(set = 0, binding = 2, scalar) buffer ClusterBuffer {
+    LightCluster clusters[];
+};
+
+layout(set = 0, binding = 3, scalar) buffer LightIndexBuffer {
+    uint lightIndices[];
+};
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const uint MAX_LIGHTS_PER_CLUSTER = 256;
+const float PI = 3.14159265359;
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+// Convert cluster Z to linear depth
+float clusterZToDepth(uint z) {
+    float near = uniforms.depthParams.x;
+    float far = uniforms.depthParams.y;
+    float power = uniforms.depthParams.z;
+    
+    float normalizedZ = float(z) / float(uniforms.clusterDims.z);
+    return near + pow(normalizedZ, power) * (far - near);
+}
+
+// Get cluster AABB in view space
+void getClusterAABB(ivec3 clusterIndex, out vec3 minBounds, out vec3 maxBounds) {
+    float near = uniforms.depthParams.x;
+    float far = uniforms.depthParams.y;
+    
+    // Cluster bounds in NDC
+    vec2 tileSize = 2.0 / vec2(uniforms.clusterDims.xy);
+    vec2 ndcMin = vec2(-1.0) + vec2(clusterIndex.xy) * tileSize;
+    vec2 ndcMax = ndcMin + tileSize;
+    
+    // Depth bounds
+    float zNear = clusterZToDepth(uint(clusterIndex.z));
+    float zFar = clusterZToDepth(uint(clusterIndex.z + 1));
+    
+    // Convert NDC corners to view space at near depth
+    vec4 cornerNearMin = uniforms.invProjMatrix * vec4(ndcMin, 0.0, 1.0);
+    vec4 cornerNearMax = uniforms.invProjMatrix * vec4(ndcMax, 0.0, 1.0);
+    cornerNearMin /= cornerNearMin.w;
+    cornerNearMax /= cornerNearMax.w;
+    
+    // Scale by depth (in view space, Z is negative forward)
+    float scaleNear = zNear / -cornerNearMin.z;
+    float scaleFar = zFar / -cornerNearMin.z;
+    
+    minBounds = vec3(
+        min(cornerNearMin.x * scaleNear, cornerNearMin.x * scaleFar),
+        min(cornerNearMin.y * scaleNear, cornerNearMin.y * scaleFar),
+        -zFar  // View space Z is negative
+    );
+    
+    maxBounds = vec3(
+        max(cornerNearMax.x * scaleNear, cornerNearMax.x * scaleFar),
+        max(cornerNearMax.y * scaleNear, cornerNearMax.y * scaleFar),
+        -zNear
+    );
+}
+
+// Sphere-AABB intersection test
+bool sphereIntersectsAABB(vec3 sphereCenter, float sphereRadius, vec3 aabbMin, vec3 aabbMax) {
+    vec3 closestPoint = clamp(sphereCenter, aabbMin, aabbMax);
+    float distSq = dot(sphereCenter - closestPoint, sphereCenter - closestPoint);
+    return distSq <= sphereRadius * sphereRadius;
+}
+
+// Check if spotlight cone potentially intersects AABB
+bool spotlightIntersectsAABB(vec3 lightPos, vec3 lightDir, float range, float outerCos,
+                              vec3 aabbMin, vec3 aabbMax) {
+    // First check if sphere intersects
+    if (!sphereIntersectsAABB(lightPos, range, aabbMin, aabbMax)) {
+        return false;
+    }
+    
+    // For spotlights, check if AABB is within the cone
+    // Get AABB center and check angle to light direction
+    vec3 aabbCenter = (aabbMin + aabbMax) * 0.5;
+    vec3 toAABB = normalize(aabbCenter - lightPos);
+    float cosAngle = dot(toAABB, lightDir);
+    
+    // Use conservative test - extend the cone angle by AABB radius
+    float aabbRadius = length(aabbMax - aabbMin) * 0.5;
+    float distance = length(aabbCenter - lightPos);
+    float sinAngle = aabbRadius / max(distance, 0.001);
+    float adjustedCos = outerCos - sinAngle;
+    
+    return cosAngle >= adjustedCos;
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void main() {
+    ivec3 clusterIndex = ivec3(gl_GlobalInvocationID.xyz);
+    
+    // Check bounds
+    if (any(greaterThanEqual(clusterIndex, uniforms.clusterDims.xyz))) {
+        return;
+    }
+    
+    uint clusterIdx = clusterIndex.x + 
+                      clusterIndex.y * uniforms.clusterDims.x + 
+                      clusterIndex.z * uniforms.clusterDims.x * uniforms.clusterDims.y;
+    
+    // Get cluster AABB in view space
+    vec3 clusterMin, clusterMax;
+    getClusterAABB(clusterIndex, clusterMin, clusterMax);
+    
+    // Count lights in this cluster
+    uint localLightCount = 0;
+    uint localLightIndices[MAX_LIGHTS_PER_CLUSTER];
+    
+    for (uint i = 0; i < uniforms.lightCount && localLightCount < MAX_LIGHTS_PER_CLUSTER; ++i) {
+        MegaLight light = lights[i];
+        
+        // Skip disabled lights
+        if (light.spotParams.w < 0.0001) continue;
+        
+        // Transform light to view space
+        vec3 lightPosWorld = light.positionAndType.xyz;
+        vec4 lightPosView = uniforms.viewMatrix * vec4(lightPosWorld, 1.0);
+        vec3 lightPos = lightPosView.xyz;
+        
+        float range = light.directionAndRange.w;
+        uint lightType = uint(light.positionAndType.w);
+        
+        bool intersects = false;
+        
+        if (lightType == 1) { // Spot light
+            vec3 lightDirWorld = light.directionAndRange.xyz;
+            vec3 lightDirView = mat3(uniforms.viewMatrix) * lightDirWorld;
+            float outerCos = light.spotParams.y;
+            
+            intersects = spotlightIntersectsAABB(lightPos, lightDirView, range, outerCos,
+                                                  clusterMin, clusterMax);
+        } else { // Point light (and other types)
+            intersects = sphereIntersectsAABB(lightPos, range, clusterMin, clusterMax);
+        }
+        
+        if (intersects) {
+            localLightIndices[localLightCount] = i;
+            localLightCount++;
+        }
+    }
+    
+    // Write to global light index buffer
+    // Calculate offset - simple atomic approach
+    uint baseOffset = clusterIdx * MAX_LIGHTS_PER_CLUSTER;
+    
+    clusters[clusterIdx].offset = baseOffset;
+    clusters[clusterIdx].count = localLightCount;
+    
+    for (uint i = 0; i < localLightCount; ++i) {
+        lightIndices[baseOffset + i] = localLightIndices[i];
+    }
+}

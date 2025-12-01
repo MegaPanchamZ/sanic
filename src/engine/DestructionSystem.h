@@ -127,8 +127,33 @@ struct DestructibleConfig {
     bool useGPUFracture = true;
 };
 
+// High-speed collision settings for character impact
+struct HighSpeedCollisionSettings {
+    float minVelocityToBreak = 50.0f;       // Minimum velocity (m/s) to trigger break
+    float velocityToForceMultiplier = 20.0f; // Convert velocity to impact force
+    float impactRadius = 2.0f;              // Radius affected by high-speed impact
+    float characterMass = 80.0f;            // Mass for impulse calculation
+    bool applyImpulseToDebris = true;       // Give debris velocity from impact
+    float debrisImpulseMultiplier = 0.1f;   // Scale debris impulse
+};
+
+// Enhanced debris tracking with distance-based despawn
+struct DebrisSettings {
+    float lifetime = 10.0f;                 // Base lifetime in seconds
+    float despawnDistance = 100.0f;         // Distance from player to despawn
+    float lodDistanceNear = 20.0f;          // Full physics simulation distance
+    float lodDistanceMid = 50.0f;           // Reduced simulation distance
+    bool freezeDistantDebris = true;        // Put far debris to sleep
+    uint32_t maxActiveDebris = 256;         // Limit active debris for performance
+    float smallDebrisThreshold = 0.1f;      // Volume below which debris is "small"
+    float smallDebrisLifetimeMultiplier = 0.5f; // Small debris dies faster
+};
+
 // Callback for destruction events
 using DestructionCallback = std::function<void(uint32_t objectId, const std::vector<uint32_t>& newPieceIds)>;
+
+// Callback for high-speed collision events
+using HighSpeedCollisionCallback = std::function<void(uint32_t objectId, const glm::vec3& impactPoint, float impactForce)>;
 
 class DestructionSystem {
 public:
@@ -180,6 +205,29 @@ public:
                      float magnitude);
     
     /**
+     * Apply high-speed character collision damage
+     * Used for Sonic-style destruction where character velocity determines break force
+     * @param objectId Destructible object ID
+     * @param characterPosition Character world position
+     * @param characterVelocity Character velocity vector
+     * @return True if any pieces broke off
+     */
+    bool applyHighSpeedCollision(uint32_t objectId,
+                                  const glm::vec3& characterPosition,
+                                  const glm::vec3& characterVelocity);
+    
+    /**
+     * Check for destructible objects in a sphere and apply high-speed damage
+     * @param center Sphere center (character position)
+     * @param radius Detection radius
+     * @param velocity Character velocity
+     * @return Vector of object IDs that were damaged
+     */
+    std::vector<uint32_t> checkHighSpeedCollisions(const glm::vec3& center,
+                                                     float radius,
+                                                     const glm::vec3& velocity);
+    
+    /**
      * Apply explosion damage
      */
     bool applyExplosion(const glm::vec3& center,
@@ -210,12 +258,47 @@ public:
      */
     void setDestructionCallback(DestructionCallback callback) { callback_ = callback; }
     
+    /**
+     * Set callback for high-speed collision events
+     */
+    void setHighSpeedCollisionCallback(HighSpeedCollisionCallback callback) { highSpeedCallback_ = callback; }
+    
+    /**
+     * Set player/character position for distance-based debris management
+     */
+    void setPlayerPosition(const glm::vec3& position) { playerPosition_ = position; }
+    
+    /**
+     * Configure high-speed collision settings
+     */
+    void setHighSpeedSettings(const HighSpeedCollisionSettings& settings) { highSpeedSettings_ = settings; }
+    const HighSpeedCollisionSettings& getHighSpeedSettings() const { return highSpeedSettings_; }
+    
+    /**
+     * Configure debris tracking settings
+     */
+    void setDebrisSettings(const DebrisSettings& settings) { debrisSettings_ = settings; }
+    const DebrisSettings& getDebrisSettings() const { return debrisSettings_; }
+    
+    /**
+     * Get list of objects near a position (for quick spatial queries)
+     */
+    std::vector<uint32_t> getObjectsInRadius(const glm::vec3& center, float radius) const;
+    
+    /**
+     * Check if an object is still intact (not fully destroyed)
+     */
+    bool isObjectIntact(uint32_t objectId) const;
+    
     // Stats
     struct Stats {
         uint32_t activePieces;
         uint32_t pendingBreaks;
         uint32_t totalFracturedObjects;
         float totalStrainAccumulated;
+        uint32_t activeDebrisCount;
+        uint32_t sleepingDebrisCount;
+        uint32_t highSpeedBreaksThisFrame;
     };
     Stats getStats() const;
     
@@ -303,11 +386,33 @@ private:
         uint32_t objectId;
         uint32_t pieceId;
         float lifetime;
+        float volume;           // For size-based lifetime
+        bool isSleeping;        // Physics frozen for distant debris
+        glm::vec3 lastPosition; // For velocity-based wakeup
     };
     std::vector<Debris> debris_;
     
+    // High-speed collision tracking
+    HighSpeedCollisionSettings highSpeedSettings_;
+    DebrisSettings debrisSettings_;
+    glm::vec3 playerPosition_ = glm::vec3(0.0f);
+    uint32_t highSpeedBreaksThisFrame_ = 0;
+    
+    // Spatial acceleration structure for quick queries
+    struct SpatialCell {
+        std::vector<uint32_t> objectIds;
+    };
+    std::unordered_map<uint64_t, SpatialCell> spatialGrid_;
+    float spatialCellSize_ = 10.0f;
+    
+    // Helpers for spatial grid
+    uint64_t getSpatialKey(const glm::vec3& position) const;
+    void addToSpatialGrid(uint32_t objectId, const glm::vec3& position);
+    void removeFromSpatialGrid(uint32_t objectId, const glm::vec3& position);
+    
     // Callback
     DestructionCallback callback_;
+    HighSpeedCollisionCallback highSpeedCallback_;
     
     bool initialized_ = false;
 };

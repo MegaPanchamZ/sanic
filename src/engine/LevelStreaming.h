@@ -163,6 +163,77 @@ struct StreamingVolume {
 };
 
 /**
+ * Spline point for path-based streaming
+ */
+struct SplinePoint {
+    glm::vec3 position;
+    glm::vec3 tangentIn;            // Incoming tangent (for Bezier/Hermite)
+    glm::vec3 tangentOut;           // Outgoing tangent
+    
+    float streamingDistance = 256.0f;   // Override streaming distance at this point
+    float hlodDistance = 512.0f;
+    float roll = 0.0f;              // Roll angle for camera paths
+    
+    // Custom data at control point
+    std::vector<uint32_t> forceLoadCells;
+    std::vector<uint32_t> forceUnloadCells;
+};
+
+/**
+ * Streaming spline for path-based level streaming
+ * Used for linear paths (roads, rivers, railways)
+ */
+struct StreamingSpline {
+    uint32_t id;
+    std::string name;
+    
+    std::vector<SplinePoint> points;
+    
+    enum class Type {
+        Linear,         // Linear interpolation
+        CatmullRom,     // Catmull-Rom spline
+        Bezier,         // Cubic Bezier
+        Hermite         // Hermite spline
+    };
+    Type type = Type::CatmullRom;
+    
+    // Streaming settings
+    float defaultStreamingDistance = 256.0f;
+    float lookAheadDistance = 512.0f;   // How far ahead to preload
+    float lookAheadTime = 5.0f;         // Seconds of travel to preload
+    
+    // Coverage
+    float width = 50.0f;                // Width of streaming corridor
+    
+    // State
+    bool isEnabled = true;
+    bool isClosed = false;              // Closed loop spline
+    float cachedLength = 0.0f;          // Total spline length
+    
+    // Sampled points for fast queries (generated from control points)
+    std::vector<glm::vec3> sampledPoints;
+    std::vector<float> sampledDistances;    // Distance from start at each sample
+    uint32_t sampleCount = 100;
+};
+
+/**
+ * Spline streaming source (tracks position along a spline)
+ */
+struct SplineStreamingSource {
+    uint32_t id;
+    uint32_t splineId;
+    
+    float position = 0.0f;          // 0-1 parameter along spline
+    float velocity = 0.0f;          // Rate of change of position
+    float distanceAlongSpline = 0.0f;
+    
+    glm::vec3 worldPosition;        // Current world position on spline
+    glm::vec3 direction;            // Forward direction at current position
+    
+    bool isActive = true;
+};
+
+/**
  * Streaming request
  */
 struct StreamingRequest {
@@ -273,6 +344,56 @@ public:
     uint32_t addStreamingVolume(const StreamingVolume& volume);
     
     /**
+     * Add streaming spline for path-based streaming
+     */
+    uint32_t addStreamingSpline(const StreamingSpline& spline);
+    
+    /**
+     * Update streaming spline
+     */
+    void updateStreamingSpline(uint32_t splineId, const std::vector<SplinePoint>& points);
+    
+    /**
+     * Remove streaming spline
+     */
+    void removeStreamingSpline(uint32_t splineId);
+    
+    /**
+     * Get streaming spline
+     */
+    StreamingSpline* getStreamingSpline(uint32_t splineId);
+    
+    /**
+     * Add spline streaming source (entity following a spline)
+     */
+    uint32_t addSplineStreamingSource(uint32_t splineId, float initialPosition = 0.0f);
+    
+    /**
+     * Update spline streaming source position
+     */
+    void updateSplineStreamingSource(uint32_t sourceId, float position, float velocity = 0.0f);
+    
+    /**
+     * Evaluate spline at parameter t (0-1)
+     */
+    glm::vec3 evaluateSpline(uint32_t splineId, float t) const;
+    
+    /**
+     * Get tangent at parameter t
+     */
+    glm::vec3 evaluateSplineTangent(uint32_t splineId, float t) const;
+    
+    /**
+     * Find closest point on spline to world position
+     */
+    float findClosestPointOnSpline(uint32_t splineId, const glm::vec3& worldPos) const;
+    
+    /**
+     * Get streaming distance at spline position
+     */
+    float getSplineStreamingDistance(uint32_t splineId, float t) const;
+    
+    /**
      * Add actor to cell
      */
     void addActorToCell(glm::ivec2 cellCoord, const CellActor& actor);
@@ -350,6 +471,15 @@ private:
     
     void updateHLODVisibility();
     
+    // Spline helpers
+    void resampleSpline(StreamingSpline& spline);
+    glm::vec3 evaluateCatmullRom(const std::vector<SplinePoint>& points, float t, bool closed) const;
+    glm::vec3 evaluateBezier(const std::vector<SplinePoint>& points, float t) const;
+    glm::vec3 evaluateHermite(const std::vector<SplinePoint>& points, float t) const;
+    void updateSplineStreamingSources();
+    void collectCellsAlongSpline(const StreamingSpline& spline, float t, float lookAhead, 
+                                  std::vector<uint32_t>& outCells) const;
+    
     VulkanContext* context_ = nullptr;
     AsyncPhysics* physics_ = nullptr;
     LevelStreamingConfig config_;
@@ -369,6 +499,12 @@ private:
     // Streaming volumes
     std::unordered_map<uint32_t, StreamingVolume> streamingVolumes_;
     uint32_t nextVolumeId_ = 1;
+    
+    // Streaming splines
+    std::unordered_map<uint32_t, StreamingSpline> streamingSplines_;
+    std::unordered_map<uint32_t, SplineStreamingSource> splineStreamingSources_;
+    uint32_t nextSplineId_ = 1;
+    uint32_t nextSplineSourceId_ = 1;
     
     // Streaming queue
     std::priority_queue<StreamingRequest> loadQueue_;
