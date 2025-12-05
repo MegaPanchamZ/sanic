@@ -74,7 +74,7 @@ public:
     ~Editor();
     
     // Lifecycle
-    bool initialize(VulkanContext* vulkanContext, Sanic::World* world);
+    bool initialize(::VulkanContext* vulkanContext, Sanic::World* world);
     void shutdown();
     
     // ImGui Vulkan resources
@@ -119,7 +119,7 @@ public:
     // Scene access
     Sanic::World* getWorld() { return world_; }
     const Sanic::World* getWorld() const { return world_; }
-    VulkanContext* getVulkanContext() { return vulkanContext_; }
+    ::VulkanContext* getVulkanContext() { return vulkanContext_; }
     
     // Editor renderer for viewport
     EditorRenderer* getEditorRenderer() { return editorRenderer_.get(); }
@@ -140,11 +140,16 @@ public:
     void saveScene();
     void saveSceneAs();
     
+    // Project operations
+    void openProject(const std::string& path = "");
+    const std::string& getProjectRoot() const { return projectRootPath_; }
+    
     // Static access
     static Editor* getInstance() { return instance_; }
     
 private:
     void setupImGuiStyle();
+    friend void ApplyUnrealTheme(); // Allow theme to access internals if needed (though not currently)
     void setupDocking();
     void drawMainMenuBar();
     void drawToolbar();
@@ -161,7 +166,7 @@ private:
     
     static Editor* instance_;
     
-    VulkanContext* vulkanContext_ = nullptr;
+    ::VulkanContext* vulkanContext_ = nullptr;
     Sanic::World* world_ = nullptr;
     
     EditorConfig config_;
@@ -195,6 +200,9 @@ private:
     // Scene state
     std::string currentScenePath_;
     bool sceneDirty_ = false;
+    
+    // Project state
+    std::string projectRootPath_ = "assets";
     
     // Debug
     bool showDemoWindow_ = false;

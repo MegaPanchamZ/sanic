@@ -742,7 +742,10 @@ void Viewport::drawSelectionOutlines() {
         
         ImVec2 screenPos(
             viewportPos_.x + (ndcPos.x * 0.5f + 0.5f) * viewportSize_.x,
-            viewportPos_.y + (1.0f - (ndcPos.y * 0.5f + 0.5f)) * viewportSize_.y
+            // Vulkan NDC Y is -1 at top, +1 at bottom. Screen Y is 0 at top, H at bottom.
+            // So -1 -> 0, +1 -> 1.
+            // Formula: (ndc.y + 1) * 0.5 maps [-1, 1] to [0, 1]
+            viewportPos_.y + (ndcPos.y * 0.5f + 0.5f) * viewportSize_.y
         );
         
         // Draw selection indicator (simple circle for now)

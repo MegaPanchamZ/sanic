@@ -46,6 +46,7 @@ public:
     const char* getName() const override { return "Asset Browser"; }
     
     // Navigation
+    void setRootPath(const std::string& path);
     void setCurrentPath(const std::string& path);
     const std::string& getCurrentPath() const { return currentPath_; }
     void navigateUp();

@@ -19,6 +19,9 @@ struct KeyBinding {
     int key = 0;
     int modifiers = 0;  // GLFW_MOD_CONTROL, GLFW_MOD_SHIFT, GLFW_MOD_ALT
     
+    KeyBinding() = default;
+    KeyBinding(int k, int m) : key(k), modifiers(m) {}
+    
     bool operator==(const KeyBinding& other) const {
         return key == other.key && modifiers == other.modifiers;
     }

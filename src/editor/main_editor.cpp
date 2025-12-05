@@ -19,6 +19,7 @@
 #include "panels/ConsolePanel.h"
 #include "panels/Menubar.h"
 #include "panels/Toolbar.h"
+#include "ProjectHub.h"
 
 #include "../engine/VulkanContext.h"
 #include "../engine/Renderer.h"
@@ -48,7 +49,11 @@ static std::unique_ptr<ECSManager> g_ecsManager;
 static std::chrono::high_resolution_clock::time_point g_lastFrameTime;
 static float g_deltaTime = 0.0f;
 
-bool initWindow(int width, int height, const char* title) {
+// Forward declarations
+void shutdown();
+void mainLoop();
+
+bool initWindow(int width, int height, const char* title, bool visible = true) {
     if (!glfwInit()) {
         std::cerr << "Failed to initialize GLFW" << std::endl;
         return false;
@@ -56,6 +61,8 @@ bool initWindow(int width, int height, const char* title) {
     
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    // Allow creating the window hidden initially for the Project Hub workflow
+    glfwWindowHint(GLFW_VISIBLE, visible ? GLFW_TRUE : GLFW_FALSE);
     
     g_window = glfwCreateWindow(width, height, title, nullptr, nullptr);
     if (!g_window) {
@@ -239,7 +246,7 @@ void mainLoop() {
         int width, height;
         glfwGetFramebufferSize(g_window, &width, &height);
         if (width > 0 && height > 0) {
-            // Update swapchain if needed
+            // Update swapchain if needed (implementation usually handles this in VulkanContext)
         }
         
         // Begin ImGui frame
@@ -274,47 +281,63 @@ void mainLoop() {
 }
 
 int main(int argc, char* argv[]) {
-    std::cout << "Sanic Editor v0.1" << std::endl;
-    std::cout << "=================" << std::endl;
-    
-    // Initialize window
-    if (!initWindow(1920, 1080, "Sanic Editor")) {
+    // 1. Initialize main window (Start hidden to allow Project Hub to run first)
+    if (!initWindow(1920, 1080, "Sanic Editor", false)) {
         return -1;
     }
     
-    // Initialize Vulkan
+    // 2. Initialize Vulkan
+    // Necessary before ProjectHub if Hub uses GPU, otherwise serves main editor
     if (!initVulkan()) {
         shutdown();
         return -1;
     }
     
-    // Initialize renderer
-    if (!initRenderer()) {
+    // 3. Run Project Hub
+    // This allows the user to select or create a project before the full editor loads
+    ProjectHub projectHub;
+    
+    // Note: Assuming ProjectHub::run() handles its own loop or uses a temporary window context
+    // and returns true if a valid project was selected.
+    if (!projectHub.run()) {
+        // User cancelled or closed hub without selecting a project
         shutdown();
-        return -1;
+        return 0;
     }
     
-    // Initialize ECS
+    std::string projectPath = projectHub.getSelectedProjectPath();
+    
+    // 4. Initialization successful, show main window
+    glfwShowWindow(g_window);
+    
+    // 5. Initialize Engine Components
     if (!initECS()) {
+        std::cerr << "Failed to initialize ECS" << std::endl;
+        shutdown();
+        return -1;
+    }
+
+    if (!initRenderer()) {
+        std::cerr << "Failed to initialize Renderer" << std::endl;
         shutdown();
         return -1;
     }
     
-    // Initialize editor
+    // 6. Initialize Editor UI
     if (!initEditor()) {
+        std::cerr << "Failed to initialize Editor" << std::endl;
         shutdown();
         return -1;
     }
     
-    std::cout << "Editor initialized successfully" << std::endl;
+    // 7. Open the selected project
+    g_editor->openProject(projectPath);
     
-    // Run main loop
+    // 8. Start Main Loop
     mainLoop();
     
-    // Cleanup
+    // 9. Cleanup
     shutdown();
-    
-    std::cout << "Editor shutdown complete" << std::endl;
     
     return 0;
 }

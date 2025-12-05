@@ -7,6 +7,7 @@
 #include "AssetBrowser.h"
 #include "../Editor.h"
 #include <imgui.h>
+#include <nfd.h>
 #include <algorithm>
 
 namespace Sanic::Editor {
@@ -26,7 +27,11 @@ void AssetBrowser::initialize(Editor* editor) {
     typeFilters_[AssetType::Prefab] = true;
     
     // Set root path to assets folder
-    rootPath_ = "assets";
+    if (editor_->getProjectRoot().empty()) {
+        rootPath_ = "assets";
+    } else {
+        rootPath_ = editor_->getProjectRoot();
+    }
     currentPath_ = rootPath_;
     
     refresh();
@@ -127,7 +132,7 @@ void AssetBrowser::drawToolbar() {
     
     // Import button
     if (ImGui::Button("Import")) {
-        // TODO: Open file dialog
+        importAsset("");
     }
 }
 
@@ -414,6 +419,14 @@ void AssetBrowser::drawAssetList(const AssetEntry& entry) {
     ImGui::TextDisabled("-");
 }
 
+void AssetBrowser::setRootPath(const std::string& path) {
+    rootPath_ = path;
+    currentPath_ = rootPath_;
+    pathHistory_.clear();
+    historyIndex_ = -1;
+    refresh();
+}
+
 void AssetBrowser::setCurrentPath(const std::string& path) {
     currentPath_ = path;
     scanDirectory(currentPath_);
@@ -550,7 +563,63 @@ void AssetBrowser::openAsset(const AssetEntry& entry) {
 }
 
 void AssetBrowser::importAsset(const std::string& path) {
-    // TODO: Asset import pipeline
+    // If path is provided, use it (drag & drop from OS)
+    // Otherwise open dialog
+    
+    std::vector<std::string> filesToImport;
+    
+    if (path.empty()) {
+        const nfdpathset_t* pathSet = nullptr;
+        nfdresult_t result = NFD_OpenDialogMultiple(&pathSet, nullptr, 0, nullptr);
+        
+        if (result == NFD_OKAY) {
+            nfdpathsetsize_t count;
+            NFD_PathSet_GetCount(pathSet, &count);
+            
+            for (size_t i = 0; i < count; ++i) {
+                nfdchar_t* outPath;
+                NFD_PathSet_GetPath(pathSet, (nfdpathsetsize_t)i, &outPath);
+                filesToImport.push_back(outPath);
+            }
+            
+            NFD_PathSet_Free(pathSet);
+        } else if (result == NFD_ERROR) {
+            // Error
+            return;
+        } else {
+            // Cancel
+            return;
+        }
+    } else {
+        filesToImport.push_back(path);
+    }
+    
+    // Copy files to current directory
+    int successCount = 0;
+    for (const auto& filePath : filesToImport) {
+        try {
+            std::filesystem::path source(filePath);
+            std::filesystem::path target = std::filesystem::path(currentPath_) / source.filename();
+            
+            // Don't overwrite existing files
+            if (std::filesystem::exists(target)) {
+                // Simple auto-rename: append _copy
+                // In a real engine we'd handle this better
+                std::string stem = source.stem().string();
+                std::string ext = source.extension().string();
+                target = std::filesystem::path(currentPath_) / (stem + "_copy" + ext);
+            }
+            
+            std::filesystem::copy_file(source, target);
+            successCount++;
+        } catch (const std::exception&) {
+            // Log error
+        }
+    }
+    
+    if (successCount > 0) {
+        refresh();
+    }
 }
 
 } // namespace Sanic::Editor

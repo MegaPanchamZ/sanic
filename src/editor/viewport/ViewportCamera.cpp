@@ -217,13 +217,21 @@ glm::mat4 ViewportCamera::getViewMatrix() const {
 }
 
 glm::mat4 ViewportCamera::getProjectionMatrix() const {
+    glm::mat4 proj;
     if (isPerspective_) {
-        return glm::perspective(glm::radians(fov_), aspectRatio_, nearPlane_, farPlane_);
+        proj = glm::perspective(glm::radians(fov_), aspectRatio_, nearPlane_, farPlane_);
     } else {
         float halfWidth = orthoSize_ * aspectRatio_;
         float halfHeight = orthoSize_;
-        return glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight, nearPlane_, farPlane_);
+        proj = glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight, nearPlane_, farPlane_);
     }
+    
+    // Vulkan clip space has inverted Y and half Z. 
+    // GLM is designed for OpenGL (Y up, -1 to 1 Z).
+    // We need to flip Y for Vulkan.
+    proj[1][1] *= -1;
+    
+    return proj;
 }
 
 glm::mat4 ViewportCamera::getViewProjectionMatrix() const {
@@ -232,9 +240,10 @@ glm::mat4 ViewportCamera::getViewProjectionMatrix() const {
 
 ViewportCamera::Ray ViewportCamera::screenToRay(const glm::vec2& screenPos, const glm::vec2& viewportSize) const {
     // Convert screen position to NDC
+    // Convert screen position to NDC (Vulkan: -1,-1 top-left to 1,1 bottom-right)
     glm::vec2 ndc;
     ndc.x = (screenPos.x / viewportSize.x) * 2.0f - 1.0f;
-    ndc.y = 1.0f - (screenPos.y / viewportSize.y) * 2.0f;  // Flip Y
+    ndc.y = (screenPos.y / viewportSize.y) * 2.0f - 1.0f;
     
     // Get inverse VP matrix
     glm::mat4 invVP = glm::inverse(getViewProjectionMatrix());

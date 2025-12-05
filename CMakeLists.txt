@@ -328,12 +328,14 @@ set(SOURCES
     src/editor/core/Selection.cpp
     src/editor/core/Shortcuts.cpp
     src/editor/core/UndoSystem.cpp
+    src/editor/core/EditorTheme.cpp
     # Editor Panels
     src/editor/panels/AssetBrowser.cpp
     src/editor/panels/ConsolePanel.cpp
     src/editor/panels/HierarchyPanel.cpp
     src/editor/panels/InspectorPanel.cpp
     src/editor/panels/Menubar.cpp
+    src/editor/panels/LandscapePanel.cpp
     src/editor/panels/Toolbar.cpp
     # Editor Viewport
     src/editor/viewport/Gizmo.cpp
@@ -409,6 +411,7 @@ target_link_libraries(SanicEngineLib PRIVATE
     meshoptimizer
     spirv-reflect
     nlohmann_json::nlohmann_json
+    nfd
     $<$<BOOL:${SHADERC_LIB}>:${SHADERC_LIB}>
 )
 
@@ -515,6 +518,8 @@ if(SANIC_BUILD_EDITOR)
         src/editor/core/UndoSystem.cpp
         src/editor/core/Commands.cpp
         src/editor/core/Shortcuts.cpp
+        src/editor/core/EditorTheme.cpp
+        src/editor/ProjectHub.cpp
         src/editor/viewport/Viewport.cpp
         src/editor/viewport/ViewportCamera.cpp
         src/editor/viewport/Gizmo.cpp
@@ -523,6 +528,7 @@ if(SANIC_BUILD_EDITOR)
         src/editor/panels/InspectorPanel.cpp
         src/editor/panels/AssetBrowser.cpp
         src/editor/panels/ConsolePanel.cpp
+        src/editor/panels/LandscapePanel.cpp
         src/editor/panels/Menubar.cpp
         src/editor/panels/Toolbar.cpp
         src/editor/widgets/PropertyWidgets.cpp

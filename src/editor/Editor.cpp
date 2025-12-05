@@ -11,7 +11,9 @@
 #include "panels/InspectorPanel.h"
 #include "panels/AssetBrowser.h"
 #include "panels/ConsolePanel.h"
+#include "panels/LandscapePanel.h"
 
+#include <nfd.h>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
@@ -30,6 +32,8 @@
 
 namespace Sanic::Editor {
 
+void ApplyUnrealTheme();
+
 Editor* Editor::instance_ = nullptr;
 
 Editor::Editor() {
@@ -42,7 +46,7 @@ Editor::~Editor() {
     }
 }
 
-bool Editor::initialize(VulkanContext* vulkanContext, Sanic::World* world) {
+bool Editor::initialize(::VulkanContext* vulkanContext, Sanic::World* world) {
     vulkanContext_ = vulkanContext;
     world_ = world;
     
@@ -55,28 +59,28 @@ bool Editor::initialize(VulkanContext* vulkanContext, Sanic::World* world) {
     loadConfig();
     
     // Register default shortcuts
-    shortcuts_->registerShortcut("Undo", {GLFW_KEY_Z, GLFW_MOD_CONTROL}, [this]() {
+    shortcuts_->registerShortcut("Undo", KeyBinding(GLFW_KEY_Z, GLFW_MOD_CONTROL), [this]() {
         if (undoSystem_->canUndo()) undoSystem_->undo();
     });
-    shortcuts_->registerShortcut("Redo", {GLFW_KEY_Y, GLFW_MOD_CONTROL}, [this]() {
+    shortcuts_->registerShortcut("Redo", KeyBinding(GLFW_KEY_Y, GLFW_MOD_CONTROL), [this]() {
         if (undoSystem_->canRedo()) undoSystem_->redo();
     });
-    shortcuts_->registerShortcut("Redo2", {GLFW_KEY_Z, GLFW_MOD_CONTROL | GLFW_MOD_SHIFT}, [this]() {
+    shortcuts_->registerShortcut("Redo2", KeyBinding(GLFW_KEY_Z, GLFW_MOD_CONTROL | GLFW_MOD_SHIFT), [this]() {
         if (undoSystem_->canRedo()) undoSystem_->redo();
     });
-    shortcuts_->registerShortcut("Save", {GLFW_KEY_S, GLFW_MOD_CONTROL}, [this]() {
+    shortcuts_->registerShortcut("Save", KeyBinding(GLFW_KEY_S, GLFW_MOD_CONTROL), [this]() {
         saveScene();
     });
-    shortcuts_->registerShortcut("SaveAs", {GLFW_KEY_S, GLFW_MOD_CONTROL | GLFW_MOD_SHIFT}, [this]() {
+    shortcuts_->registerShortcut("SaveAs", KeyBinding(GLFW_KEY_S, GLFW_MOD_CONTROL | GLFW_MOD_SHIFT), [this]() {
         saveSceneAs();
     });
-    shortcuts_->registerShortcut("Open", {GLFW_KEY_O, GLFW_MOD_CONTROL}, [this]() {
+    shortcuts_->registerShortcut("Open", KeyBinding(GLFW_KEY_O, GLFW_MOD_CONTROL), [this]() {
         openScene();
     });
-    shortcuts_->registerShortcut("New", {GLFW_KEY_N, GLFW_MOD_CONTROL}, [this]() {
+    shortcuts_->registerShortcut("New", KeyBinding(GLFW_KEY_N, GLFW_MOD_CONTROL), [this]() {
         newScene();
     });
-    shortcuts_->registerShortcut("Delete", {GLFW_KEY_DELETE, 0}, [this]() {
+    shortcuts_->registerShortcut("Delete", KeyBinding(GLFW_KEY_DELETE, 0), [this]() {
         auto& sel = getSelection();
         if (sel.hasSelection()) {
             for (Entity e : sel.getSelection()) {
@@ -85,7 +89,7 @@ bool Editor::initialize(VulkanContext* vulkanContext, Sanic::World* world) {
             sel.clearSelection();
         }
     });
-    shortcuts_->registerShortcut("Duplicate", {GLFW_KEY_D, GLFW_MOD_CONTROL}, [this]() {
+    shortcuts_->registerShortcut("Duplicate", KeyBinding(GLFW_KEY_D, GLFW_MOD_CONTROL), [this]() {
         // Duplicate selected entities
         auto& sel = getSelection();
         if (sel.hasSelection() && world_) {
@@ -100,13 +104,15 @@ bool Editor::initialize(VulkanContext* vulkanContext, Sanic::World* world) {
             }
         }
     });
-    shortcuts_->registerShortcut("SelectAll", {GLFW_KEY_A, GLFW_MOD_CONTROL}, [this]() {
+    shortcuts_->registerShortcut("SelectAll", KeyBinding(GLFW_KEY_A, GLFW_MOD_CONTROL), [this]() {
         if (world_) selection_->selectAll(*world_);
     });
-    shortcuts_->registerShortcut("Play", {GLFW_KEY_P, GLFW_MOD_CONTROL}, [this]() {
+    shortcuts_->registerShortcut("Play", KeyBinding(GLFW_KEY_P, GLFW_MOD_CONTROL), [this]() {
         if (mode_ == EditorMode::Edit) play();
         else stop();
     });
+    
+    return true;
     
     return true;
 }
@@ -248,6 +254,9 @@ void Editor::shutdownImGui() {
 void Editor::setupImGuiStyle() {
     ImGuiIO& io = ImGui::GetIO();
     ImGuiStyle& style = ImGui::GetStyle();
+    
+    // Apply Unreal Engine style theme
+    ApplyUnrealTheme();
     
     // ============================================
     // FONT SETUP - Anti-aliased, crisp fonts
@@ -518,6 +527,7 @@ void Editor::createDefaultPanels() {
     panels_.push_back(std::make_unique<InspectorPanel>());
     panels_.push_back(std::make_unique<AssetBrowser>());
     panels_.push_back(std::make_unique<ConsolePanel>());
+    panels_.push_back(std::make_unique<LandscapePanel>());
     
     // Initialize all panels
     for (auto& panel : panels_) {
@@ -632,6 +642,10 @@ void Editor::drawMainMenuBar() {
             }
             if (ImGui::MenuItem("Open Scene...", "Ctrl+O")) {
                 openScene();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Open Project...")) {
+                openProject();
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Save", "Ctrl+S")) {
@@ -1079,8 +1093,19 @@ void Editor::openScene(const std::string& path) {
     std::string scenePath = path;
     
     if (scenePath.empty()) {
-        // TODO: Show file dialog
-        return;
+        nfdchar_t* outPath = nullptr;
+        nfdfilteritem_t filterItem[1] = {{"Sanic Scene", "sanic,json"}};
+        nfdresult_t result = NFD_OpenDialog(&outPath, filterItem, 1, nullptr);
+        
+        if (result == NFD_OKAY) {
+            scenePath = outPath;
+            NFD_FreePath(outPath);
+        } else if (result == NFD_CANCEL) {
+            return;
+        } else {
+            showError("File dialog error: " + std::string(NFD_GetError()));
+            return;
+        }
     }
     
     // TODO: Load scene
@@ -1104,7 +1129,48 @@ void Editor::saveScene() {
 }
 
 void Editor::saveSceneAs() {
-    // TODO: Show file dialog
+    nfdchar_t* outPath = nullptr;
+    nfdfilteritem_t filterItem[1] = {{"Sanic Scene", "sanic"}};
+    nfdresult_t result = NFD_SaveDialog(&outPath, filterItem, 1, nullptr, "scene.sanic");
+    
+    if (result == NFD_OKAY) {
+        currentScenePath_ = outPath;
+        NFD_FreePath(outPath);
+        saveScene();
+    } else if (result == NFD_ERROR) {
+        showError("File dialog error: " + std::string(NFD_GetError()));
+    }
+}
+
+void Editor::openProject(const std::string& path) {
+    std::string projectPath = path;
+    
+    if (projectPath.empty()) {
+        nfdchar_t* outPath = nullptr;
+        nfdresult_t result = NFD_PickFolder(&outPath, nullptr);
+        
+        if (result == NFD_OKAY) {
+            projectPath = outPath;
+            NFD_FreePath(outPath);
+        } else if (result == NFD_CANCEL) {
+            return;
+        } else {
+            showError("Folder dialog error: " + std::string(NFD_GetError()));
+            return;
+        }
+    }
+    
+    projectRootPath_ = projectPath;
+    
+    // Update Asset Browser
+    if (auto* assetBrowser = getPanel<AssetBrowser>()) {
+        assetBrowser->setRootPath(projectRootPath_);
+    }
+    
+    // Reset scene
+    newScene();
+    
+    showNotification("Project opened: " + projectRootPath_);
 }
 
 void Editor::saveLayout() {
